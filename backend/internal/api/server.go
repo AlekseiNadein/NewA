@@ -45,6 +45,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/objects", s.withAuth(http.HandlerFunc(s.handleObjects)))
 	mux.Handle("/api/estimates", s.withAuth(http.HandlerFunc(s.handleEstimates)))
 	mux.Handle("/api/estimates/", s.withAuth(http.HandlerFunc(s.handleEstimateByID)))
+	mux.Handle("/api/gsn/base-info", s.withAuth(http.HandlerFunc(s.handleGSNBaseInfo)))
 	mux.Handle("/api/gsn/hierarchy", s.withAuth(http.HandlerFunc(s.handleGSNHierarchy)))
 	mux.Handle("/", s.static)
 
@@ -354,6 +355,26 @@ func (s *Server) handleGSNHierarchy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes": nodes,
 	})
+}
+
+func (s *Server) handleGSNBaseInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	info, err := s.gsn.BaseInfo(r.Context())
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn base info query failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to read GSN base info")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {

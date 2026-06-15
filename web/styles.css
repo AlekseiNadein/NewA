@@ -21,6 +21,7 @@ body {
   background: radial-gradient(circle at top left, #dce9ff, transparent 32rem), var(--bg);
   color: var(--text);
   font-family: Inter, Segoe UI, Arial, sans-serif;
+  font-size: 15px;
 }
 
 button,
@@ -32,12 +33,12 @@ textarea {
 
 button {
   border: 0;
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--primary);
   color: #fff;
   cursor: pointer;
   font-weight: 700;
-  padding: 0.8rem 1rem;
+  padding: 0.65rem 0.85rem;
   transition: background 0.15s ease, transform 0.15s ease;
 }
 
@@ -61,10 +62,10 @@ select,
 textarea {
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 9px;
   background: #fff;
   color: var(--text);
-  padding: 0.72rem 0.8rem;
+  padding: 0.58rem 0.7rem;
 }
 
 textarea {
@@ -73,9 +74,9 @@ textarea {
 
 label {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.28rem;
   color: var(--muted);
-  font-size: 0.92rem;
+  font-size: 0.88rem;
   font-weight: 700;
 }
 
@@ -89,7 +90,7 @@ p {
 .shell {
   width: min(1180px, calc(100% - 2rem));
   margin: 0 auto;
-  padding: 2rem 0;
+  padding: 1.4rem 0;
 }
 
 .hero {
@@ -97,27 +98,27 @@ p {
   align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 1.5rem;
+  margin-bottom: 1rem;
 }
 
 .hero h1 {
-  margin-bottom: 0.5rem;
-  font-size: clamp(2rem, 4vw, 4rem);
+  margin-bottom: 0.35rem;
+  font-size: clamp(1.75rem, 3.4vw, 3.4rem);
   letter-spacing: -0.04em;
 }
 
 .hero p {
   max-width: 700px;
   color: var(--muted);
-  font-size: 1.08rem;
+  font-size: 1rem;
 }
 
 .card {
   border: 1px solid var(--border);
-  border-radius: 22px;
+  border-radius: 18px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 24px 70px rgba(23, 45, 87, 0.08);
-  padding: 1.25rem;
+  padding: 1rem;
 }
 
 .login-card {
@@ -126,8 +127,8 @@ p {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 1rem;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 0.85rem;
   align-items: start;
 }
 
@@ -135,12 +136,12 @@ p {
   position: sticky;
   top: 1rem;
   display: grid;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .user-card {
   display: grid;
-  gap: 0.55rem;
+  gap: 0.45rem;
 }
 
 .user-card strong {
@@ -150,7 +151,7 @@ p {
 .main-nav,
 .nav-subitems {
   display: grid;
-  gap: 0.45rem;
+  gap: 0.32rem;
 }
 
 .nav-subitems {
@@ -180,8 +181,8 @@ p {
 }
 
 .nav-sublink {
-  font-size: 0.92rem;
-  padding: 0.65rem 0.8rem;
+  font-size: 0.88rem;
+  padding: 0.52rem 0.65rem;
 }
 
 .workspace {
@@ -189,7 +190,7 @@ p {
 }
 
 .section-view {
-  min-height: 520px;
+  min-height: 480px;
 }
 
 .layout {
@@ -201,8 +202,8 @@ p {
 .grid-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.85rem;
-  margin-bottom: 1.2rem;
+  gap: 0.7rem;
+  margin-bottom: 1rem;
 }
 
 .grid-form button {
@@ -212,11 +213,11 @@ p {
 .stack-form {
   display: grid;
   align-content: start;
-  gap: 0.85rem;
+  gap: 0.7rem;
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 14px;
   background: #fbfcff;
-  padding: 1rem;
+  padding: 0.8rem;
 }
 
 .stack-form h3 {
@@ -239,9 +240,9 @@ p {
 }
 
 .eyebrow {
-  margin-bottom: 0.35rem;
+  margin-bottom: 0.28rem;
   color: var(--primary);
-  font-size: 0.76rem;
+  font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -257,9 +258,9 @@ p {
   border-radius: 999px;
   background: #eef3ff;
   color: var(--primary-dark);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   font-weight: 800;
-  padding: 0.45rem 0.75rem;
+  padding: 0.34rem 0.62rem;
 }
 
 .demo-users {
@@ -279,12 +280,12 @@ p {
 .split {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  gap: 0.8rem;
 }
 
 .split.three {
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 1.2rem 0;
+  margin: 1rem 0;
 }
 
 .toolbar {
@@ -295,18 +296,29 @@ p {
   margin: 1rem 0;
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--text);
+}
+
+.check-row input {
+  width: auto;
+}
+
 .list,
 .estimate-list {
   display: grid;
-  gap: 0.65rem;
+  gap: 0.55rem;
 }
 
 .list-item,
 .estimate {
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 14px;
   background: #fbfcff;
-  padding: 0.85rem;
+  padding: 0.7rem;
 }
 
 .list-item strong,
@@ -345,14 +357,14 @@ p {
 
 .tree {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.65rem;
 }
 
 .tree-node {
   border: 1px solid var(--border);
-  border-radius: 16px;
+  border-radius: 14px;
   background: #fff;
-  padding: 0.85rem;
+  padding: 0.68rem;
 }
 
 .tree-node header {
@@ -365,14 +377,14 @@ p {
 .tree-title {
   display: flex;
   align-items: flex-start;
-  gap: 0.65rem;
+  gap: 0.5rem;
 }
 
 .tree-toggle,
 .tree-toggle-placeholder {
   flex: 0 0 auto;
-  width: 2rem;
-  height: 2rem;
+  width: 1.65rem;
+  height: 1.65rem;
 }
 
 .tree-toggle {
@@ -397,15 +409,28 @@ p {
   padding: 0.55rem 0.7rem;
 }
 
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+.micro-button {
+  border-radius: 8px;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.55rem;
+}
+
 .tree-node .danger {
   background: var(--danger);
 }
 
 .tree-children {
   display: grid;
-  gap: 0.7rem;
-  margin-top: 0.75rem;
-  padding-left: 1rem;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+  padding-left: 0.8rem;
   border-left: 2px solid var(--border);
 }
 
@@ -425,6 +450,24 @@ p {
   max-height: 58vh;
   overflow: auto;
   padding-right: 0.25rem;
+}
+
+.editor-content {
+  margin-top: 0.8rem;
+}
+
+.editor-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.editor-item {
+  display: grid;
+  gap: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fbfcff;
+  padding: 0.65rem;
 }
 
 .message {

@@ -54,6 +54,8 @@
               <button class="nav-sublink" data-base-tab="userPositions" type="button">Позиции пользователя</button>
             </div>
             <button class="nav-link" data-section="constructions" type="button">Стройки</button>
+            <button class="nav-link" data-section="editor" type="button">Редактор</button>
+            <div id="editorSubitems" class="nav-subitems hidden" data-subitems="editor"></div>
             <button class="nav-link" data-section="documents" type="button">Документы</button>
             <button class="nav-link" data-section="settings" type="button">Настройки</button>
           </nav>
@@ -66,10 +68,6 @@
             <p id="baseDescription" class="muted">
               Раздел для нормативной базы. На этом этапе показываем структуру раздела без загрузки нормативов.
             </p>
-            <div id="gsnToolbar" class="toolbar">
-              <button id="reloadGsnButton" type="button">Обновить иерархию</button>
-              <span id="gsnStatus" class="muted">Иерархия не загружена.</span>
-            </div>
             <div id="gsnTree" class="tree gsn-tree"></div>
           </section>
 
@@ -136,6 +134,16 @@
             <div id="constructionTree" class="tree"></div>
           </section>
 
+          <section id="editorSection" class="section-view card hidden">
+            <p class="eyebrow">Редактор</p>
+            <h2 id="editorTitle">Буфер</h2>
+            <p id="editorDescription" class="muted">Сессионный буфер для элементов, добавленных из базы ГСН-2022.</p>
+            <div class="toolbar">
+              <button id="createEditorEstimateButton" type="button">Создать новую смету</button>
+            </div>
+            <div id="editorContent" class="editor-content"></div>
+          </section>
+
           <section id="documentsSection" class="section-view card hidden">
             <p class="eyebrow">Документы</p>
             <h2>Документы</h2>
@@ -145,7 +153,10 @@
           <section id="settingsSection" class="section-view card hidden">
             <p class="eyebrow">Настройки</p>
             <h2>Настройки</h2>
-            <p class="muted">Раздел пока не прорабатываем.</p>
+            <label class="check-row">
+              <input id="showHierarchyCodeToggle" type="checkbox" />
+              Отображать шифр иерархии
+            </label>
           </section>
         </section>
       </section>

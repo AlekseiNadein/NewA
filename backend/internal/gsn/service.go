@@ -23,6 +23,11 @@ type Node struct {
 	HasChildren bool   `json:"hasChildren"`
 }
 
+type BaseInfo struct {
+	Edition string `json:"edition"`
+	Version string `json:"version"`
+}
+
 type Service struct {
 	db *sql.DB
 }
@@ -112,4 +117,41 @@ func (s *Service) ListChildren(ctx context.Context, parentCode string, limit int
 	}
 
 	return nodes, nil
+}
+
+func (s *Service) BaseInfo(ctx context.Context) (BaseInfo, error) {
+	if !s.Configured() {
+		return BaseInfo{}, ErrNotConfigured
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT param_key, param_value
+		FROM gsn.base_info_params
+		WHERE param_key IN ($1, $2)
+	`, "Редакция СНБ", "Версия")
+	if err != nil {
+		return BaseInfo{}, fmt.Errorf("query gsn base info: %w", err)
+	}
+	defer rows.Close()
+
+	var info BaseInfo
+	for rows.Next() {
+		var key string
+		var value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return BaseInfo{}, fmt.Errorf("scan gsn base info: %w", err)
+		}
+
+		switch key {
+		case "Редакция СНБ":
+			info.Edition = value
+		case "Версия":
+			info.Version = value
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return BaseInfo{}, fmt.Errorf("read gsn base info: %w", err)
+	}
+
+	return info, nil
 }

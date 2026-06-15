@@ -9,6 +9,35 @@ CREATE TABLE IF NOT EXISTS gsn.import_batches (
     imported_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS gsn.base_info (
+    code TEXT PRIMARY KEY,
+    source_file TEXT NOT NULL,
+    line_no INTEGER NOT NULL,
+    raw_line TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gsn.base_info_params (
+    base_code TEXT NOT NULL REFERENCES gsn.base_info(code) ON DELETE CASCADE,
+    param_key TEXT NOT NULL,
+    param_value TEXT NOT NULL DEFAULT '',
+    ordinal INTEGER NOT NULL,
+    PRIMARY KEY (base_code, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gsn_base_info_params_key
+    ON gsn.base_info_params(param_key);
+
+CREATE OR REPLACE VIEW gsn.base_info_json AS
+SELECT
+    bi.code,
+    bi.source_file,
+    bi.line_no,
+    jsonb_object_agg(bip.param_key, bip.param_value ORDER BY bip.ordinal) AS params,
+    bi.raw_line
+FROM gsn.base_info bi
+JOIN gsn.base_info_params bip ON bip.base_code = bi.code
+GROUP BY bi.code, bi.source_file, bi.line_no, bi.raw_line;
+
 CREATE TABLE IF NOT EXISTS gsn.hierarchy (
     code TEXT PRIMARY KEY,
     parent_code TEXT REFERENCES gsn.hierarchy(code) ON DELETE SET NULL,

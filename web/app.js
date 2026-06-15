@@ -8,6 +8,12 @@ const state = {
   objects: [],
   estimates: [],
   gsnLoaded: false,
+  gsnBaseInfoLoaded: false,
+  gsnBaseInfo: null,
+  showHierarchyCode: localStorage.getItem("nav_show_hierarchy_code") === "true",
+  editorTab: sessionStorage.getItem("nav_editor_tab") || "buffer",
+  buffer: readSessionJSON("nav_editor_buffer", []),
+  openEstimates: readSessionJSON("nav_editor_estimates", []),
 };
 
 const defaultItems = [
@@ -33,14 +39,18 @@ const els = {
   baseSubLinks: document.querySelectorAll("[data-base-tab]"),
   baseSection: document.querySelector("#baseSection"),
   constructionsSection: document.querySelector("#constructionsSection"),
+  editorSection: document.querySelector("#editorSection"),
   documentsSection: document.querySelector("#documentsSection"),
   settingsSection: document.querySelector("#settingsSection"),
+  editorSubitems: document.querySelector("#editorSubitems"),
+  editorTitle: document.querySelector("#editorTitle"),
+  editorDescription: document.querySelector("#editorDescription"),
+  createEditorEstimateButton: document.querySelector("#createEditorEstimateButton"),
+  editorContent: document.querySelector("#editorContent"),
   baseTitle: document.querySelector("#baseTitle"),
   baseDescription: document.querySelector("#baseDescription"),
-  gsnToolbar: document.querySelector("#gsnToolbar"),
-  reloadGsnButton: document.querySelector("#reloadGsnButton"),
-  gsnStatus: document.querySelector("#gsnStatus"),
   gsnTree: document.querySelector("#gsnTree"),
+  showHierarchyCodeToggle: document.querySelector("#showHierarchyCodeToggle"),
   constructionForm: document.querySelector("#constructionForm"),
   objectForm: document.querySelector("#objectForm"),
   estimateForm: document.querySelector("#estimateForm"),
@@ -158,11 +168,27 @@ els.estimateForm.addEventListener("submit", async (event) => {
 
 els.resetEstimateForm.addEventListener("click", resetEstimateForm);
 
-els.reloadGsnButton.addEventListener("click", () => {
+els.showHierarchyCodeToggle.checked = state.showHierarchyCode;
+els.showHierarchyCodeToggle.addEventListener("change", () => {
+  state.showHierarchyCode = els.showHierarchyCodeToggle.checked;
+  localStorage.setItem("nav_show_hierarchy_code", String(state.showHierarchyCode));
   loadGSNRoot({ force: true });
+  renderEditor();
 });
 
 els.gsnTree.addEventListener("click", async (event) => {
+  const bufferButton = event.target.closest("[data-gsn-buffer]");
+  if (bufferButton) {
+    addNodeToBuffer(decodeNodeAction(bufferButton.dataset.gsnBuffer));
+    return;
+  }
+
+  const estimateButton = event.target.closest("[data-gsn-estimate]");
+  if (estimateButton) {
+    addNodeToOnlyEstimate(decodeNodeAction(estimateButton.dataset.gsnEstimate));
+    return;
+  }
+
   const button = event.target.closest("[data-gsn-toggle]");
   if (!button) {
     return;
@@ -194,6 +220,22 @@ els.gsnTree.addEventListener("click", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+els.editorSubitems.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-editor-tab]");
+  if (!button) {
+    return;
+  }
+
+  state.editorTab = button.dataset.editorTab;
+  sessionStorage.setItem("nav_editor_tab", state.editorTab);
+  state.section = "editor";
+  renderSections();
+});
+
+els.createEditorEstimateButton.addEventListener("click", () => {
+  createEditorEstimate();
 });
 
 async function loadApp() {
@@ -255,6 +297,7 @@ function renderSections() {
   const sectionMap = {
     base: els.baseSection,
     constructions: els.constructionsSection,
+    editor: els.editorSection,
     documents: els.documentsSection,
     settings: els.settingsSection,
   };
@@ -271,21 +314,63 @@ function renderSections() {
   els.baseSubLinks.forEach((button) => {
     button.classList.toggle("active", button.dataset.baseTab === state.baseTab);
   });
+  els.editorSubitems.classList.toggle("hidden", state.section !== "editor");
+  renderEditorSubitems();
 
-  if (state.baseTab === "gsn") {
-    els.baseTitle.textContent = "ГСН-2022";
-    els.baseDescription.textContent =
-      "Иерархия нормативной базы из PostgreSQL-схемы gsn.hierarchy.";
-    els.gsnToolbar.classList.remove("hidden");
+  if (state.section === "base" && state.baseTab === "gsn") {
+    renderGSNBaseInfo();
     els.gsnTree.classList.remove("hidden");
+    loadGSNBaseInfo();
     loadGSNRoot();
-  } else {
+  } else if (state.section === "base") {
     els.baseTitle.textContent = "Позиции пользователя";
     els.baseDescription.textContent =
       "Здесь будут пользовательские позиции, которые пользователь сможет применять в сметах.";
-    els.gsnToolbar.classList.add("hidden");
     els.gsnTree.classList.add("hidden");
   }
+
+  if (state.section === "editor") {
+    renderEditor();
+  }
+}
+
+function renderEditorSubitems() {
+  const estimateButtons = state.openEstimates
+    .map(
+      (estimate) => `
+        <button class="nav-sublink ${state.editorTab === estimate.id ? "active" : ""}" data-editor-tab="${estimate.id}" type="button">
+          ${escapeHTML(estimate.title)}
+        </button>
+      `,
+    )
+    .join("");
+
+  els.editorSubitems.innerHTML = `
+    <button class="nav-sublink ${state.editorTab === "buffer" ? "active" : ""}" data-editor-tab="buffer" type="button">Буфер</button>
+    ${estimateButtons}
+  `;
+}
+
+async function loadGSNBaseInfo() {
+  if (!state.token || state.gsnBaseInfoLoaded) {
+    return;
+  }
+
+  try {
+    state.gsnBaseInfo = await api("/api/gsn/base-info");
+    state.gsnBaseInfoLoaded = true;
+    renderGSNBaseInfo();
+  } catch (error) {
+    state.gsnBaseInfoLoaded = false;
+    els.baseTitle.textContent = "ГСН-2022";
+    els.baseDescription.textContent = error.message;
+  }
+}
+
+function renderGSNBaseInfo() {
+  const info = state.gsnBaseInfo;
+  els.baseTitle.textContent = info?.edition || "ГСН-2022";
+  els.baseDescription.textContent = info?.version ? `Версия: ${info.version}` : "Версия: -";
 }
 
 async function loadGSNRoot(options = {}) {
@@ -296,21 +381,16 @@ async function loadGSNRoot(options = {}) {
     return;
   }
 
-  els.gsnStatus.textContent = "Загрузка иерархии...";
   els.gsnTree.innerHTML = "";
 
   try {
     const nodes = await fetchGSNChildren("");
     state.gsnLoaded = true;
-    els.gsnStatus.textContent = nodes.length
-      ? `Загружено элементов верхнего уровня: ${nodes.length}`
-      : "Верхний уровень иерархии пуст.";
     els.gsnTree.innerHTML = nodes.length
       ? nodes.map(renderGSNNode).join("")
       : `<p class="muted">Нет данных для отображения.</p>`;
   } catch (error) {
     state.gsnLoaded = false;
-    els.gsnStatus.textContent = "Иерархия не загружена.";
     els.gsnTree.innerHTML = `<p class="muted">${escapeHTML(error.message)}</p>`;
   }
 }
@@ -329,13 +409,19 @@ function renderGSNNode(node) {
   const toggle = node.hasChildren
     ? `<button class="tree-toggle" data-gsn-toggle="${escapeHTML(node.code)}" type="button">+</button>`
     : `<span class="tree-toggle-placeholder"></span>`;
-  const meta = [
-    `Уровень ${node.level}`,
-    node.unit ? `Ед. изм.: ${escapeHTML(node.unit)}` : "",
-    node.recordCount ? `Норм: ${node.recordCount}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const encodedNode = encodeNodeAction(node);
+  const actions = !node.hasChildren
+    ? `
+      <div class="node-actions">
+        <button class="micro-button secondary" data-gsn-buffer="${encodedNode}" type="button">В буфер</button>
+        ${
+          state.openEstimates.length === 1
+            ? `<button class="micro-button" data-gsn-estimate="${encodedNode}" type="button">В смету</button>`
+            : ""
+        }
+      </div>
+    `
+    : "";
 
   return `
     <article class="tree-node gsn-node">
@@ -343,15 +429,124 @@ function renderGSNNode(node) {
         <div class="tree-title">
           ${toggle}
           <div>
-            <strong>${escapeHTML(node.code)} ${escapeHTML(node.name || "")}</strong>
-            <p class="muted">${meta}</p>
-            ${node.normList ? `<p class="muted">Перечень норм: ${escapeHTML(node.normList)}</p>` : ""}
+            <strong>${escapeHTML(gsnNodeTitle(node))}</strong>
+            ${actions}
           </div>
         </div>
       </header>
       <div class="tree-children hidden"></div>
     </article>
   `;
+}
+
+function renderEditor() {
+  if (state.editorTab !== "buffer" && !state.openEstimates.some((estimate) => estimate.id === state.editorTab)) {
+    state.editorTab = "buffer";
+    sessionStorage.setItem("nav_editor_tab", state.editorTab);
+  }
+
+  renderEditorSubitems();
+  if (state.editorTab === "buffer") {
+    els.editorTitle.textContent = "Буфер";
+    els.editorDescription.textContent = "Сессионный буфер для элементов, добавленных из базы ГСН-2022.";
+    els.editorContent.innerHTML = state.buffer.length
+      ? renderEditorItems(state.buffer, "Буфер пока пуст.")
+      : `<p class="muted">Буфер пока пуст.</p>`;
+    return;
+  }
+
+  const estimate = state.openEstimates.find((item) => item.id === state.editorTab);
+  els.editorTitle.textContent = estimate.title;
+  els.editorDescription.textContent = "Сессионная смета редактора. Пока хранится только в текущей сессии браузера.";
+  els.editorContent.innerHTML = estimate.items.length
+    ? renderEditorItems(estimate.items, "В смете пока нет позиций.")
+    : `<p class="muted">В смете пока нет позиций.</p>`;
+}
+
+function renderEditorItems(items) {
+  return `
+    <div class="editor-list">
+      ${items
+        .map(
+          (item) => `
+            <article class="editor-item">
+              <strong>${escapeHTML(editorItemTitle(item))}</strong>
+              ${item.unit ? `<span class="muted">Ед. изм.: ${escapeHTML(item.unit)}</span>` : ""}
+            </article>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function createEditorEstimate() {
+  const estimate = {
+    id: `session_est_${Date.now()}`,
+    title: `Смета ${state.openEstimates.length + 1}`,
+    items: [],
+  };
+  state.openEstimates.push(estimate);
+  state.editorTab = estimate.id;
+  state.gsnLoaded = false;
+  saveEditorState();
+  state.section = "editor";
+  renderSections();
+  showMessage("Новая смета открыта в редакторе", "ok");
+}
+
+function addNodeToBuffer(node) {
+  state.buffer.push(editorItemFromNode(node));
+  saveEditorState();
+  renderEditor();
+  showMessage("Позиция добавлена в буфер", "ok");
+}
+
+function addNodeToOnlyEstimate(node) {
+  if (state.openEstimates.length !== 1) {
+    return;
+  }
+
+  state.openEstimates[0].items.push(editorItemFromNode(node));
+  saveEditorState();
+  renderEditor();
+  showMessage("Позиция добавлена в смету", "ok");
+}
+
+function editorItemFromNode(node) {
+  return {
+    code: node.code,
+    name: node.name || "",
+    unit: node.unit || "",
+  };
+}
+
+function saveEditorState() {
+  sessionStorage.setItem("nav_editor_buffer", JSON.stringify(state.buffer));
+  sessionStorage.setItem("nav_editor_estimates", JSON.stringify(state.openEstimates));
+  sessionStorage.setItem("nav_editor_tab", state.editorTab);
+}
+
+function gsnNodeTitle(node) {
+  return state.showHierarchyCode ? `${node.code} ${node.name || ""}` : node.name || node.code;
+}
+
+function editorItemTitle(item) {
+  return state.showHierarchyCode ? `${item.code} ${item.name || ""}` : item.name || item.code;
+}
+
+function encodeNodeAction(node) {
+  return encodeURIComponent(
+    JSON.stringify({
+      code: node.code,
+      name: node.name || "",
+      unit: node.unit || "",
+    }),
+  );
+}
+
+function decodeNodeAction(value) {
+  return JSON.parse(decodeURIComponent(value));
 }
 
 function renderConstructionForms() {
@@ -503,6 +698,15 @@ function resetEstimateForm() {
 function objectPath(object) {
   const construction = state.constructions.find((item) => item.id === object.constructionId);
   return construction ? `${construction.name} / ${object.name}` : object.name;
+}
+
+function readSessionJSON(key, fallback) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 async function api(path, options = {}) {

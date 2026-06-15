@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_SQL = REPO_ROOT / "db" / "gsn_schema.sql"
 
 SYSTEM_FILES = {
+    "00~f.txt",
     "00~hierarchy.txt",
     "00~nsi.txt",
     "00~resurs.txt",
@@ -352,6 +353,46 @@ def parse_amen(source: Path) -> list[dict[str, object]]:
     return rows
 
 
+def parse_base_info(source: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    info_rows: list[dict[str, object]] = []
+    param_rows: list[dict[str, object]] = []
+    path = source / "00~f.txt"
+    if not path.exists():
+        return info_rows, param_rows
+
+    for line_no, line in enumerate(read_lines(path), start=1):
+        fields = split_record(line)
+        if not fields:
+            continue
+        code = fields[0].split("(", 1)[0].strip()
+        if not code:
+            continue
+        info_rows.append(
+            {
+                "code": code,
+                "source_file": path.name,
+                "line_no": line_no,
+                "raw_line": line,
+            }
+        )
+        for ordinal, field in enumerate(fields[1:], start=1):
+            if "=" in field:
+                param_key, param_value = field.split("=", 1)
+            else:
+                param_key, param_value = field, ""
+            param_key = param_key.strip()
+            if param_key:
+                param_rows.append(
+                    {
+                        "base_code": code,
+                        "param_key": param_key,
+                        "param_value": param_value.strip(),
+                        "ordinal": ordinal,
+                    }
+                )
+    return info_rows, param_rows
+
+
 def write_load_sql(out: Path) -> Path:
     def sql_path(name: str) -> str:
         return str((out / name).resolve()).replace("\\", "/")
@@ -363,8 +404,11 @@ def write_load_sql(out: Path) -> Path:
                 "BEGIN;",
                 "TRUNCATE gsn.record_amendments, gsn.amendment_impacts, gsn.amendments,",
                 "    gsn.nsi, gsn.record_resources, gsn.records,",
-                "    gsn.hierarchy_record_refs, gsn.hierarchy, gsn.import_batches CASCADE;",
+                "    gsn.hierarchy_record_refs, gsn.hierarchy,",
+                "    gsn.base_info_params, gsn.base_info, gsn.import_batches CASCADE;",
                 rf"\copy gsn.import_batches(id,source_path,prepared_path,imported_at) FROM '{sql_path('import_batches.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+                rf"\copy gsn.base_info(code,source_file,line_no,raw_line) FROM '{sql_path('base_info.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+                rf"\copy gsn.base_info_params(base_code,param_key,param_value,ordinal) FROM '{sql_path('base_info_params.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.hierarchy(code,parent_code,line_no,level,name,unit,raw_norm_list,raw_line) FROM '{sql_path('hierarchy.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.hierarchy_record_refs(hierarchy_code,record_code,ordinal) FROM '{sql_path('hierarchy_record_refs.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.records(code,source_file,line_no,original_code,determinant,cost_indicators,name,unit,mass,resource_list,record_kind,raw_line) FROM '{sql_path('records.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
@@ -399,6 +443,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     hierarchy, hierarchy_refs = parse_hierarchy(source)
+    base_info, base_info_params = parse_base_info(source)
     records, record_resources, duplicates = parse_records(source)
     nsi = parse_nsi(source)
     amendments, amendment_impacts = parse_ppr(source)
@@ -422,6 +467,8 @@ def main() -> None:
             }
         ],
     )
+    write_tsv(out / "base_info.tsv", ["code", "source_file", "line_no", "raw_line"], base_info)
+    write_tsv(out / "base_info_params.tsv", ["base_code", "param_key", "param_value", "ordinal"], base_info_params)
     write_tsv(out / "hierarchy.tsv", ["code", "parent_code", "line_no", "level", "name", "unit", "raw_norm_list", "raw_line"], hierarchy)
     write_tsv(out / "hierarchy_record_refs.tsv", ["hierarchy_code", "record_code", "ordinal"], hierarchy_refs)
     write_tsv(
@@ -453,7 +500,7 @@ def main() -> None:
     load_sql = write_load_sql(out)
     print(f"Generated TSV files in: {out}")
     print(f"Generated psql load script: {load_sql}")
-    print(f"Rows: hierarchy={len(hierarchy)}, records={len(records)}, resources={len(record_resources)}, nsi={len(nsi)}, amendments={len(amendments)}, incidences={len(record_amendments)}")
+    print(f"Rows: base_info={len(base_info)}, base_info_params={len(base_info_params)}, hierarchy={len(hierarchy)}, records={len(records)}, resources={len(record_resources)}, nsi={len(nsi)}, amendments={len(amendments)}, incidences={len(record_amendments)}")
     print(f"Missing amendment dictionary records referenced by amen: {len(missing_amendments)}")
 
     if args.load:
