@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NAV SaaS MVP</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">MVP SaaS platform</p>
+          <h1>Компании, пользователи, JWT и сметы</h1>
+          <p>
+            Первый вертикальный срез по схеме: browser UI -> backend -> auth/JWT -> storage.
+          </p>
+        </div>
+        <button id="logoutButton" class="secondary hidden">Выйти</button>
+      </section>
+
+      <section id="loginView" class="card login-card">
+        <h2>Вход</h2>
+        <p class="muted">Демо-аккаунты создаются автоматически при первом запуске.</p>
+        <form id="loginForm" class="grid-form">
+          <label>
+            Email
+            <input name="email" type="email" value="admin@example.com" autocomplete="username" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" value="admin123" autocomplete="current-password" required />
+          </label>
+          <button type="submit">Войти</button>
+        </form>
+        <div class="demo-users">
+          <button data-demo="admin@example.com|admin123">super_admin</button>
+          <button data-demo="manager@example.com|manager123">company_admin</button>
+          <button data-demo="user@example.com|user123">user</button>
+        </div>
+      </section>
+
+      <section id="appView" class="hidden">
+        <div class="status card">
+          <div>
+            <p class="eyebrow">Текущий пользователь</p>
+            <h2 id="currentUser">-</h2>
+          </div>
+          <span id="currentRole" class="pill">-</span>
+        </div>
+
+        <div class="layout">
+          <section id="adminPanel" class="card hidden">
+            <h2>Admin FR</h2>
+            <p class="muted">Управление компаниями и пользователями внутри компании.</p>
+
+            <form id="companyForm" class="grid-form">
+              <label>
+                Новая компания
+                <input name="name" placeholder="Company name" />
+              </label>
+              <button type="submit">Создать компанию</button>
+            </form>
+
+            <form id="userForm" class="grid-form">
+              <label>
+                Компания
+                <select name="companyId"></select>
+              </label>
+              <label>
+                Имя
+                <input name="name" placeholder="User name" required />
+              </label>
+              <label>
+                Email
+                <input name="email" type="email" placeholder="user@company.test" required />
+              </label>
+              <label>
+                Роль
+                <select name="role">
+                  <option value="user">user</option>
+                  <option value="company_admin">company_admin</option>
+                  <option value="super_admin">super_admin</option>
+                </select>
+              </label>
+              <label>
+                Пароль
+                <input name="password" type="password" value="change-me" required />
+              </label>
+              <button type="submit">Создать пользователя</button>
+            </form>
+
+            <div class="split">
+              <div>
+                <h3>Компании</h3>
+                <div id="companiesList" class="list"></div>
+              </div>
+              <div>
+                <h3>Пользователи</h3>
+                <div id="usersList" class="list"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2>User FR</h2>
+            <p class="muted">Работа с предметной моделью: смета с позициями, статусом и итогом.</p>
+
+            <form id="estimateForm" class="grid-form">
+              <input name="id" type="hidden" />
+              <label>
+                Название
+                <input name="title" placeholder="Estimate title" required />
+              </label>
+              <label>
+                Статус
+                <select name="status">
+                  <option value="draft">draft</option>
+                  <option value="approved">approved</option>
+                  <option value="archived">archived</option>
+                </select>
+              </label>
+              <label class="full">
+                Описание
+                <textarea name="description" rows="2" placeholder="Short description"></textarea>
+              </label>
+              <label class="full">
+                Позиции JSON
+                <textarea name="items" rows="6" required></textarea>
+              </label>
+              <button type="submit">Сохранить смету</button>
+              <button id="resetEstimateForm" class="secondary" type="button">Новая смета</button>
+            </form>
+
+            <div id="estimatesList" class="estimate-list"></div>
+          </section>
+        </div>
+      </section>
+
+      <div id="message" class="message hidden"></div>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
