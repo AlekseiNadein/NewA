@@ -29,6 +29,23 @@ type User struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+type Construction struct {
+	ID        string    `json:"id"`
+	CompanyID string    `json:"companyId"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type ConstructionObject struct {
+	ID             string    `json:"id"`
+	CompanyID      string    `json:"companyId"`
+	ConstructionID string    `json:"constructionId"`
+	Name           string    `json:"name"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
 type EstimateStatus string
 
 const (
@@ -40,6 +57,7 @@ const (
 type Estimate struct {
 	ID          string         `json:"id"`
 	CompanyID   string         `json:"companyId"`
+	ObjectID    string         `json:"objectId"`
 	Title       string         `json:"title"`
 	Description string         `json:"description"`
 	Status      EstimateStatus `json:"status"`

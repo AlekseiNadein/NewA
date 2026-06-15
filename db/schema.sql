@@ -19,9 +19,32 @@ CREATE TABLE users (
 
 CREATE INDEX idx_users_company_id ON users(company_id);
 
+CREATE TABLE constructions (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_constructions_company_id ON constructions(company_id);
+
+CREATE TABLE construction_objects (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_construction_objects_company_id ON construction_objects(company_id);
+CREATE INDEX idx_construction_objects_construction_id ON construction_objects(construction_id);
+
 CREATE TABLE estimates (
     id TEXT PRIMARY KEY,
     company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    object_id TEXT NOT NULL REFERENCES construction_objects(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'archived')),
@@ -31,6 +54,7 @@ CREATE TABLE estimates (
 );
 
 CREATE INDEX idx_estimates_company_id ON estimates(company_id);
+CREATE INDEX idx_estimates_object_id ON estimates(object_id);
 
 CREATE TABLE estimate_items (
     id TEXT PRIMARY KEY,

@@ -8,19 +8,25 @@
 
 - Browser UI:
   - экран логина;
-  - административный блок для компаний и пользователей;
-  - пользовательский блок для CRUD смет.
+  - левое меню `База`, `Стройки`, `Документы`, `Настройки`;
+  - подраздел `ГСН-2022` с иерархией из PostgreSQL-схемы `gsn`;
+  - подраздел `Позиции пользователя`;
+  - рабочий раздел строек с иерархией `Стройка -> Объект -> Смета`.
 - Backend API на Go:
   - `/api/auth/login`;
   - `/api/me`;
   - `/api/companies`;
   - `/api/users`;
+  - `/api/constructions`;
+  - `/api/objects`;
   - `/api/estimates`.
 - Auth/account-контур:
   - пользователи;
   - роли `super_admin`, `company_admin`, `user`;
   - JWT на HMAC SHA-256.
 - Предметный модуль:
+  - стройка;
+  - объект;
   - смета;
   - позиции сметы;
   - статусы;
@@ -32,6 +38,13 @@
 ## Запуск
 
 ```powershell
+go run .\backend\cmd\server
+```
+
+Для отображения `База -> ГСН-2022` нужно указать строку подключения к PostgreSQL, куда загружена схема `db/gsn_schema.sql`:
+
+```powershell
+$env:APP_GSN_DATABASE_URL='postgres://user:password@localhost:5432/database?sslmode=disable'
 go run .\backend\cmd\server
 ```
 

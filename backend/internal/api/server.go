@@ -6,16 +6,19 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"nav-saas-mvp/backend/internal/auth"
 	"nav-saas-mvp/backend/internal/domain"
+	"nav-saas-mvp/backend/internal/gsn"
 	"nav-saas-mvp/backend/internal/store"
 )
 
 type Server struct {
 	store  *store.FileStore
 	auth   *auth.Service
+	gsn    *gsn.Service
 	static http.Handler
 }
 
@@ -23,10 +26,11 @@ type contextKey string
 
 const claimsKey contextKey = "claims"
 
-func NewServer(store *store.FileStore, authService *auth.Service, webDir string) *Server {
+func NewServer(store *store.FileStore, authService *auth.Service, gsnService *gsn.Service, webDir string) *Server {
 	return &Server{
 		store:  store,
 		auth:   authService,
+		gsn:    gsnService,
 		static: http.FileServer(http.Dir(webDir)),
 	}
 }
@@ -37,8 +41,11 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/me", s.withAuth(http.HandlerFunc(s.handleMe)))
 	mux.Handle("/api/companies", s.withAuth(http.HandlerFunc(s.handleCompanies)))
 	mux.Handle("/api/users", s.withAuth(http.HandlerFunc(s.handleUsers)))
+	mux.Handle("/api/constructions", s.withAuth(http.HandlerFunc(s.handleConstructions)))
+	mux.Handle("/api/objects", s.withAuth(http.HandlerFunc(s.handleObjects)))
 	mux.Handle("/api/estimates", s.withAuth(http.HandlerFunc(s.handleEstimates)))
 	mux.Handle("/api/estimates/", s.withAuth(http.HandlerFunc(s.handleEstimateByID)))
+	mux.Handle("/api/gsn/hierarchy", s.withAuth(http.HandlerFunc(s.handleGSNHierarchy)))
 	mux.Handle("/", s.static)
 
 	return s.withCommonHeaders(mux)
@@ -175,6 +182,70 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleConstructions(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.store.ListConstructions(claims.CompanyID, includeAll))
+
+	case http.MethodPost:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		var input store.ConstructionInput
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		construction, err := s.store.CreateConstruction(claims.CompanyID, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, construction)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleObjects(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.store.ListObjects(claims.CompanyID, includeAll))
+
+	case http.MethodPost:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		var input store.ConstructionObjectInput
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		object, err := s.store.CreateObject(claims.CompanyID, includeAll, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, object)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (s *Server) handleEstimates(w http.ResponseWriter, r *http.Request) {
 	claims := mustClaims(r)
 	includeAll := claims.Role == domain.RoleSuperAdmin
@@ -251,6 +322,38 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleGSNHierarchy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	limit := 200
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = parsed
+	}
+
+	nodes, err := s.gsn.ListChildren(r.Context(), r.URL.Query().Get("parent"), limit)
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn hierarchy query failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to read GSN hierarchy")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes": nodes,
+	})
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {

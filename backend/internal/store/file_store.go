@@ -23,17 +23,33 @@ var (
 )
 
 type FileStore struct {
-	mu        sync.RWMutex
-	path      string
-	companies map[string]domain.Company
-	users     map[string]domain.User
-	estimates map[string]domain.Estimate
+	mu            sync.RWMutex
+	path          string
+	companies     map[string]domain.Company
+	users         map[string]domain.User
+	constructions map[string]domain.Construction
+	objects       map[string]domain.ConstructionObject
+	estimates     map[string]domain.Estimate
 }
 
 type snapshot struct {
-	Companies []domain.Company  `json:"companies"`
-	Users     []domain.User     `json:"users"`
-	Estimates []domain.Estimate `json:"estimates"`
+	Companies     []domain.Company            `json:"companies"`
+	Users         []storedUser                `json:"users"`
+	Constructions []domain.Construction       `json:"constructions"`
+	Objects       []domain.ConstructionObject `json:"objects"`
+	Estimates     []domain.Estimate           `json:"estimates"`
+}
+
+type storedUser struct {
+	ID           string      `json:"id"`
+	CompanyID    string      `json:"companyId"`
+	Email        string      `json:"email"`
+	Name         string      `json:"name"`
+	Role         domain.Role `json:"role"`
+	PasswordHash string      `json:"passwordHash"`
+	PasswordSalt string      `json:"passwordSalt"`
+	CreatedAt    time.Time   `json:"createdAt"`
+	UpdatedAt    time.Time   `json:"updatedAt"`
 }
 
 type NewUser struct {
@@ -45,18 +61,30 @@ type NewUser struct {
 }
 
 type EstimateInput struct {
+	ObjectID    string                `json:"objectId"`
 	Title       string                `json:"title"`
 	Description string                `json:"description"`
 	Status      domain.EstimateStatus `json:"status"`
 	Items       []domain.EstimateItem `json:"items"`
 }
 
+type ConstructionInput struct {
+	Name string `json:"name"`
+}
+
+type ConstructionObjectInput struct {
+	ConstructionID string `json:"constructionId"`
+	Name           string `json:"name"`
+}
+
 func NewFileStore(path string) (*FileStore, error) {
 	store := &FileStore{
-		path:      path,
-		companies: map[string]domain.Company{},
-		users:     map[string]domain.User{},
-		estimates: map[string]domain.Estimate{},
+		path:          path,
+		companies:     map[string]domain.Company{},
+		users:         map[string]domain.User{},
+		constructions: map[string]domain.Construction{},
+		objects:       map[string]domain.ConstructionObject{},
+		estimates:     map[string]domain.Estimate{},
 	}
 
 	if err := store.load(); err != nil {
@@ -66,6 +94,20 @@ func NewFileStore(path string) (*FileStore, error) {
 	if len(store.users) == 0 {
 		if err := store.seed(); err != nil {
 			return nil, err
+		}
+	} else {
+		changed, err := store.ensureDemoCredentials()
+		if err != nil {
+			return nil, err
+		}
+		if len(store.constructions) == 0 {
+			if err := store.ensureDemoStructure(); err != nil {
+				return nil, err
+			}
+		} else if changed {
+			if err := store.save(); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -92,6 +134,34 @@ func (s *FileStore) FindUserByID(id string) (domain.User, bool) {
 
 	user, ok := s.users[id]
 	return user, ok
+}
+
+func (u storedUser) toDomain() domain.User {
+	return domain.User{
+		ID:           u.ID,
+		CompanyID:    u.CompanyID,
+		Email:        u.Email,
+		Name:         u.Name,
+		Role:         u.Role,
+		PasswordHash: u.PasswordHash,
+		PasswordSalt: u.PasswordSalt,
+		CreatedAt:    u.CreatedAt,
+		UpdatedAt:    u.UpdatedAt,
+	}
+}
+
+func userToStored(user domain.User) storedUser {
+	return storedUser{
+		ID:           user.ID,
+		CompanyID:    user.CompanyID,
+		Email:        user.Email,
+		Name:         user.Name,
+		Role:         user.Role,
+		PasswordHash: user.PasswordHash,
+		PasswordSalt: user.PasswordSalt,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+	}
 }
 
 func (s *FileStore) ListCompanies() []domain.Company {
@@ -206,6 +276,99 @@ func (s *FileStore) CreateUser(input NewUser) (domain.User, error) {
 	return user, s.saveLocked()
 }
 
+func (s *FileStore) ListConstructions(companyID string, includeAll bool) []domain.Construction {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	constructions := make([]domain.Construction, 0, len(s.constructions))
+	for _, construction := range s.constructions {
+		if includeAll || construction.CompanyID == companyID {
+			constructions = append(constructions, construction)
+		}
+	}
+
+	sort.Slice(constructions, func(i, j int) bool {
+		return constructions[i].Name < constructions[j].Name
+	})
+
+	return constructions
+}
+
+func (s *FileStore) CreateConstruction(companyID string, input ConstructionInput) (domain.Construction, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.companies[companyID]; !ok {
+		return domain.Construction{}, ErrNotFound
+	}
+
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return domain.Construction{}, ErrConflict
+	}
+
+	now := time.Now().UTC()
+	construction := domain.Construction{
+		ID:        newID("con"),
+		CompanyID: companyID,
+		Name:      name,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	s.constructions[construction.ID] = construction
+	return construction, s.saveLocked()
+}
+
+func (s *FileStore) ListObjects(companyID string, includeAll bool) []domain.ConstructionObject {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	objects := make([]domain.ConstructionObject, 0, len(s.objects))
+	for _, object := range s.objects {
+		if includeAll || object.CompanyID == companyID {
+			objects = append(objects, object)
+		}
+	}
+
+	sort.Slice(objects, func(i, j int) bool {
+		return objects[i].Name < objects[j].Name
+	})
+
+	return objects
+}
+
+func (s *FileStore) CreateObject(companyID string, includeAll bool, input ConstructionObjectInput) (domain.ConstructionObject, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	construction, ok := s.constructions[input.ConstructionID]
+	if !ok {
+		return domain.ConstructionObject{}, ErrNotFound
+	}
+	if !includeAll && construction.CompanyID != companyID {
+		return domain.ConstructionObject{}, ErrForbidden
+	}
+
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return domain.ConstructionObject{}, ErrConflict
+	}
+
+	now := time.Now().UTC()
+	object := domain.ConstructionObject{
+		ID:             newID("obj"),
+		CompanyID:      construction.CompanyID,
+		ConstructionID: construction.ID,
+		Name:           name,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	s.objects[object.ID] = object
+	return object, s.saveLocked()
+}
+
 func (s *FileStore) ListEstimates(companyID string, includeAll bool) []domain.Estimate {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -232,6 +395,14 @@ func (s *FileStore) CreateEstimate(companyID string, input EstimateInput) (domai
 		return domain.Estimate{}, ErrNotFound
 	}
 
+	object, ok := s.objects[input.ObjectID]
+	if !ok {
+		return domain.Estimate{}, ErrNotFound
+	}
+	if object.CompanyID != companyID {
+		return domain.Estimate{}, ErrForbidden
+	}
+
 	estimate, err := buildEstimate(newID("est"), companyID, input, time.Now().UTC(), time.Now().UTC())
 	if err != nil {
 		return domain.Estimate{}, err
@@ -250,6 +421,14 @@ func (s *FileStore) UpdateEstimate(id string, companyID string, includeAll bool,
 		return domain.Estimate{}, ErrNotFound
 	}
 	if !includeAll && current.CompanyID != companyID {
+		return domain.Estimate{}, ErrForbidden
+	}
+
+	object, ok := s.objects[input.ObjectID]
+	if !ok {
+		return domain.Estimate{}, ErrNotFound
+	}
+	if object.CompanyID != current.CompanyID || (!includeAll && object.CompanyID != companyID) {
 		return domain.Estimate{}, ErrForbidden
 	}
 
@@ -278,6 +457,13 @@ func (s *FileStore) DeleteEstimate(id string, companyID string, includeAll bool)
 	return s.saveLocked()
 }
 
+func (s *FileStore) save() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.saveLocked()
+}
+
 func (s *FileStore) load() error {
 	if _, err := os.Stat(s.path); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -297,7 +483,13 @@ func (s *FileStore) load() error {
 		s.companies[company.ID] = company
 	}
 	for _, user := range snap.Users {
-		s.users[user.ID] = user
+		s.users[user.ID] = user.toDomain()
+	}
+	for _, construction := range snap.Constructions {
+		s.constructions[construction.ID] = construction
+	}
+	for _, object := range snap.Objects {
+		s.objects[object.ID] = object
 	}
 	for _, estimate := range snap.Estimates {
 		s.estimates[estimate.ID] = estimate
@@ -312,16 +504,24 @@ func (s *FileStore) saveLocked() error {
 	}
 
 	snap := snapshot{
-		Companies: make([]domain.Company, 0, len(s.companies)),
-		Users:     make([]domain.User, 0, len(s.users)),
-		Estimates: make([]domain.Estimate, 0, len(s.estimates)),
+		Companies:     make([]domain.Company, 0, len(s.companies)),
+		Users:         make([]storedUser, 0, len(s.users)),
+		Constructions: make([]domain.Construction, 0, len(s.constructions)),
+		Objects:       make([]domain.ConstructionObject, 0, len(s.objects)),
+		Estimates:     make([]domain.Estimate, 0, len(s.estimates)),
 	}
 
 	for _, company := range s.companies {
 		snap.Companies = append(snap.Companies, company)
 	}
 	for _, user := range s.users {
-		snap.Users = append(snap.Users, user)
+		snap.Users = append(snap.Users, userToStored(user))
+	}
+	for _, construction := range s.constructions {
+		snap.Constructions = append(snap.Constructions, construction)
+	}
+	for _, object := range s.objects {
+		snap.Objects = append(snap.Objects, object)
 	}
 	for _, estimate := range s.estimates {
 		snap.Estimates = append(snap.Estimates, estimate)
@@ -332,6 +532,12 @@ func (s *FileStore) saveLocked() error {
 	})
 	sort.Slice(snap.Users, func(i, j int) bool {
 		return snap.Users[i].Email < snap.Users[j].Email
+	})
+	sort.Slice(snap.Constructions, func(i, j int) bool {
+		return snap.Constructions[i].Name < snap.Constructions[j].Name
+	})
+	sort.Slice(snap.Objects, func(i, j int) bool {
+		return snap.Objects[i].Name < snap.Objects[j].Name
 	})
 	sort.Slice(snap.Estimates, func(i, j int) bool {
 		return snap.Estimates[i].UpdatedAt.After(snap.Estimates[j].UpdatedAt)
@@ -379,7 +585,27 @@ func (s *FileStore) seed() error {
 		s.users[user.ID] = user
 	}
 
+	construction := domain.Construction{
+		ID:        newID("con"),
+		CompanyID: company.ID,
+		Name:      "Демо-стройка",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.constructions[construction.ID] = construction
+
+	object := domain.ConstructionObject{
+		ID:             newID("obj"),
+		CompanyID:      company.ID,
+		ConstructionID: construction.ID,
+		Name:           "Объект 1",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	s.objects[object.ID] = object
+
 	estimate, err := buildEstimate(newID("est"), company.ID, EstimateInput{
+		ObjectID:    object.ID,
 		Title:       "Demo estimate",
 		Description: "Small estimate module for the first SaaS MVP slice.",
 		Status:      domain.EstimateDraft,
@@ -396,10 +622,78 @@ func (s *FileStore) seed() error {
 	return s.saveLocked()
 }
 
+func (s *FileStore) ensureDemoStructure() error {
+	now := time.Now().UTC()
+	for _, company := range s.companies {
+		construction := domain.Construction{
+			ID:        newID("con"),
+			CompanyID: company.ID,
+			Name:      "Демо-стройка",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		s.constructions[construction.ID] = construction
+
+		object := domain.ConstructionObject{
+			ID:             newID("obj"),
+			CompanyID:      company.ID,
+			ConstructionID: construction.ID,
+			Name:           "Объект 1",
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+		s.objects[object.ID] = object
+
+		for id, estimate := range s.estimates {
+			if estimate.CompanyID == company.ID && estimate.ObjectID == "" {
+				estimate.ObjectID = object.ID
+				estimate.UpdatedAt = now
+				s.estimates[id] = estimate
+			}
+		}
+	}
+
+	return s.saveLocked()
+}
+
+func (s *FileStore) ensureDemoCredentials() (bool, error) {
+	demoPasswords := map[string]string{
+		"admin@example.com":   "admin123",
+		"manager@example.com": "manager123",
+		"user@example.com":    "user123",
+	}
+
+	changed := false
+	for id, user := range s.users {
+		if user.PasswordHash != "" && user.PasswordSalt != "" {
+			continue
+		}
+
+		password, ok := demoPasswords[user.Email]
+		if !ok {
+			password = "change-me"
+		}
+
+		hash, salt, err := auth.NewPassword(password)
+		if err != nil {
+			return false, err
+		}
+
+		user.PasswordHash = hash
+		user.PasswordSalt = salt
+		user.UpdatedAt = time.Now().UTC()
+		s.users[id] = user
+		changed = true
+	}
+
+	return changed, nil
+}
+
 func buildEstimate(id string, companyID string, input EstimateInput, createdAt time.Time, updatedAt time.Time) (domain.Estimate, error) {
+	input.ObjectID = strings.TrimSpace(input.ObjectID)
 	input.Title = strings.TrimSpace(input.Title)
 	input.Description = strings.TrimSpace(input.Description)
-	if input.Title == "" {
+	if input.ObjectID == "" || input.Title == "" {
 		return domain.Estimate{}, ErrConflict
 	}
 	if input.Status == "" {
@@ -428,6 +722,7 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 	return domain.Estimate{
 		ID:          id,
 		CompanyID:   companyID,
+		ObjectID:    input.ObjectID,
 		Title:       input.Title,
 		Description: input.Description,
 		Status:      input.Status,

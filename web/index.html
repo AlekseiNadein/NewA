@@ -40,101 +40,114 @@
         </div>
       </section>
 
-      <section id="appView" class="hidden">
-        <div class="status card">
-          <div>
+      <section id="appView" class="app-shell hidden">
+        <aside class="sidebar card">
+          <div class="user-card">
             <p class="eyebrow">Текущий пользователь</p>
-            <h2 id="currentUser">-</h2>
+            <strong id="currentUser">-</strong>
+            <span id="currentRole" class="pill">-</span>
           </div>
-          <span id="currentRole" class="pill">-</span>
-        </div>
-
-        <div class="layout">
-          <section id="adminPanel" class="card hidden">
-            <h2>Admin FR</h2>
-            <p class="muted">Управление компаниями и пользователями внутри компании.</p>
-
-            <form id="companyForm" class="grid-form">
-              <label>
-                Новая компания
-                <input name="name" placeholder="Company name" />
-              </label>
-              <button type="submit">Создать компанию</button>
-            </form>
-
-            <form id="userForm" class="grid-form">
-              <label>
-                Компания
-                <select name="companyId"></select>
-              </label>
-              <label>
-                Имя
-                <input name="name" placeholder="User name" required />
-              </label>
-              <label>
-                Email
-                <input name="email" type="email" placeholder="user@company.test" required />
-              </label>
-              <label>
-                Роль
-                <select name="role">
-                  <option value="user">user</option>
-                  <option value="company_admin">company_admin</option>
-                  <option value="super_admin">super_admin</option>
-                </select>
-              </label>
-              <label>
-                Пароль
-                <input name="password" type="password" value="change-me" required />
-              </label>
-              <button type="submit">Создать пользователя</button>
-            </form>
-
-            <div class="split">
-              <div>
-                <h3>Компании</h3>
-                <div id="companiesList" class="list"></div>
-              </div>
-              <div>
-                <h3>Пользователи</h3>
-                <div id="usersList" class="list"></div>
-              </div>
+          <nav class="main-nav" aria-label="Разделы приложения">
+            <button class="nav-link active" data-section="base" type="button">База</button>
+            <div class="nav-subitems" data-subitems="base">
+              <button class="nav-sublink active" data-base-tab="gsn" type="button">ГСН-2022</button>
+              <button class="nav-sublink" data-base-tab="userPositions" type="button">Позиции пользователя</button>
             </div>
+            <button class="nav-link" data-section="constructions" type="button">Стройки</button>
+            <button class="nav-link" data-section="documents" type="button">Документы</button>
+            <button class="nav-link" data-section="settings" type="button">Настройки</button>
+          </nav>
+        </aside>
+
+        <section class="workspace">
+          <section id="baseSection" class="section-view card">
+            <p class="eyebrow">База</p>
+            <h2 id="baseTitle">ГСН-2022</h2>
+            <p id="baseDescription" class="muted">
+              Раздел для нормативной базы. На этом этапе показываем структуру раздела без загрузки нормативов.
+            </p>
+            <div id="gsnToolbar" class="toolbar">
+              <button id="reloadGsnButton" type="button">Обновить иерархию</button>
+              <span id="gsnStatus" class="muted">Иерархия не загружена.</span>
+            </div>
+            <div id="gsnTree" class="tree gsn-tree"></div>
           </section>
 
-          <section class="card">
-            <h2>User FR</h2>
-            <p class="muted">Работа с предметной моделью: смета с позициями, статусом и итогом.</p>
+          <section id="constructionsSection" class="section-view card hidden">
+            <p class="eyebrow">Стройки</p>
+            <h2>Структура: Стройка -> Объект -> Смета</h2>
+            <p class="muted">Создавайте стройки первого уровня, объекты второго уровня и сметы третьего уровня.</p>
 
-            <form id="estimateForm" class="grid-form">
-              <input name="id" type="hidden" />
-              <label>
-                Название
-                <input name="title" placeholder="Estimate title" required />
-              </label>
-              <label>
-                Статус
-                <select name="status">
-                  <option value="draft">draft</option>
-                  <option value="approved">approved</option>
-                  <option value="archived">archived</option>
-                </select>
-              </label>
-              <label class="full">
-                Описание
-                <textarea name="description" rows="2" placeholder="Short description"></textarea>
-              </label>
-              <label class="full">
-                Позиции JSON
-                <textarea name="items" rows="6" required></textarea>
-              </label>
-              <button type="submit">Сохранить смету</button>
-              <button id="resetEstimateForm" class="secondary" type="button">Новая смета</button>
-            </form>
+            <div class="split three">
+              <form id="constructionForm" class="stack-form">
+                <h3>1. Стройка</h3>
+                <label>
+                  Название стройки
+                  <input name="name" placeholder="Например: ЖК Северный" required />
+                </label>
+                <button type="submit">Создать стройку</button>
+              </form>
 
-            <div id="estimatesList" class="estimate-list"></div>
+              <form id="objectForm" class="stack-form">
+                <h3>2. Объект</h3>
+                <label>
+                  Стройка
+                  <select name="constructionId" required></select>
+                </label>
+                <label>
+                  Название объекта
+                  <input name="name" placeholder="Например: Корпус 1" required />
+                </label>
+                <button type="submit">Создать объект</button>
+              </form>
+
+              <form id="estimateForm" class="stack-form">
+                <h3>3. Смета</h3>
+                <input name="id" type="hidden" />
+                <label>
+                  Объект
+                  <select name="objectId" required></select>
+                </label>
+                <label>
+                  Название
+                  <input name="title" placeholder="Локальная смета" required />
+                </label>
+                <label>
+                  Статус
+                  <select name="status">
+                    <option value="draft">draft</option>
+                    <option value="approved">approved</option>
+                    <option value="archived">archived</option>
+                  </select>
+                </label>
+                <label>
+                  Описание
+                  <textarea name="description" rows="2" placeholder="Краткое описание"></textarea>
+                </label>
+                <label>
+                  Позиции JSON
+                  <textarea name="items" rows="6" required></textarea>
+                </label>
+                <button type="submit">Сохранить смету</button>
+                <button id="resetEstimateForm" class="secondary" type="button">Новая смета</button>
+              </form>
+            </div>
+
+            <div id="constructionTree" class="tree"></div>
           </section>
-        </div>
+
+          <section id="documentsSection" class="section-view card hidden">
+            <p class="eyebrow">Документы</p>
+            <h2>Документы</h2>
+            <p class="muted">Раздел пока не прорабатываем.</p>
+          </section>
+
+          <section id="settingsSection" class="section-view card hidden">
+            <p class="eyebrow">Настройки</p>
+            <h2>Настройки</h2>
+            <p class="muted">Раздел пока не прорабатываем.</p>
+          </section>
+        </section>
       </section>
 
       <div id="message" class="message hidden"></div>

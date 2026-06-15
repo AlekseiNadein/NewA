@@ -1,14 +1,18 @@
 const state = {
   token: localStorage.getItem("nav_token") || "",
   me: null,
+  section: "base",
+  baseTab: "gsn",
   companies: [],
-  users: [],
+  constructions: [],
+  objects: [],
   estimates: [],
+  gsnLoaded: false,
 };
 
 const defaultItems = [
-  { name: "Concrete works", quantity: 1, unit: "m3", unitPrice: 1500 },
-  { name: "Labor", quantity: 8, unit: "h", unitPrice: 900 },
+  { name: "Бетонные работы", quantity: 1, unit: "м3", unitPrice: 1500 },
+  { name: "Работа специалистов", quantity: 8, unit: "ч", unitPrice: 900 },
 ];
 
 const money = new Intl.NumberFormat("ru-RU", {
@@ -24,25 +28,34 @@ const els = {
   loginForm: document.querySelector("#loginForm"),
   currentUser: document.querySelector("#currentUser"),
   currentRole: document.querySelector("#currentRole"),
-  adminPanel: document.querySelector("#adminPanel"),
-  companyForm: document.querySelector("#companyForm"),
-  userForm: document.querySelector("#userForm"),
+  navLinks: document.querySelectorAll("[data-section]"),
+  baseSubitems: document.querySelector("[data-subitems='base']"),
+  baseSubLinks: document.querySelectorAll("[data-base-tab]"),
+  baseSection: document.querySelector("#baseSection"),
+  constructionsSection: document.querySelector("#constructionsSection"),
+  documentsSection: document.querySelector("#documentsSection"),
+  settingsSection: document.querySelector("#settingsSection"),
+  baseTitle: document.querySelector("#baseTitle"),
+  baseDescription: document.querySelector("#baseDescription"),
+  gsnToolbar: document.querySelector("#gsnToolbar"),
+  reloadGsnButton: document.querySelector("#reloadGsnButton"),
+  gsnStatus: document.querySelector("#gsnStatus"),
+  gsnTree: document.querySelector("#gsnTree"),
+  constructionForm: document.querySelector("#constructionForm"),
+  objectForm: document.querySelector("#objectForm"),
   estimateForm: document.querySelector("#estimateForm"),
   resetEstimateForm: document.querySelector("#resetEstimateForm"),
-  companiesList: document.querySelector("#companiesList"),
-  usersList: document.querySelector("#usersList"),
-  estimatesList: document.querySelector("#estimatesList"),
+  constructionTree: document.querySelector("#constructionTree"),
   message: document.querySelector("#message"),
 };
 
 els.loginForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const data = formData(els.loginForm);
 
   try {
     const result = await api("/api/auth/login", {
       method: "POST",
-      body: data,
+      body: formData(els.loginForm),
       skipAuth: true,
     });
     state.token = result.token;
@@ -69,31 +82,48 @@ els.logoutButton.addEventListener("click", () => {
   renderShell();
 });
 
-els.companyForm.addEventListener("submit", async (event) => {
+els.navLinks.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.section = button.dataset.section;
+    renderSections();
+  });
+});
+
+els.baseSubLinks.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.section = "base";
+    state.baseTab = button.dataset.baseTab;
+    renderSections();
+  });
+});
+
+els.constructionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+
   try {
-    await api("/api/companies", {
+    await api("/api/constructions", {
       method: "POST",
-      body: formData(els.companyForm),
+      body: formData(els.constructionForm),
     });
-    els.companyForm.reset();
-    await refreshAdminData();
-    showMessage("Компания создана", "ok");
+    els.constructionForm.reset();
+    await refreshConstructionData();
+    showMessage("Стройка создана", "ok");
   } catch (error) {
     showMessage(error.message, "error");
   }
 });
 
-els.userForm.addEventListener("submit", async (event) => {
+els.objectForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+
   try {
-    await api("/api/users", {
+    await api("/api/objects", {
       method: "POST",
-      body: formData(els.userForm),
+      body: formData(els.objectForm),
     });
-    els.userForm.reset();
-    await refreshAdminData();
-    showMessage("Пользователь создан", "ok");
+    els.objectForm.reset();
+    await refreshConstructionData();
+    showMessage("Объект создан", "ok");
   } catch (error) {
     showMessage(error.message, "error");
   }
@@ -119,7 +149,7 @@ els.estimateForm.addEventListener("submit", async (event) => {
       body: data,
     });
     resetEstimateForm();
-    await refreshEstimates();
+    await refreshConstructionData();
     showMessage("Смета сохранена", "ok");
   } catch (error) {
     showMessage(error.message, "error");
@@ -127,6 +157,44 @@ els.estimateForm.addEventListener("submit", async (event) => {
 });
 
 els.resetEstimateForm.addEventListener("click", resetEstimateForm);
+
+els.reloadGsnButton.addEventListener("click", () => {
+  loadGSNRoot({ force: true });
+});
+
+els.gsnTree.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-gsn-toggle]");
+  if (!button) {
+    return;
+  }
+
+  const code = button.dataset.gsnToggle;
+  const node = button.closest(".gsn-node");
+  const children = node.querySelector(":scope > .tree-children");
+
+  if (button.dataset.loaded === "true") {
+    const collapsed = children.classList.toggle("hidden");
+    button.textContent = collapsed ? "+" : "-";
+    return;
+  }
+
+  button.disabled = true;
+  button.textContent = "...";
+  try {
+    const nodes = await fetchGSNChildren(code);
+    children.innerHTML = nodes.length
+      ? nodes.map(renderGSNNode).join("")
+      : `<p class="muted">Нет дочерних элементов.</p>`;
+    button.dataset.loaded = "true";
+    button.textContent = "-";
+    children.classList.remove("hidden");
+  } catch (error) {
+    showMessage(error.message, "error");
+    button.textContent = "+";
+  } finally {
+    button.disabled = false;
+  }
+});
 
 async function loadApp() {
   if (!state.token) {
@@ -137,9 +205,9 @@ async function loadApp() {
   try {
     const me = await api("/api/me");
     state.me = me.user;
-    await Promise.all([refreshAdminData(), refreshEstimates()]);
+    await Promise.all([refreshCompanies(), refreshConstructionData()]);
     renderShell();
-  } catch (error) {
+  } catch {
     state.token = "";
     localStorage.removeItem("nav_token");
     renderShell();
@@ -147,19 +215,22 @@ async function loadApp() {
   }
 }
 
-async function refreshAdminData() {
+async function refreshCompanies() {
   state.companies = await api("/api/companies");
-  if (canManageUsers()) {
-    state.users = await api("/api/users");
-  } else {
-    state.users = [];
-  }
-  renderAdmin();
 }
 
-async function refreshEstimates() {
-  state.estimates = await api("/api/estimates");
-  renderEstimates();
+async function refreshConstructionData() {
+  const [constructions, objects, estimates] = await Promise.all([
+    api("/api/constructions"),
+    api("/api/objects"),
+    api("/api/estimates"),
+  ]);
+
+  state.constructions = constructions;
+  state.objects = objects;
+  state.estimates = estimates;
+  renderConstructionForms();
+  renderConstructionTree();
 }
 
 function renderShell() {
@@ -174,95 +245,216 @@ function renderShell() {
 
   els.currentUser.textContent = `${state.me.name} (${state.me.email})`;
   els.currentRole.textContent = state.me.role;
-  els.adminPanel.classList.toggle("hidden", !canManageUsers());
-  els.companyForm.classList.toggle("hidden", state.me.role !== "super_admin");
-
-  renderAdmin();
-  renderEstimates();
+  renderSections();
+  renderConstructionForms();
+  renderConstructionTree();
   resetEstimateForm();
 }
 
-function renderAdmin() {
-  if (!state.me) {
-    return;
+function renderSections() {
+  const sectionMap = {
+    base: els.baseSection,
+    constructions: els.constructionsSection,
+    documents: els.documentsSection,
+    settings: els.settingsSection,
+  };
+
+  Object.entries(sectionMap).forEach(([section, element]) => {
+    element.classList.toggle("hidden", state.section !== section);
+  });
+
+  els.navLinks.forEach((button) => {
+    button.classList.toggle("active", button.dataset.section === state.section);
+  });
+
+  els.baseSubitems.classList.toggle("hidden", state.section !== "base");
+  els.baseSubLinks.forEach((button) => {
+    button.classList.toggle("active", button.dataset.baseTab === state.baseTab);
+  });
+
+  if (state.baseTab === "gsn") {
+    els.baseTitle.textContent = "ГСН-2022";
+    els.baseDescription.textContent =
+      "Иерархия нормативной базы из PostgreSQL-схемы gsn.hierarchy.";
+    els.gsnToolbar.classList.remove("hidden");
+    els.gsnTree.classList.remove("hidden");
+    loadGSNRoot();
+  } else {
+    els.baseTitle.textContent = "Позиции пользователя";
+    els.baseDescription.textContent =
+      "Здесь будут пользовательские позиции, которые пользователь сможет применять в сметах.";
+    els.gsnToolbar.classList.add("hidden");
+    els.gsnTree.classList.add("hidden");
   }
-
-  els.companiesList.innerHTML = state.companies
-    .map(
-      (company) => `
-        <article class="list-item">
-          <strong>${escapeHTML(company.name)}</strong>
-          <span class="muted">${company.id}</span>
-        </article>
-      `,
-    )
-    .join("");
-
-  els.usersList.innerHTML = state.users
-    .map(
-      (user) => `
-        <article class="list-item">
-          <strong>${escapeHTML(user.name)}</strong>
-          <span>${escapeHTML(user.email)}</span>
-          <span class="pill">${escapeHTML(user.role)}</span>
-        </article>
-      `,
-    )
-    .join("");
-
-  const companySelect = els.userForm.companyId;
-  companySelect.innerHTML = state.companies
-    .map((company) => `<option value="${company.id}">${escapeHTML(company.name)}</option>`)
-    .join("");
 }
 
-function renderEstimates() {
-  if (!state.estimates.length) {
-    els.estimatesList.innerHTML = `<p class="muted">Пока нет смет.</p>`;
+async function loadGSNRoot(options = {}) {
+  if (!state.token || state.baseTab !== "gsn") {
+    return;
+  }
+  if (state.gsnLoaded && !options.force) {
     return;
   }
 
-  els.estimatesList.innerHTML = state.estimates
-    .map(
-      (estimate) => `
-        <article class="estimate">
-          <header>
-            <div>
-              <strong>${escapeHTML(estimate.title)}</strong>
-              <p class="muted">${escapeHTML(estimate.description || "")}</p>
-            </div>
-            <span class="pill">${escapeHTML(estimate.status)}</span>
-          </header>
-          <ul class="estimate-items">
-            ${estimate.items
-              .map(
-                (item) => `
-                  <li>
-                    ${escapeHTML(item.name)}:
-                    ${item.quantity} ${escapeHTML(item.unit)}
-                    x ${money.format(item.unitPrice)}
-                    = ${money.format(item.total)}
-                  </li>
-                `,
-              )
-              .join("")}
-          </ul>
-          <footer>
-            <span class="pill">Итого: ${money.format(estimate.total)}</span>
-            <button data-edit="${estimate.id}" type="button">Редактировать</button>
-            <button data-delete="${estimate.id}" class="danger" type="button">Удалить</button>
-          </footer>
-        </article>
-      `,
-    )
+  els.gsnStatus.textContent = "Загрузка иерархии...";
+  els.gsnTree.innerHTML = "";
+
+  try {
+    const nodes = await fetchGSNChildren("");
+    state.gsnLoaded = true;
+    els.gsnStatus.textContent = nodes.length
+      ? `Загружено элементов верхнего уровня: ${nodes.length}`
+      : "Верхний уровень иерархии пуст.";
+    els.gsnTree.innerHTML = nodes.length
+      ? nodes.map(renderGSNNode).join("")
+      : `<p class="muted">Нет данных для отображения.</p>`;
+  } catch (error) {
+    state.gsnLoaded = false;
+    els.gsnStatus.textContent = "Иерархия не загружена.";
+    els.gsnTree.innerHTML = `<p class="muted">${escapeHTML(error.message)}</p>`;
+  }
+}
+
+async function fetchGSNChildren(parentCode) {
+  const params = new URLSearchParams({ limit: "300" });
+  if (parentCode) {
+    params.set("parent", parentCode);
+  }
+
+  const result = await api(`/api/gsn/hierarchy?${params.toString()}`);
+  return result.nodes || [];
+}
+
+function renderGSNNode(node) {
+  const toggle = node.hasChildren
+    ? `<button class="tree-toggle" data-gsn-toggle="${escapeHTML(node.code)}" type="button">+</button>`
+    : `<span class="tree-toggle-placeholder"></span>`;
+  const meta = [
+    `Уровень ${node.level}`,
+    node.unit ? `Ед. изм.: ${escapeHTML(node.unit)}` : "",
+    node.recordCount ? `Норм: ${node.recordCount}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `
+    <article class="tree-node gsn-node">
+      <header>
+        <div class="tree-title">
+          ${toggle}
+          <div>
+            <strong>${escapeHTML(node.code)} ${escapeHTML(node.name || "")}</strong>
+            <p class="muted">${meta}</p>
+            ${node.normList ? `<p class="muted">Перечень норм: ${escapeHTML(node.normList)}</p>` : ""}
+          </div>
+        </div>
+      </header>
+      <div class="tree-children hidden"></div>
+    </article>
+  `;
+}
+
+function renderConstructionForms() {
+  const constructionOptions = state.constructions
+    .map((construction) => `<option value="${construction.id}">${escapeHTML(construction.name)}</option>`)
     .join("");
 
-  els.estimatesList.querySelectorAll("[data-edit]").forEach((button) => {
+  els.objectForm.constructionId.innerHTML = constructionOptions;
+  els.objectForm.querySelector("button").disabled = state.constructions.length === 0;
+
+  const objectOptions = state.objects
+    .map((object) => `<option value="${object.id}">${escapeHTML(objectPath(object))}</option>`)
+    .join("");
+
+  els.estimateForm.objectId.innerHTML = objectOptions;
+  els.estimateForm.querySelector("button").disabled = state.objects.length === 0;
+}
+
+function renderConstructionTree() {
+  if (!state.constructions.length) {
+    els.constructionTree.innerHTML = `<p class="muted">Пока нет строек. Создайте стройку первого уровня.</p>`;
+    return;
+  }
+
+  els.constructionTree.innerHTML = state.constructions
+    .map((construction) => {
+      const objects = state.objects.filter((object) => object.constructionId === construction.id);
+      return `
+        <article class="tree-node level-1">
+          <header>
+            <strong>Стройка: ${escapeHTML(construction.name)}</strong>
+            <span class="muted">${construction.id}</span>
+          </header>
+          <div class="tree-children">
+            ${
+              objects.length
+                ? objects.map(renderObjectNode).join("")
+                : `<p class="muted">Добавьте объект второго уровня.</p>`
+            }
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  els.constructionTree.querySelectorAll("[data-edit]").forEach((button) => {
     button.addEventListener("click", () => editEstimate(button.dataset.edit));
   });
-  els.estimatesList.querySelectorAll("[data-delete]").forEach((button) => {
+  els.constructionTree.querySelectorAll("[data-delete]").forEach((button) => {
     button.addEventListener("click", () => deleteEstimate(button.dataset.delete));
   });
+}
+
+function renderObjectNode(object) {
+  const estimates = state.estimates.filter((estimate) => estimate.objectId === object.id);
+  return `
+    <article class="tree-node level-2">
+      <header>
+        <strong>Объект: ${escapeHTML(object.name)}</strong>
+        <span class="muted">${object.id}</span>
+      </header>
+      <div class="tree-children">
+        ${
+          estimates.length
+            ? estimates.map(renderEstimateNode).join("")
+            : `<p class="muted">Добавьте смету третьего уровня.</p>`
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderEstimateNode(estimate) {
+  return `
+    <article class="tree-node level-3">
+      <header>
+        <div>
+          <strong>Смета: ${escapeHTML(estimate.title)}</strong>
+          <p class="muted">${escapeHTML(estimate.description || "")}</p>
+        </div>
+        <span class="pill">${escapeHTML(estimate.status)}</span>
+      </header>
+      <ul class="estimate-items">
+        ${estimate.items
+          .map(
+            (item) => `
+              <li>
+                ${escapeHTML(item.name)}:
+                ${item.quantity} ${escapeHTML(item.unit)}
+                x ${money.format(item.unitPrice)}
+                = ${money.format(item.total)}
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+      <footer>
+        <span class="pill">Итого: ${money.format(estimate.total)}</span>
+        <button data-edit="${estimate.id}" type="button">Редактировать</button>
+        <button data-delete="${estimate.id}" class="danger" type="button">Удалить</button>
+      </footer>
+    </article>
+  `;
 }
 
 function editEstimate(id) {
@@ -272,6 +464,7 @@ function editEstimate(id) {
   }
 
   els.estimateForm.id.value = estimate.id;
+  els.estimateForm.objectId.value = estimate.objectId;
   els.estimateForm.title.value = estimate.title;
   els.estimateForm.status.value = estimate.status;
   els.estimateForm.description.value = estimate.description || "";
@@ -290,7 +483,7 @@ async function deleteEstimate(id) {
 
   try {
     await api(`/api/estimates/${id}`, { method: "DELETE" });
-    await refreshEstimates();
+    await refreshConstructionData();
     showMessage("Смета удалена", "ok");
   } catch (error) {
     showMessage(error.message, "error");
@@ -301,7 +494,15 @@ function resetEstimateForm() {
   els.estimateForm.reset();
   els.estimateForm.id.value = "";
   els.estimateForm.status.value = "draft";
+  if (state.objects[0]) {
+    els.estimateForm.objectId.value = state.objects[0].id;
+  }
   els.estimateForm.items.value = JSON.stringify(defaultItems, null, 2);
+}
+
+function objectPath(object) {
+  const construction = state.constructions.find((item) => item.id === object.constructionId);
+  return construction ? `${construction.name} / ${object.name}` : object.name;
 }
 
 async function api(path, options = {}) {
@@ -330,10 +531,6 @@ async function api(path, options = {}) {
 
 function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
-}
-
-function canManageUsers() {
-  return state.me && ["super_admin", "company_admin"].includes(state.me.role);
 }
 
 function showMessage(text, kind = "") {
