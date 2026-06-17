@@ -23,9 +23,18 @@ type Node struct {
 	HasChildren bool   `json:"hasChildren"`
 }
 
+type Supplement struct {
+	Code        string `json:"code"`
+	Label       string `json:"label"`
+	Edition     string `json:"edition,omitempty"`
+	VersionDate string `json:"versionDate,omitempty"`
+	Ordinal     int    `json:"ordinal"`
+}
+
 type BaseInfo struct {
-	Edition string `json:"edition"`
-	Version string `json:"version"`
+	Supplement string `json:"supplement"`
+	Edition    string `json:"edition"`
+	Version    string `json:"version"`
 }
 
 type Service struct {
@@ -59,9 +68,42 @@ func (s *Service) Close() error {
 	return s.db.Close()
 }
 
-func (s *Service) ListChildren(ctx context.Context, parentCode string, limit int) ([]Node, error) {
+func (s *Service) ListSupplements(ctx context.Context) ([]Supplement, error) {
 	if !s.Configured() {
 		return nil, ErrNotConfigured
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT code, label, edition, version_date, ordinal
+		FROM gsn.supplements
+		ORDER BY ordinal, code
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query gsn supplements: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]Supplement, 0)
+	for rows.Next() {
+		var item Supplement
+		if err := rows.Scan(&item.Code, &item.Label, &item.Edition, &item.VersionDate, &item.Ordinal); err != nil {
+			return nil, fmt.Errorf("scan gsn supplement: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read gsn supplements: %w", err)
+	}
+
+	return items, nil
+}
+
+func (s *Service) ListChildren(ctx context.Context, supplementCode, parentCode string, limit int) ([]Node, error) {
+	if !s.Configured() {
+		return nil, ErrNotConfigured
+	}
+	if supplementCode == "" {
+		return nil, fmt.Errorf("supplement code is required")
 	}
 	if limit <= 0 || limit > 500 {
 		limit = 200
@@ -78,18 +120,21 @@ func (s *Service) ListChildren(ctx context.Context, parentCode string, limit int
 			(
 				SELECT count(*)
 				FROM gsn.hierarchy_record_refs refs
-				WHERE refs.hierarchy_code = h.code
+				WHERE refs.supplement_code = h.supplement_code
+					AND refs.hierarchy_code = h.code
 			) AS record_count,
 			EXISTS (
 				SELECT 1
 				FROM gsn.hierarchy child
-				WHERE child.parent_code = h.code
+				WHERE child.supplement_code = h.supplement_code
+					AND child.parent_code = h.code
 			) AS has_children
 		FROM gsn.hierarchy h
-		WHERE (($1::text = '' AND h.parent_code IS NULL) OR h.parent_code = NULLIF($1::text, ''))
+		WHERE h.supplement_code = $1
+			AND (($2::text = '' AND h.parent_code IS NULL) OR h.parent_code = NULLIF($2::text, ''))
 		ORDER BY h.line_no
-		LIMIT $2
-	`, parentCode, limit)
+		LIMIT $3
+	`, supplementCode, parentCode, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query gsn hierarchy: %w", err)
 	}
@@ -119,22 +164,26 @@ func (s *Service) ListChildren(ctx context.Context, parentCode string, limit int
 	return nodes, nil
 }
 
-func (s *Service) BaseInfo(ctx context.Context) (BaseInfo, error) {
+func (s *Service) BaseInfo(ctx context.Context, supplementCode string) (BaseInfo, error) {
 	if !s.Configured() {
 		return BaseInfo{}, ErrNotConfigured
 	}
+	if supplementCode == "" {
+		return BaseInfo{}, fmt.Errorf("supplement code is required")
+	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT param_key, param_value
-		FROM gsn.base_info_params
-		WHERE param_key IN ($1, $2)
-	`, "Редакция СНБ", "Версия")
+		SELECT bip.param_key, bip.param_value
+		FROM gsn.base_info_params bip
+		WHERE bip.supplement_code = $1
+			AND bip.param_key IN ($2, $3)
+	`, supplementCode, "Редакция СНБ", "Версия")
 	if err != nil {
 		return BaseInfo{}, fmt.Errorf("query gsn base info: %w", err)
 	}
 	defer rows.Close()
 
-	var info BaseInfo
+	info := BaseInfo{Supplement: supplementCode}
 	for rows.Next() {
 		var key string
 		var value string
@@ -151,6 +200,23 @@ func (s *Service) BaseInfo(ctx context.Context) (BaseInfo, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return BaseInfo{}, fmt.Errorf("read gsn base info: %w", err)
+	}
+
+	if info.Edition == "" || info.Version == "" {
+		var edition, versionDate string
+		err := s.db.QueryRowContext(ctx, `
+			SELECT edition, version_date
+			FROM gsn.supplements
+			WHERE code = $1
+		`, supplementCode).Scan(&edition, &versionDate)
+		if err == nil {
+			if info.Edition == "" {
+				info.Edition = edition
+			}
+			if info.Version == "" {
+				info.Version = versionDate
+			}
+		}
 	}
 
 	return info, nil

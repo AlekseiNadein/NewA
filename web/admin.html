@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Администрирование — ABC-RU WEB</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Администрирование платформы</p>
+          <h2>ABC-RU WEB</h2>
+        </div>
+        <div class="hero-actions">
+          <a class="secondary button-link" href="/">Основная система</a>
+          <button id="logoutButton" class="secondary hidden" type="button">Выйти</button>
+        </div>
+      </section>
+
+      <section id="loginView" class="card login-card">
+        <h2>Вход администратора</h2>
+        <p class="muted">Компания, ФИО и пароль учётной записи с правами администратора.</p>
+        <form id="loginForm" class="grid-form">
+          <label>
+            Компания
+            <input name="companyName" type="text" value="Система" autocomplete="organization" required />
+          </label>
+          <label>
+            ФИО пользователя
+            <input name="name" type="text" value="Суперадминистратор" autocomplete="name" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" value="admin123" autocomplete="current-password" required />
+          </label>
+          <button type="submit">Войти</button>
+        </form>
+      </section>
+
+      <section id="adminView" class="admin-shell hidden">
+        <section class="card">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Пользователи</p>
+              <h2>Управление учётными записями</h2>
+              <p id="adminScopeHint" class="muted">Список пользователей системы.</p>
+            </div>
+            <button id="showCreateUserButton" type="button">Добавить пользователя</button>
+          </div>
+          <div id="adminUsersTable" class="admin-table-wrap"></div>
+        </section>
+
+        <section id="adminCreatePanel" class="card hidden">
+          <h3>Новый пользователь</h3>
+          <form id="adminCreateForm" class="grid-form">
+            <label id="createCompanySelectField" class="hidden">
+              Компания
+              <select name="companyId"></select>
+            </label>
+            <label id="createCompanyNameField" class="hidden">
+              Новая компания
+              <input name="companyName" type="text" placeholder="Если компания ещё не создана" />
+            </label>
+            <label>
+              ФИО
+              <input name="name" type="text" required />
+            </label>
+            <label>
+              E-mail
+              <input name="email" type="email" required />
+            </label>
+            <label>
+              Пароль
+              <input name="password" type="password" autocomplete="new-password" required />
+            </label>
+            <label class="check-row">
+              <input name="authorized" type="checkbox" />
+              Авторизован
+            </label>
+            <label class="check-row">
+              <input name="isAdministrator" type="checkbox" />
+              Администратор
+            </label>
+            <label id="createSuperField" class="check-row hidden">
+              <input name="isSuperAdministrator" type="checkbox" />
+              Суперадминистратор
+            </label>
+            <div class="form-actions">
+              <button type="submit">Создать</button>
+              <button id="cancelCreateUserButton" class="secondary" type="button">Отмена</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="adminEditPanel" class="card hidden">
+          <h3>Редактирование пользователя</h3>
+          <form id="adminUserForm" class="grid-form">
+            <input name="id" type="hidden" />
+            <label id="adminCompanyField" class="hidden">
+              Компания
+              <select name="companyId"></select>
+            </label>
+            <label>
+              ФИО
+              <input name="name" type="text" required />
+            </label>
+            <label>
+              E-mail
+              <input name="email" type="email" required />
+            </label>
+            <label>
+              Новый пароль
+              <input name="password" type="password" autocomplete="new-password" placeholder="Оставьте пустым, чтобы не менять" />
+            </label>
+            <label class="check-row">
+              <input name="authorized" type="checkbox" />
+              Авторизован
+            </label>
+            <label class="check-row">
+              <input name="isAdministrator" type="checkbox" />
+              Администратор
+            </label>
+            <div class="form-actions">
+              <button type="submit">Сохранить</button>
+              <button id="cancelAdminEditButton" class="secondary" type="button">Отмена</button>
+            </div>
+          </form>
+        </section>
+      </section>
+
+      <div id="message" class="message hidden"></div>
+    </main>
+
+    <script type="module" src="/admin.js"></script>
+  </body>
+</html>

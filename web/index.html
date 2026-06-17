@@ -18,11 +18,15 @@
 
       <section id="loginView" class="card login-card">
         <h2>Вход</h2>
-        <p class="muted">Демо-аккаунты создаются автоматически при первом запуске.</p>
+        <p class="muted">Введите компанию, ФИО и пароль. Доступ в систему открывается после подтверждения администратором.</p>
         <form id="loginForm" class="grid-form">
           <label>
-            Email
-            <input name="email" type="email" value="admin@example.com" autocomplete="username" required />
+            Компания
+            <input name="companyName" type="text" value="Система" autocomplete="organization" required />
+          </label>
+          <label>
+            ФИО пользователя
+            <input name="name" type="text" value="Суперадминистратор" autocomplete="name" required />
           </label>
           <label>
             Пароль
@@ -30,19 +34,49 @@
           </label>
           <button type="submit">Войти</button>
         </form>
-        <div class="demo-users">
-          <button data-demo="admin@example.com|admin123">super_admin</button>
-          <button data-demo="manager@example.com|manager123">company_admin</button>
-          <button data-demo="user@example.com|user123">user</button>
-        </div>
+        <p class="auth-switch">
+          Нет учётной записи?
+          <button id="showRegisterButton" class="link-button" type="button">Зарегистрироваться</button>
+        </p>
+      </section>
+
+      <section id="registerView" class="card login-card hidden">
+        <h2>Регистрация</h2>
+        <p class="muted">После регистрации администратор проверит заявку и откроет доступ к системе.</p>
+        <form id="registerForm" class="stack-form register-form">
+          <label>
+            Компания
+            <input name="companyName" type="text" autocomplete="organization" required />
+          </label>
+          <label>
+            ФИО пользователя
+            <input name="name" type="text" autocomplete="name" required />
+          </label>
+          <label>
+            E-mail
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" autocomplete="new-password" required />
+          </label>
+          <label>
+            Повтор пароля
+            <input name="passwordConfirm" type="password" autocomplete="new-password" required />
+          </label>
+          <button type="submit">Зарегистрироваться</button>
+        </form>
+        <p class="auth-switch">
+          Уже есть учётная запись?
+          <button id="showLoginButton" class="link-button" type="button">Войти</button>
+        </p>
       </section>
 
       <section id="appView" class="app-shell hidden">
         <aside class="sidebar card">
           <div class="user-card">
-            <p class="eyebrow">Текущий пользователь</p>
-            <strong id="currentUser">-</strong>
             <span id="currentRole" class="pill">-</span>
+            <strong id="currentUser">-</strong>
           </div>
           <nav class="main-nav" aria-label="Разделы приложения">
             <button class="nav-link active" data-section="base" type="button">База</button>
@@ -62,84 +96,69 @@
           <section id="baseSection" class="section-view card">
             <p class="eyebrow">База</p>
             <h2 id="baseTitle">ГСН-2022</h2>
-            <p id="baseDescription" class="muted">
-              Раздел для нормативной базы. На этом этапе показываем структуру раздела без загрузки нормативов.
-            </p>
+            <p id="baseDescription" class="muted hidden"></p>
+            <div id="gsnSupplementBar" class="gsn-supplement-bar hidden">
+              <span class="gsn-supplement-label">Версия:</span>
+              <select id="gsnSupplementSelect" class="gsn-supplement-select" aria-label="Версия дополнения"></select>
+            </div>
             <div id="gsnTree" class="tree gsn-tree"></div>
           </section>
 
           <section id="constructionsSection" class="section-view card hidden">
             <p class="eyebrow">Стройки</p>
-            <h2>Структура: Стройка -> Объект -> Смета</h2>
-            <p class="muted">Создавайте стройки первого уровня, объекты второго уровня и сметы третьего уровня.</p>
-
-            <div class="split three">
-              <form id="constructionForm" class="stack-form">
-                <h3>1. Стройка</h3>
-                <label>
-                  Название стройки
-                  <input name="name" placeholder="Например: ЖК Северный" required />
-                </label>
-                <button type="submit">Создать стройку</button>
-              </form>
-
-              <form id="objectForm" class="stack-form">
-                <h3>2. Объект</h3>
-                <label>
-                  Стройка
-                  <select name="constructionId" required></select>
-                </label>
-                <label>
-                  Название объекта
-                  <input name="name" placeholder="Например: Корпус 1" required />
-                </label>
-                <button type="submit">Создать объект</button>
-              </form>
-
-              <form id="estimateForm" class="stack-form">
-                <h3>3. Смета</h3>
-                <input name="id" type="hidden" />
-                <label>
-                  Объект
-                  <select name="objectId" required></select>
-                </label>
-                <label>
-                  Название
-                  <input name="title" placeholder="Локальная смета" required />
-                </label>
-                <label>
-                  Статус
-                  <select name="status">
-                    <option value="draft">draft</option>
-                    <option value="approved">approved</option>
-                    <option value="archived">archived</option>
-                  </select>
-                </label>
-                <label>
-                  Описание
-                  <textarea name="description" rows="2" placeholder="Краткое описание"></textarea>
-                </label>
-                <label>
-                  Позиции JSON
-                  <textarea name="items" rows="6" required></textarea>
-                </label>
-                <button type="submit">Сохранить смету</button>
-                <button id="resetEstimateForm" class="secondary" type="button">Новая смета</button>
-              </form>
-            </div>
-
-            <div id="constructionTree" class="tree"></div>
+            <div id="constructionTree" class="construction-tree"></div>
           </section>
+
+          <dialog id="constructionDialog" class="construction-dialog">
+            <form id="constructionDialogForm" class="stack-form" method="dialog">
+              <h3 id="constructionDialogTitle">Добавить</h3>
+              <input name="kind" type="hidden" />
+              <input name="id" type="hidden" />
+              <input name="parentId" type="hidden" />
+              <label>
+                Шифр
+                <input name="code" required />
+              </label>
+              <label>
+                Наименование
+                <input name="name" required />
+              </label>
+              <div class="dialog-actions">
+                <button type="submit">Сохранить</button>
+                <button class="secondary" data-dialog-cancel type="button">Отмена</button>
+              </div>
+            </form>
+          </dialog>
 
           <section id="editorSection" class="section-view card hidden">
             <p class="eyebrow">Редактор</p>
             <h2 id="editorTitle">Буфер</h2>
             <p id="editorDescription" class="muted">Сессионный буфер для элементов, добавленных из базы ГСН-2022.</p>
-            <div class="toolbar">
-              <button id="createEditorEstimateButton" type="button">Создать новую смету</button>
-            </div>
             <div id="editorContent" class="editor-content"></div>
           </section>
+
+          <dialog id="estimateLineDialog" class="construction-dialog">
+            <form id="estimateLineDialogForm" class="stack-form" method="dialog">
+              <h3>Добавить строку сметы</h3>
+              <input name="estimateId" type="hidden" />
+              <label>
+                Тип строки
+                <select name="lineType" required>
+                  <option value="section">Раздел</option>
+                  <option value="subsection">Подраздел</option>
+                  <option value="position">Позиция</option>
+                </select>
+              </label>
+              <label>
+                Наименование
+                <input name="name" required />
+              </label>
+              <div class="dialog-actions">
+                <button type="submit">Добавить</button>
+                <button class="secondary" data-dialog-cancel type="button">Отмена</button>
+              </div>
+            </form>
+          </dialog>
 
           <section id="documentsSection" class="section-view card hidden">
             <p class="eyebrow">Документы</p>

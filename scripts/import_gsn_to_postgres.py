@@ -28,6 +28,7 @@ SYSTEM_FILES = {
 NORM_RANGE_RE = re.compile(r"^[ЕЦУE]\d{4,5}-\d{3}-\d{2}$")
 RECORD_CODE_RE = re.compile(r"^[A-ZА-ЯЁ][A-ZА-ЯЁ0-9-]*\d", re.IGNORECASE)
 ORIGINAL_CODE_RE = re.compile(r"\(Ш([^)]*)\)")
+SUPPLEMENT_RE = re.compile(r"доп\.?\s*(\d+)", re.IGNORECASE)
 
 
 def read_lines(path: Path) -> list[str]:
@@ -393,36 +394,81 @@ def parse_base_info(source: Path) -> tuple[list[dict[str, object]], list[dict[st
     return info_rows, param_rows
 
 
-def write_load_sql(out: Path) -> Path:
+def supplement_label(code: str) -> str:
+    match = SUPPLEMENT_RE.search(code)
+    if match:
+        return f"доп. {match.group(1)}"
+    return code
+
+
+def supplement_ordinal(code: str) -> int:
+    match = SUPPLEMENT_RE.search(code)
+    return int(match.group(1)) if match else 0
+
+
+def extract_supplement_info(
+    base_info_params: list[dict[str, object]],
+    override_code: str = "",
+) -> tuple[str, str, str, str, int]:
+    params = {str(row["param_key"]): str(row["param_value"]) for row in base_info_params}
+    edition = params.get("Редакция СНБ", "")
+    version_date = params.get("Версия", "")
+    code = override_code.strip()
+    if not code:
+        match = SUPPLEMENT_RE.search(edition) or SUPPLEMENT_RE.search(params.get("Краткое наименование базы", ""))
+        if not match:
+            raise SystemExit("could not detect supplement code; pass --supplement, e.g. доп.18")
+        code = f"доп.{match.group(1)}"
+    return code, supplement_label(code), edition, version_date, supplement_ordinal(code)
+
+
+def with_supplement(rows: list[dict[str, object]], supplement_code: str) -> list[dict[str, object]]:
+    tagged: list[dict[str, object]] = []
+    for row in rows:
+        item = dict(row)
+        item["supplement_code"] = supplement_code
+        tagged.append(item)
+    return tagged
+
+
+def write_load_sql(out: Path, supplement_code: str, replace_all: bool) -> Path:
     def sql_path(name: str) -> str:
         return str((out / name).resolve()).replace("\\", "/")
 
     load_sql = out / "load_gsn.sql"
-    load_sql.write_text(
-        "\n".join(
+    shared_truncates = [
+        "TRUNCATE gsn.record_amendments, gsn.amendment_impacts, gsn.amendments,",
+        "    gsn.nsi, gsn.record_resources, gsn.records, gsn.import_batches CASCADE;",
+    ]
+    lines = [
+        "BEGIN;",
+        f"DELETE FROM gsn.supplements WHERE code = '{supplement_code}';",
+    ]
+    if replace_all:
+        lines.extend(shared_truncates)
+    lines.extend(
+        [
+            rf"\copy gsn.supplements(code,label,edition,version_date,ordinal) FROM '{sql_path('supplements.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+            rf"\copy gsn.import_batches(id,source_path,prepared_path,imported_at) FROM '{sql_path('import_batches.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+            rf"\copy gsn.base_info(supplement_code,code,source_file,line_no,raw_line) FROM '{sql_path('base_info.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+            rf"\copy gsn.base_info_params(supplement_code,base_code,param_key,param_value,ordinal) FROM '{sql_path('base_info_params.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+            rf"\copy gsn.hierarchy(supplement_code,code,parent_code,line_no,level,name,unit,raw_norm_list,raw_line) FROM '{sql_path('hierarchy.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+            rf"\copy gsn.hierarchy_record_refs(supplement_code,hierarchy_code,record_code,ordinal) FROM '{sql_path('hierarchy_record_refs.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+        ]
+    )
+    if replace_all:
+        lines.extend(
             [
-                "BEGIN;",
-                "TRUNCATE gsn.record_amendments, gsn.amendment_impacts, gsn.amendments,",
-                "    gsn.nsi, gsn.record_resources, gsn.records,",
-                "    gsn.hierarchy_record_refs, gsn.hierarchy,",
-                "    gsn.base_info_params, gsn.base_info, gsn.import_batches CASCADE;",
-                rf"\copy gsn.import_batches(id,source_path,prepared_path,imported_at) FROM '{sql_path('import_batches.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
-                rf"\copy gsn.base_info(code,source_file,line_no,raw_line) FROM '{sql_path('base_info.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
-                rf"\copy gsn.base_info_params(base_code,param_key,param_value,ordinal) FROM '{sql_path('base_info_params.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
-                rf"\copy gsn.hierarchy(code,parent_code,line_no,level,name,unit,raw_norm_list,raw_line) FROM '{sql_path('hierarchy.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
-                rf"\copy gsn.hierarchy_record_refs(hierarchy_code,record_code,ordinal) FROM '{sql_path('hierarchy_record_refs.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.records(code,source_file,line_no,original_code,determinant,cost_indicators,name,unit,mass,resource_list,record_kind,raw_line) FROM '{sql_path('records.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.record_resources(record_code,resource_code,quantity_text,ordinal) FROM '{sql_path('record_resources.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.nsi(record_code,line_no,original_code,modifiers,cost_indicators,work_composition,raw_line) FROM '{sql_path('nsi.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.amendments(code,norm_code_addition,name_addition,interface_name,raw_line,line_no) FROM '{sql_path('amendments.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.amendment_impacts(amendment_code,impact_code,impact_value,ordinal) FROM '{sql_path('amendment_impacts.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
                 rf"\copy gsn.record_amendments(record_code,amendment_code,line_no,ordinal) FROM '{sql_path('record_amendments.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
-                "COMMIT;",
-                "",
             ]
-        ),
-        encoding="utf-8",
-    )
+        )
+    lines.extend(["COMMIT;", ""])
+    load_sql.write_text("\n".join(lines), encoding="utf-8")
     return load_sql
 
 
@@ -435,6 +481,13 @@ def main() -> None:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--database-url", default="")
+    parser.add_argument("--supplement", default="", help="Supplement code, e.g. доп.18 (auto-detected from 00~f.txt by default).")
+    parser.add_argument(
+        "--replace-all",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Replace shared norm tables (records, nsi, amendments) on load. Default: true.",
+    )
     parser.add_argument("--load", action="store_true", help="Apply schema and load generated TSV files with psql.")
     args = parser.parse_args()
 
@@ -444,6 +497,14 @@ def main() -> None:
 
     hierarchy, hierarchy_refs = parse_hierarchy(source)
     base_info, base_info_params = parse_base_info(source)
+    supplement_code, supplement_label_value, edition, version_date, supplement_ord = extract_supplement_info(
+        base_info_params,
+        args.supplement,
+    )
+    base_info = with_supplement(base_info, supplement_code)
+    base_info_params = with_supplement(base_info_params, supplement_code)
+    hierarchy = with_supplement(hierarchy, supplement_code)
+    hierarchy_refs = with_supplement(hierarchy_refs, supplement_code)
     records, record_resources, duplicates = parse_records(source)
     nsi = parse_nsi(source)
     amendments, amendment_impacts = parse_ppr(source)
@@ -456,6 +517,19 @@ def main() -> None:
 
     batch_id = dt.datetime.now().strftime("gsn-2022-%Y%m%d-%H%M%S")
     write_tsv(
+        out / "supplements.tsv",
+        ["code", "label", "edition", "version_date", "ordinal"],
+        [
+            {
+                "code": supplement_code,
+                "label": supplement_label_value,
+                "edition": edition,
+                "version_date": version_date,
+                "ordinal": supplement_ord,
+            }
+        ],
+    )
+    write_tsv(
         out / "import_batches.tsv",
         ["id", "source_path", "prepared_path", "imported_at"],
         [
@@ -467,10 +541,22 @@ def main() -> None:
             }
         ],
     )
-    write_tsv(out / "base_info.tsv", ["code", "source_file", "line_no", "raw_line"], base_info)
-    write_tsv(out / "base_info_params.tsv", ["base_code", "param_key", "param_value", "ordinal"], base_info_params)
-    write_tsv(out / "hierarchy.tsv", ["code", "parent_code", "line_no", "level", "name", "unit", "raw_norm_list", "raw_line"], hierarchy)
-    write_tsv(out / "hierarchy_record_refs.tsv", ["hierarchy_code", "record_code", "ordinal"], hierarchy_refs)
+    write_tsv(out / "base_info.tsv", ["supplement_code", "code", "source_file", "line_no", "raw_line"], base_info)
+    write_tsv(
+        out / "base_info_params.tsv",
+        ["supplement_code", "base_code", "param_key", "param_value", "ordinal"],
+        base_info_params,
+    )
+    write_tsv(
+        out / "hierarchy.tsv",
+        ["supplement_code", "code", "parent_code", "line_no", "level", "name", "unit", "raw_norm_list", "raw_line"],
+        hierarchy,
+    )
+    write_tsv(
+        out / "hierarchy_record_refs.tsv",
+        ["supplement_code", "hierarchy_code", "record_code", "ordinal"],
+        hierarchy_refs,
+    )
     write_tsv(
         out / "records.tsv",
         [
@@ -497,9 +583,10 @@ def main() -> None:
     write_tsv(out / "duplicate_records.tsv", ["code", "first_source_file", "first_line_no", "duplicate_source_file", "duplicate_line_no"], duplicates)
     write_tsv(out / "missing_amendments.tsv", ["amendment_code"], missing_amendments)
 
-    load_sql = write_load_sql(out)
+    load_sql = write_load_sql(out, supplement_code, args.replace_all)
     print(f"Generated TSV files in: {out}")
     print(f"Generated psql load script: {load_sql}")
+    print(f"Supplement: {supplement_code} ({supplement_label_value})")
     print(f"Rows: base_info={len(base_info)}, base_info_params={len(base_info_params)}, hierarchy={len(hierarchy)}, records={len(records)}, resources={len(record_resources)}, nsi={len(nsi)}, amendments={len(amendments)}, incidences={len(record_amendments)}")
     print(f"Missing amendment dictionary records referenced by amen: {len(missing_amendments)}")
 

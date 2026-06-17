@@ -17,12 +17,13 @@ import (
 
 var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrNotAuthorized      = errors.New("user is not authorized")
 	ErrInvalidToken       = errors.New("invalid token")
 	ErrTokenExpired       = errors.New("token expired")
 )
 
 type UserReader interface {
-	FindUserByEmail(email string) (domain.User, bool)
+	FindUserByCompanyAndName(companyName, userName string) (domain.User, bool)
 }
 
 type Service struct {
@@ -57,17 +58,24 @@ func VerifyPassword(password, salt, expectedHash string) bool {
 	return hmac.Equal([]byte(actual), []byte(expectedHash))
 }
 
-func (s *Service) Login(email, password string) (string, domain.User, error) {
-	user, ok := s.users.FindUserByEmail(strings.ToLower(strings.TrimSpace(email)))
+func (s *Service) Login(companyName, userName, password string) (string, domain.User, error) {
+	user, ok := s.users.FindUserByCompanyAndName(
+		strings.TrimSpace(companyName),
+		strings.TrimSpace(userName),
+	)
 	if !ok || !VerifyPassword(password, user.PasswordSalt, user.PasswordHash) {
 		return "", domain.User{}, ErrInvalidCredentials
+	}
+
+	if !user.CanAccessApp() && !user.CanAccessAdmin() {
+		return "", domain.User{}, ErrNotAuthorized
 	}
 
 	token, err := s.Sign(domain.Claims{
 		UserID:    user.ID,
 		CompanyID: user.CompanyID,
 		Email:     user.Email,
-		Role:      user.Role,
+		Role:      user.Role(),
 		ExpiresAt: time.Now().Add(12 * time.Hour).Unix(),
 	})
 	if err != nil {

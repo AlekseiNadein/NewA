@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,7 @@ type Server struct {
 	store  *store.FileStore
 	auth   *auth.Service
 	gsn    *gsn.Service
+	webDir string
 	static http.Handler
 }
 
@@ -31,6 +33,7 @@ func NewServer(store *store.FileStore, authService *auth.Service, gsnService *gs
 		store:  store,
 		auth:   authService,
 		gsn:    gsnService,
+		webDir: webDir,
 		static: http.FileServer(http.Dir(webDir)),
 	}
 }
@@ -38,15 +41,22 @@ func NewServer(store *store.FileStore, authService *auth.Service, gsnService *gs
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/auth/register", s.handleRegister)
 	mux.Handle("/api/me", s.withAuth(http.HandlerFunc(s.handleMe)))
 	mux.Handle("/api/companies", s.withAuth(http.HandlerFunc(s.handleCompanies)))
-	mux.Handle("/api/users", s.withAuth(http.HandlerFunc(s.handleUsers)))
-	mux.Handle("/api/constructions", s.withAuth(http.HandlerFunc(s.handleConstructions)))
-	mux.Handle("/api/objects", s.withAuth(http.HandlerFunc(s.handleObjects)))
-	mux.Handle("/api/estimates", s.withAuth(http.HandlerFunc(s.handleEstimates)))
-	mux.Handle("/api/estimates/", s.withAuth(http.HandlerFunc(s.handleEstimateByID)))
-	mux.Handle("/api/gsn/base-info", s.withAuth(http.HandlerFunc(s.handleGSNBaseInfo)))
-	mux.Handle("/api/gsn/hierarchy", s.withAuth(http.HandlerFunc(s.handleGSNHierarchy)))
+	mux.Handle("/api/users", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleUsers))))
+	mux.Handle("/api/users/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleUserByID))))
+	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))
+	mux.Handle("/api/constructions/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructionByID))))
+	mux.Handle("/api/objects", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjects))))
+	mux.Handle("/api/objects/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjectByID))))
+	mux.Handle("/api/estimates", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimates))))
+	mux.Handle("/api/estimates/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimateByID))))
+	mux.Handle("/api/gsn/supplements", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNSupplements))))
+	mux.Handle("/api/gsn/base-info", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNBaseInfo))))
+	mux.Handle("/api/gsn/hierarchy", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchy))))
+	mux.HandleFunc("/admin", s.serveAdmin)
+	mux.HandleFunc("/admin/", s.serveAdmin)
 	mux.Handle("/", s.static)
 
 	return s.withCommonHeaders(mux)
@@ -63,23 +73,66 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		CompanyName string `json:"companyName"`
+		Name        string `json:"name"`
+		Password    string `json:"password"`
 	}
 	if err := readJSON(r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 
-	token, user, err := s.auth.Login(input.Email, input.Password)
+	token, user, err := s.auth.Login(input.CompanyName, input.Name, input.Password)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid email or password")
+		switch {
+		case errors.Is(err, auth.ErrNotAuthorized):
+			writeError(w, http.StatusForbidden, "учётная запись ожидает подтверждения администратора")
+		default:
+			writeError(w, http.StatusUnauthorized, "неверная компания, ФИО или пароль")
+		}
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token": token,
 		"user":  user,
+		"access": map[string]bool{
+			"app":   user.CanAccessApp(),
+			"admin": user.CanAccessAdmin(),
+		},
+	})
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var input store.RegisterUser
+	if err := readJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	if input.Password != input.PasswordConfirm {
+		writeError(w, http.StatusBadRequest, "пароли не совпадают")
+		return
+	}
+
+	user, err := s.store.RegisterUser(input)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"user":    user,
+		"message": "заявка на регистрацию отправлена, ожидайте подтверждения администратора",
 	})
 }
 
@@ -97,7 +150,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user":   user,
+		"user": user,
+		"access": map[string]bool{
+			"app":   user.CanAccessApp(),
+			"admin": user.CanAccessAdmin(),
+		},
 		"claims": claims,
 	})
 }
@@ -165,10 +222,8 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 		if !includeAll {
 			input.CompanyID = claims.CompanyID
-			if input.Role == domain.RoleSuperAdmin {
-				writeError(w, http.StatusForbidden, "company admin cannot create super admins")
-				return
-			}
+			input.CompanyName = ""
+			input.IsSuperAdministrator = false
 		}
 
 		user, err := s.store.CreateUser(input)
@@ -176,7 +231,37 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			writeStoreError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, user)
+		writeJSON(w, http.StatusCreated, s.store.UserView(user))
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+	id := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	if id == "" {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	switch r.Method {
+	case http.MethodPut:
+		var input store.UpdateUser
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		user, err := s.store.UpdateUser(id, claims.CompanyID, includeAll, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, s.store.UserView(user))
 
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -215,6 +300,40 @@ func (s *Server) handleConstructions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleConstructionByID(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+	id := strings.TrimPrefix(r.URL.Path, "/api/constructions/")
+	if id == "" {
+		writeError(w, http.StatusNotFound, "construction not found")
+		return
+	}
+
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	switch r.Method {
+	case http.MethodPut:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		var input store.ConstructionInput
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		construction, err := s.store.UpdateConstruction(id, claims.CompanyID, includeAll, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, construction)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (s *Server) handleObjects(w http.ResponseWriter, r *http.Request) {
 	claims := mustClaims(r)
 	includeAll := claims.Role == domain.RoleSuperAdmin
@@ -241,6 +360,40 @@ func (s *Server) handleObjects(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusCreated, object)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleObjectByID(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+	id := strings.TrimPrefix(r.URL.Path, "/api/objects/")
+	if id == "" {
+		writeError(w, http.StatusNotFound, "object not found")
+		return
+	}
+
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	switch r.Method {
+	case http.MethodPut:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		var input store.ConstructionObjectInput
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		object, err := s.store.UpdateObject(id, claims.CompanyID, includeAll, input)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, object)
 
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -325,9 +478,37 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleGSNSupplements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	supplements, err := s.gsn.ListSupplements(r.Context())
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn supplements query failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to read GSN supplements")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"supplements": supplements,
+	})
+}
+
 func (s *Server) handleGSNHierarchy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	supplement := r.URL.Query().Get("supplement")
+	if supplement == "" {
+		writeError(w, http.StatusBadRequest, "supplement is required")
 		return
 	}
 
@@ -341,7 +522,7 @@ func (s *Server) handleGSNHierarchy(w http.ResponseWriter, r *http.Request) {
 		limit = parsed
 	}
 
-	nodes, err := s.gsn.ListChildren(r.Context(), r.URL.Query().Get("parent"), limit)
+	nodes, err := s.gsn.ListChildren(r.Context(), supplement, r.URL.Query().Get("parent"), limit)
 	if err != nil {
 		if errors.Is(err, gsn.ErrNotConfigured) {
 			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
@@ -363,7 +544,13 @@ func (s *Server) handleGSNBaseInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := s.gsn.BaseInfo(r.Context())
+	supplement := r.URL.Query().Get("supplement")
+	if supplement == "" {
+		writeError(w, http.StatusBadRequest, "supplement is required")
+		return
+	}
+
+	info, err := s.gsn.BaseInfo(r.Context(), supplement)
 	if err != nil {
 		if errors.Is(err, gsn.ErrNotConfigured) {
 			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
@@ -375,6 +562,41 @@ func (s *Server) handleGSNBaseInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(s.webDir, "admin.html"))
+}
+
+func (s *Server) withAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims := mustClaims(r)
+		if !claims.Role.CanManageUsers() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) withAuthorized(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims := mustClaims(r)
+		user, ok := s.store.FindUserByID(claims.UserID)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "user not found")
+			return
+		}
+		if !user.CanAccessApp() {
+			writeError(w, http.StatusForbidden, "учётная запись не авторизована для работы в системе")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {
@@ -443,7 +665,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrForbidden):
 		writeError(w, http.StatusForbidden, "not enough permissions")
 	case errors.Is(err, store.ErrConflict):
-		writeError(w, http.StatusBadRequest, "invalid or conflicting data")
+		writeError(w, http.StatusBadRequest, "некорректные или конфликтующие данные")
 	default:
 		slog.Error("store operation failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal server error")

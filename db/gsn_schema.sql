@@ -2,6 +2,15 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE SCHEMA IF NOT EXISTS gsn;
 
+CREATE TABLE IF NOT EXISTS gsn.supplements (
+    code TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    edition TEXT NOT NULL DEFAULT '',
+    version_date TEXT NOT NULL DEFAULT '',
+    ordinal INTEGER NOT NULL DEFAULT 0,
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS gsn.import_batches (
     id TEXT PRIMARY KEY,
     source_path TEXT NOT NULL,
@@ -10,18 +19,23 @@ CREATE TABLE IF NOT EXISTS gsn.import_batches (
 );
 
 CREATE TABLE IF NOT EXISTS gsn.base_info (
-    code TEXT PRIMARY KEY,
+    supplement_code TEXT NOT NULL REFERENCES gsn.supplements(code) ON DELETE CASCADE,
+    code TEXT NOT NULL,
     source_file TEXT NOT NULL,
     line_no INTEGER NOT NULL,
-    raw_line TEXT NOT NULL
+    raw_line TEXT NOT NULL,
+    PRIMARY KEY (supplement_code, code)
 );
 
 CREATE TABLE IF NOT EXISTS gsn.base_info_params (
-    base_code TEXT NOT NULL REFERENCES gsn.base_info(code) ON DELETE CASCADE,
+    supplement_code TEXT NOT NULL,
+    base_code TEXT NOT NULL,
     param_key TEXT NOT NULL,
     param_value TEXT NOT NULL DEFAULT '',
     ordinal INTEGER NOT NULL,
-    PRIMARY KEY (base_code, ordinal)
+    PRIMARY KEY (supplement_code, base_code, ordinal),
+    FOREIGN KEY (supplement_code, base_code)
+        REFERENCES gsn.base_info(supplement_code, code) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_gsn_base_info_params_key
@@ -29,34 +43,44 @@ CREATE INDEX IF NOT EXISTS idx_gsn_base_info_params_key
 
 CREATE OR REPLACE VIEW gsn.base_info_json AS
 SELECT
+    bi.supplement_code,
     bi.code,
     bi.source_file,
     bi.line_no,
     jsonb_object_agg(bip.param_key, bip.param_value ORDER BY bip.ordinal) AS params,
     bi.raw_line
 FROM gsn.base_info bi
-JOIN gsn.base_info_params bip ON bip.base_code = bi.code
-GROUP BY bi.code, bi.source_file, bi.line_no, bi.raw_line;
+JOIN gsn.base_info_params bip
+    ON bip.supplement_code = bi.supplement_code AND bip.base_code = bi.code
+GROUP BY bi.supplement_code, bi.code, bi.source_file, bi.line_no, bi.raw_line;
 
 CREATE TABLE IF NOT EXISTS gsn.hierarchy (
-    code TEXT PRIMARY KEY,
-    parent_code TEXT REFERENCES gsn.hierarchy(code) ON DELETE SET NULL,
+    supplement_code TEXT NOT NULL REFERENCES gsn.supplements(code) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    parent_code TEXT,
     line_no INTEGER NOT NULL,
     level INTEGER NOT NULL,
     name TEXT NOT NULL DEFAULT '',
     unit TEXT NOT NULL DEFAULT '',
     raw_norm_list TEXT NOT NULL DEFAULT '',
-    raw_line TEXT NOT NULL
+    raw_line TEXT NOT NULL,
+    PRIMARY KEY (supplement_code, code),
+    FOREIGN KEY (supplement_code, parent_code)
+        REFERENCES gsn.hierarchy(supplement_code, code) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_gsn_hierarchy_parent_code ON gsn.hierarchy(parent_code);
+CREATE INDEX IF NOT EXISTS idx_gsn_hierarchy_supplement_parent
+    ON gsn.hierarchy(supplement_code, parent_code);
 CREATE INDEX IF NOT EXISTS idx_gsn_hierarchy_level ON gsn.hierarchy(level);
 
 CREATE TABLE IF NOT EXISTS gsn.hierarchy_record_refs (
-    hierarchy_code TEXT NOT NULL REFERENCES gsn.hierarchy(code) ON DELETE CASCADE,
+    supplement_code TEXT NOT NULL,
+    hierarchy_code TEXT NOT NULL,
     record_code TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
-    PRIMARY KEY (hierarchy_code, record_code, ordinal)
+    PRIMARY KEY (supplement_code, hierarchy_code, record_code, ordinal),
+    FOREIGN KEY (supplement_code, hierarchy_code)
+        REFERENCES gsn.hierarchy(supplement_code, code) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_gsn_hierarchy_record_refs_record_code

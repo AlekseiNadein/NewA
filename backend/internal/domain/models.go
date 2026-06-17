@@ -18,20 +18,41 @@ type Company struct {
 }
 
 type User struct {
-	ID           string    `json:"id"`
-	CompanyID    string    `json:"companyId"`
-	Email        string    `json:"email"`
-	Name         string    `json:"name"`
-	Role         Role      `json:"role"`
-	PasswordHash string    `json:"-"`
-	PasswordSalt string    `json:"-"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID                   string    `json:"id"`
+	CompanyID            string    `json:"companyId"`
+	Email                string    `json:"email"`
+	Name                 string    `json:"name"`
+	Authorized           bool      `json:"authorized"`
+	IsAdministrator      bool      `json:"isAdministrator"`
+	IsSuperAdministrator bool      `json:"isSuperAdministrator"`
+	PasswordHash         string    `json:"-"`
+	PasswordSalt         string    `json:"-"`
+	CreatedAt            time.Time `json:"createdAt"`
+	UpdatedAt            time.Time `json:"updatedAt"`
+}
+
+func (u User) Role() Role {
+	if u.IsSuperAdministrator {
+		return RoleSuperAdmin
+	}
+	if u.IsAdministrator {
+		return RoleCompanyAdmin
+	}
+	return RoleUser
+}
+
+func (u User) CanAccessAdmin() bool {
+	return u.IsAdministrator || u.IsSuperAdministrator
+}
+
+func (u User) CanAccessApp() bool {
+	return u.Authorized
 }
 
 type Construction struct {
 	ID        string    `json:"id"`
 	CompanyID string    `json:"companyId"`
+	Code      string    `json:"code"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
@@ -41,6 +62,7 @@ type ConstructionObject struct {
 	ID             string    `json:"id"`
 	CompanyID      string    `json:"companyId"`
 	ConstructionID string    `json:"constructionId"`
+	Code           string    `json:"code"`
 	Name           string    `json:"name"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
@@ -58,6 +80,7 @@ type Estimate struct {
 	ID          string         `json:"id"`
 	CompanyID   string         `json:"companyId"`
 	ObjectID    string         `json:"objectId"`
+	Code        string         `json:"code"`
 	Title       string         `json:"title"`
 	Description string         `json:"description"`
 	Status      EstimateStatus `json:"status"`
@@ -67,8 +90,17 @@ type Estimate struct {
 	UpdatedAt   time.Time      `json:"updatedAt"`
 }
 
+type EstimateLineType string
+
+const (
+	EstimateLineSection    EstimateLineType = "section"
+	EstimateLineSubsection EstimateLineType = "subsection"
+	EstimateLinePosition   EstimateLineType = "position"
+)
+
 type EstimateItem struct {
 	ID        string  `json:"id"`
+	Type      string  `json:"type"`
 	Name      string  `json:"name"`
 	Quantity  float64 `json:"quantity"`
 	Unit      string  `json:"unit"`

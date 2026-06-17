@@ -22,6 +22,7 @@ CREATE INDEX idx_users_company_id ON users(company_id);
 CREATE TABLE constructions (
     id TEXT PRIMARY KEY,
     company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+    code TEXT NOT NULL,
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -33,6 +34,7 @@ CREATE TABLE construction_objects (
     id TEXT PRIMARY KEY,
     company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
     construction_id TEXT NOT NULL REFERENCES constructions(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
     name TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -45,6 +47,7 @@ CREATE TABLE estimates (
     id TEXT PRIMARY KEY,
     company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
     object_id TEXT NOT NULL REFERENCES construction_objects(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'archived')),
@@ -78,3 +81,57 @@ CREATE TABLE outbox_events (
 );
 
 CREATE INDEX idx_outbox_events_unprocessed ON outbox_events(created_at) WHERE processed_at IS NULL;
+
+CREATE TABLE app_constructions (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_app_constructions_company_id ON app_constructions(company_id);
+
+CREATE TABLE app_construction_objects (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    construction_id TEXT NOT NULL REFERENCES app_constructions(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_app_construction_objects_company_id ON app_construction_objects(company_id);
+CREATE INDEX idx_app_construction_objects_construction_id ON app_construction_objects(construction_id);
+
+CREATE TABLE app_estimates (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    object_id TEXT NOT NULL REFERENCES app_construction_objects(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'archived')),
+    total NUMERIC(14, 2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_app_estimates_company_id ON app_estimates(company_id);
+CREATE INDEX idx_app_estimates_object_id ON app_estimates(object_id);
+
+CREATE TABLE app_estimate_lines (
+    id TEXT PRIMARY KEY,
+    estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
+    line_type TEXT NOT NULL CHECK (line_type IN ('section', 'subsection', 'position')),
+    name TEXT NOT NULL,
+    quantity NUMERIC(14, 3) NOT NULL DEFAULT 0,
+    unit TEXT NOT NULL DEFAULT '',
+    unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0,
+    total NUMERIC(14, 2) NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_app_estimate_lines_estimate_id ON app_estimate_lines(estimate_id, sort_order, id);
