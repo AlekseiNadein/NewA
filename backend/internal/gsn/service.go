@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -19,6 +20,7 @@ type Node struct {
 	Name         string `json:"name"`
 	Unit         string `json:"unit,omitempty"`
 	NormList     string `json:"normList,omitempty"`
+	OriginalCode string `json:"originalCode,omitempty"`
 	NodeType     string `json:"nodeType,omitempty"`
 	DocumentRef  string `json:"documentRef,omitempty"`
 	DocumentFile string `json:"documentFile,omitempty"`
@@ -134,6 +136,18 @@ func (s *Service) ListChildren(ctx context.Context, supplementCode, parentCode s
 				WHERE refs.supplement_code = h.supplement_code
 					AND refs.hierarchy_code = h.code
 			) AS record_count,
+			COALESCE(
+				(
+					SELECT COALESCE(NULLIF(rec.original_code, ''), rec.code)
+					FROM gsn.hierarchy_record_refs refs
+					JOIN gsn.records rec ON rec.code = refs.record_code
+					WHERE refs.supplement_code = h.supplement_code
+						AND refs.hierarchy_code = h.code
+					ORDER BY refs.ordinal
+					LIMIT 1
+				),
+				''
+			) AS original_code,
 			EXISTS (
 				SELECT 1
 				FROM gsn.hierarchy child
@@ -165,9 +179,21 @@ func (s *Service) ListChildren(ctx context.Context, supplementCode, parentCode s
 			&node.DocumentRef,
 			&node.DocumentFile,
 			&node.RecordCount,
+			&node.OriginalCode,
 			&node.HasChildren,
 		); err != nil {
 			return nil, fmt.Errorf("scan gsn hierarchy: %w", err)
+		}
+		if !node.HasChildren && node.OriginalCode == "" && strings.TrimSpace(node.NormList) != "" {
+			refs := parseNormListRefs(node.NormList)
+			if len(refs) > 0 {
+				if detail, err := s.lookupRecordDetail(ctx, refs[0]); err == nil {
+					node.OriginalCode = detail.OriginalCode
+					if node.OriginalCode == "" {
+						node.OriginalCode = detail.Code
+					}
+				}
+			}
 		}
 		nodes = append(nodes, node)
 	}

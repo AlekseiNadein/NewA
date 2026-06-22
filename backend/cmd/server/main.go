@@ -18,7 +18,7 @@ func main() {
 	webDir := env("APP_WEB_DIR", "web")
 	jwtSecret := env("APP_JWT_SECRET", "dev-secret-change-me")
 	treeDatabaseURL := env("APP_DATABASE_URL", "")
-	gsnDatabaseURL := env("APP_GSN_DATABASE_URL", "")
+	gsnDatabaseURL := env("APP_GSN_DATABASE_URL", treeDatabaseURL)
 
 	if jwtSecret == "dev-secret-change-me" {
 		slog.Warn("using development JWT secret; set APP_JWT_SECRET for shared environments")

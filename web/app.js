@@ -1146,25 +1146,39 @@ async function fetchGSNChildren(parentCode) {
   return result.nodes || [];
 }
 
+function gsnLeafOriginalCode(node) {
+  return String(node?.originalCode || "").trim();
+}
+
 function renderGSNNode(node) {
   const isPdf = isGSNPdfNode(node);
   const toggle = node.hasChildren
     ? `<button class="tree-toggle" data-gsn-toggle="${escapeHTML(node.code)}" type="button">+</button>`
     : `<span class="tree-toggle-placeholder"></span>`;
   const encodedNode = encodeNodeAction(node);
-  const actions =
-    !node.hasChildren && !isPdf
-      ? `
-      <div class="node-actions">
-        <button class="micro-button secondary" data-gsn-buffer="${encodedNode}" type="button">В буфер</button>
-        ${
-          getAddLineTargetEstimate()
-            ? `<button class="micro-button" data-gsn-estimate="${encodedNode}" type="button">В смету</button>`
-            : ""
-        }
-      </div>
-    `
-      : "";
+  if (!node.hasChildren && !isPdf) {
+    const canAddToEstimate = Boolean(getAddLineTargetEstimate());
+    const originalCode = gsnLeafOriginalCode(node);
+    return `
+      <article class="tree-node gsn-node gsn-node-leaf">
+        <header>
+          <div class="tree-title">
+            ${toggle}
+            <div class="gsn-leaf-row">
+              <div class="gsn-leaf-cell gsn-leaf-code" title="${escapeHTML(originalCode)}">${escapeHTML(originalCode || "-")}</div>
+              <div class="gsn-leaf-cell gsn-leaf-name" title="${escapeHTML(node.name || "")}">${escapeHTML(node.name || "")}</div>
+              <div class="gsn-leaf-cell gsn-leaf-unit" title="${escapeHTML(node.unit || "")}">${escapeHTML(node.unit || "-")}</div>
+              <div class="gsn-leaf-cell gsn-leaf-actions">
+                <button class="micro-button secondary" data-gsn-buffer="${encodedNode}" type="button">В буфер</button>
+                ${canAddToEstimate ? `<button class="micro-button" data-gsn-estimate="${encodedNode}" type="button">В смету</button>` : ""}
+              </div>
+            </div>
+          </div>
+        </header>
+        <div class="tree-children hidden"></div>
+      </article>
+    `;
+  }
   const pdfIcon = isPdf
     ? `<span class="gsn-pdf-icon" title="PDF документ" aria-hidden="true">${iconPdf()}</span>`
     : "";
@@ -1182,7 +1196,6 @@ function renderGSNNode(node) {
               ${pdfIcon}
               <strong>${escapeHTML(gsnNodeTitle(node))}</strong>
             </div>
-            ${actions}
           </div>
         </div>
       </header>
@@ -2707,6 +2720,7 @@ function addNodeToOnlyEstimate(node) {
 function editorItemFromNode(node) {
   return {
     code: node.code,
+    originalCode: node.originalCode || "",
     name: node.name || "",
     unit: node.unit || "",
   };
@@ -3382,6 +3396,7 @@ function encodeNodeAction(node) {
   return encodeURIComponent(
     JSON.stringify({
       code: node.code,
+      originalCode: node.originalCode || "",
       name: node.name || "",
       unit: node.unit || "",
     }),

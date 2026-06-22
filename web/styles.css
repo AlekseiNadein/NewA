@@ -834,6 +834,14 @@ p {
   min-width: 0;
 }
 
+.gsn-node {
+  font-size: 0.9rem;
+}
+
+.gsn-node.tree-node {
+  padding: 0.5rem 0.58rem;
+}
+
 .gsn-node-title-row {
   display: flex;
   align-items: flex-start;
@@ -866,6 +874,56 @@ p {
 .gsn-node-pdf:hover {
   border-color: #c9d4ea;
   background: #fbfcff;
+}
+
+.gsn-node-leaf .tree-title {
+  width: 100%;
+  align-items: center;
+}
+
+.gsn-leaf-row {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(9rem, 1.35fr) minmax(14rem, 3fr) minmax(4.5rem, 0.8fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.gsn-leaf-cell {
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.gsn-leaf-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  color: #425779;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gsn-leaf-name {
+  font-size: 0.84rem;
+}
+
+.gsn-leaf-unit {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.gsn-leaf-actions {
+  display: flex;
+  gap: 0.3rem;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
+.gsn-node-leaf .micro-button {
+  font-size: 0.72rem;
+  padding: 0.22rem 0.45rem;
 }
 
 .gsn-supplement-bar {
