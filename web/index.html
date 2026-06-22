@@ -22,19 +22,19 @@
 
       <section id="loginView" class="card login-card">
         <h2>Вход</h2>
-        <p class="muted">Введите компанию, ФИО и пароль. Доступ в систему открывается после подтверждения администратором.</p>
+        <p class="muted">Укажите ФИО или e-mail и пароль. Компания нужна при входе по ФИО; при входе по e-mail её можно не заполнять.</p>
         <form id="loginForm" class="grid-form">
           <label>
             Компания
-            <input name="companyName" type="text" value="Система" autocomplete="organization" required />
+            <input name="companyName" type="text" autocomplete="organization" />
           </label>
           <label>
-            ФИО пользователя
-            <input name="name" type="text" value="Суперадминистратор" autocomplete="name" required />
+            ФИО или e-mail
+            <input name="name" type="text" autocomplete="username" required />
           </label>
           <label>
             Пароль
-            <input name="password" type="password" value="admin123" autocomplete="current-password" required />
+            <input name="password" type="password" autocomplete="current-password" required />
           </label>
           <button type="submit">Войти</button>
         </form>
@@ -92,7 +92,6 @@
             <button class="nav-link" data-section="constructions" type="button">Стройки</button>
             <button class="nav-link" data-section="editor" type="button">Редактор</button>
             <div id="editorSubitems" class="nav-subitems hidden" data-subitems="editor"></div>
-            <button class="nav-link" data-section="documents" type="button">Документы</button>
             <button class="nav-link" data-section="settings" type="button">Настройки</button>
           </nav>
         </aside>
@@ -101,14 +100,31 @@
           <section id="baseSection" class="section-view card">
             <p class="eyebrow">База</p>
             <h2 id="baseTitle">ГСН-2022</h2>
+            <div id="baseLicenseBlock" class="license-block hidden"></div>
+            <div id="baseSectionBody">
             <p id="baseDescription" class="muted hidden"></p>
             <div id="gsnSupplementBar" class="gsn-supplement-bar hidden">
-              <span class="gsn-supplement-label">Версия:</span>
-              <select id="gsnSupplementSelect" class="gsn-supplement-select" aria-label="Версия дополнения"></select>
+              <div class="gsn-supplement-row">
+                <span class="gsn-supplement-label">Версия:</span>
+                <select id="gsnSupplementSelect" class="gsn-supplement-select" aria-label="Версия дополнения"></select>
+              </div>
+              <form id="gsnSearchForm" class="gsn-search-bar">
+                <span class="gsn-supplement-label">Поиск:</span>
+                <input
+                  id="gsnSearchInput"
+                  class="gsn-search-input"
+                  type="search"
+                  placeholder="Поиск по наименованию или шифру"
+                  autocomplete="off"
+                />
+                <button type="submit">Найти</button>
+                <button class="secondary hidden" type="button" data-gsn-search-reset>Очистить</button>
+              </form>
             </div>
             <div id="gsnTree" class="tree gsn-tree"></div>
             <div id="fgisPricesPanel" class="fgis-prices-panel hidden"></div>
             <div id="userPositionsPanel" class="user-positions-panel hidden"></div>
+            </div>
           </section>
 
           <section id="constructionsSection" class="section-view card hidden">
@@ -165,9 +181,12 @@
 
           <section id="editorSection" class="section-view card hidden">
             <p class="eyebrow" id="editorEyebrow">Редактор</p>
+            <div id="editorLicenseBlock" class="license-block hidden"></div>
+            <div id="editorSectionBody">
             <h2 id="editorTitle">Буфер</h2>
             <p id="editorDescription" class="muted">Сессионный буфер для элементов, добавленных из базы ГСН-2022.</p>
             <div id="editorContent" class="editor-content"></div>
+            </div>
           </section>
 
           <dialog id="estimateAddLineDialog" class="construction-dialog estimate-add-line-dialog">
@@ -270,12 +289,6 @@
             </form>
           </dialog>
 
-          <section id="documentsSection" class="section-view card hidden">
-            <p class="eyebrow">Документы</p>
-            <h2>Документы</h2>
-            <p class="muted">Раздел пока не прорабатываем.</p>
-          </section>
-
           <section id="settingsSection" class="section-view card hidden">
             <p class="eyebrow">Настройки</p>
             <h2>Настройки</h2>
@@ -290,6 +303,8 @@
       <div id="message" class="message hidden"></div>
     </main>
 
-    <script src="/app.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    <script src="/login-draft.js?v=20260622g"></script>
+    <script src="/app.js?v=20260622g"></script>
   </body>
 </html>

@@ -777,6 +777,12 @@ p {
   padding: 0.4rem 0.65rem;
 }
 
+.construction-lock-indicator {
+  cursor: default;
+  color: #6b7280;
+  vertical-align: middle;
+}
+
 .construction-table .tree-toggle,
 .construction-table .tree-toggle-placeholder {
   width: 1.55rem;
@@ -928,9 +934,17 @@ p {
 
 .gsn-supplement-bar {
   display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin: 0 0 0.65rem;
+}
+
+.gsn-supplement-row,
+.gsn-search-bar {
+  display: flex;
   align-items: center;
   gap: 0.5rem;
-  margin: 0 0 0.65rem;
+  flex-wrap: wrap;
 }
 
 .gsn-supplement-label {
@@ -943,6 +957,18 @@ p {
 .gsn-supplement-select {
   flex: 1;
   min-width: 0;
+  max-width: 26rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+  font-size: 0.92rem;
+}
+
+.gsn-search-input {
+  flex: 1;
+  min-width: 10rem;
   max-width: 26rem;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1577,9 +1603,15 @@ p {
   background: var(--primary-dark);
 }
 
-.admin-shell {
+.admin-workspace {
   display: grid;
   gap: 1rem;
+}
+
+.admin-section-view {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
 }
 
 .admin-table-wrap {
@@ -1605,6 +1637,82 @@ p {
   font-size: 0.82rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+.admin-table .admin-row-actions {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: nowrap;
+  width: 1%;
+}
+
+.admin-table--users {
+  font-size: 0.84rem;
+}
+
+.admin-table--users th,
+.admin-table--users td {
+  padding: 0.32rem 0.45rem;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.admin-table--users th {
+  font-size: 0.72rem;
+}
+
+.admin-table--users .admin-col-actions {
+  width: 1%;
+}
+
+.admin-table--users .admin-cell-email {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.admin-table--users .icon-button {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.admin-table--users .icon-button svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.admin-licenses-company {
+  display: grid;
+  gap: 0.35rem;
+  max-width: 24rem;
+  margin-bottom: 1rem;
+}
+
+.admin-table--licenses {
+  max-width: 40rem;
+}
+
+.admin-license-count {
+  width: 6rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.license-block {
+  margin-top: 1rem;
+  padding: 1.25rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--text) 8%);
+}
+
+.license-block-message {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.5;
 }
 
 .form-actions {

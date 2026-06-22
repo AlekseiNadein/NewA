@@ -22,7 +22,7 @@ Auth · CRUD строек/объектов/смет · GSN: `supplements`, `hier
 
 **Шапка:** шифр, наименование, сметный район (`district`, формат `14.3`), набор ФГИС (`fgisSetId`), сметная стоимость.
 
-**Строка работы:** шифр из `records.original_code`; «+» → ресурсы.
+**Строка работы** (`isWork`): шифр, «+» → ресурсы. **Позиция-ресурс** (С/М/Т, `resource_catalog`): без «+», стоим. ед. на строке (ФГИС по `fgisSetId`+`district`).
 
 **Ресурс:** номер из нормы → `resource_codifier` → шифр нормы → `records`; **Стоимость ед.** — из `fgis_cs.set_rows` по `fgisSetId`+`district` (ключ `<район>:<значение>/…`): сметная цена или базис + `*индекс` (индекс с новой строки). **Стоимость на объём** = стоим. ед. × расход × объём работы. **Работа** = сумма по ресурсам.
 
@@ -30,7 +30,18 @@ Auth · CRUD строек/объектов/смет · GSN: `supplements`, `hier
 
 ## Код
 
-`web/app.js` · `backend/internal/{api,store,gsn}/` · `db/{schema,gsn_schema}.sql`
+`web/app.js` · `web/admin.{html,js}` · `backend/internal/{api,store,gsn,presence}/` · `db/{schema,gsn_schema}.sql`
+
+## Админка (`/admin`)
+
+Иконка: `Admin_Icon.ico` · токен: `nav_admin_token` · layout: боковая навигация как в основной системе.
+
+| Раздел | Содержание |
+|--------|------------|
+| **Пользователи** | CRUD (`/api/users`), компактная таблица, иконки карандаш/корзина; удаление недоступно для суперадмина |
+| **Сметы** | Активные lock-сессии (`GET /api/admin/estimate-locks`), кнопки «Обновить» и «Завершить редактирование» (`DELETE /api/admin/estimate-locks/{id}`) |
+
+**Блокировки смет** (`presence.EstimateLocks`, TTL 90 с): пользовательский lock — `PUT/DELETE /api/estimates/{id}/lock`, опрос — `/api/estimate-locks`. Принудительное завершение админом снимает lock и убирает смету из «Редактора» у пользователя; повторное открытие сразу доступно (без блокировки пользователя).
 
 ## Ловушки
 

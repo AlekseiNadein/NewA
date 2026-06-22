@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Администрирование — ABC-RU WEB</title>
-    <link rel="icon" href="/Abc_Icon.ico" type="image/x-icon" />
+    <link rel="icon" href="/Admin_Icon.ico" type="image/x-icon" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <section class="hero">
         <div class="hero-brand">
-          <img class="hero-logo" src="/Abc_Icon.ico" alt="" width="64" height="64" />
+          <img class="hero-logo" src="/Admin_Icon.ico" alt="" width="64" height="64" />
           <div>
             <p class="eyebrow">Администрирование платформы</p>
             <h2>ABC-RU WEB</h2>
@@ -29,21 +29,35 @@
         <form id="loginForm" class="grid-form">
           <label>
             Компания
-            <input name="companyName" type="text" value="Система" autocomplete="organization" required />
+            <input name="companyName" type="text" autocomplete="organization" required />
           </label>
           <label>
-            ФИО пользователя
-            <input name="name" type="text" value="Суперадминистратор" autocomplete="name" required />
+            ФИО или e-mail
+            <input name="name" type="text" autocomplete="username" required />
           </label>
           <label>
             Пароль
-            <input name="password" type="password" value="admin123" autocomplete="current-password" required />
+            <input name="password" type="password" autocomplete="current-password" required />
           </label>
           <button type="submit">Войти</button>
         </form>
       </section>
 
-      <section id="adminView" class="admin-shell hidden">
+      <section id="adminView" class="app-shell hidden">
+        <aside class="sidebar card">
+          <div class="user-card">
+            <span id="adminCurrentRole" class="pill">-</span>
+            <strong id="adminCurrentUser">-</strong>
+          </div>
+          <nav id="adminNav" class="main-nav" aria-label="Разделы администрирования">
+            <button class="nav-link active" data-admin-section="users" type="button">Пользователи</button>
+            <button class="nav-link" data-admin-section="licenses" type="button">Лицензии</button>
+            <button class="nav-link" data-admin-section="estimates" type="button">Сметы</button>
+          </nav>
+        </aside>
+
+        <section class="workspace admin-workspace">
+        <div id="adminUsersSection" class="admin-section-view">
         <section class="card">
           <div class="section-head">
             <div>
@@ -132,11 +146,46 @@
             </div>
           </form>
         </section>
+        </div>
+
+        <div id="adminLicensesSection" class="admin-section-view hidden">
+          <section class="card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Лицензии</p>
+                <h2>Доступ к подразделам «Базы»</h2>
+                <p id="adminLicensesHint" class="muted">Количество доступных лицензий по подразделам базы.</p>
+              </div>
+              <button id="saveAdminLicensesButton" class="hidden" type="button">Сохранить</button>
+            </div>
+            <label id="adminLicensesCompanyField" class="admin-licenses-company hidden">
+              Компания
+              <select id="adminLicensesCompanySelect"></select>
+            </label>
+            <div id="adminLicensesTable" class="admin-table-wrap"></div>
+          </section>
+        </div>
+
+        <div id="adminEstimatesSection" class="admin-section-view hidden">
+          <section class="card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Сметы</p>
+                <h2>Активные сессии редактирования</h2>
+                <p id="adminEstimatesHint" class="muted">Сметы, которые сейчас редактируют пользователи.</p>
+              </div>
+              <button id="refreshAdminEstimatesButton" class="secondary" type="button">Обновить</button>
+            </div>
+            <div id="adminEstimatesTable" class="admin-table-wrap"></div>
+          </section>
+        </div>
+        </section>
       </section>
 
       <div id="message" class="message hidden"></div>
     </main>
 
-    <script type="module" src="/admin.js"></script>
+    <script src="/admin-login-draft.js?v=20260622c"></script>
+    <script type="module" src="/admin.js?v=20260622c"></script>
   </body>
 </html>

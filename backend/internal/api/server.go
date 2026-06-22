@@ -9,19 +9,23 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"nav-saas-mvp/backend/internal/auth"
 	"nav-saas-mvp/backend/internal/domain"
 	"nav-saas-mvp/backend/internal/gsn"
+	"nav-saas-mvp/backend/internal/presence"
 	"nav-saas-mvp/backend/internal/store"
 )
 
 type Server struct {
-	store  *store.FileStore
-	auth   *auth.Service
-	gsn    *gsn.Service
-	webDir string
-	static http.Handler
+	store           *store.FileStore
+	auth            *auth.Service
+	gsn             *gsn.Service
+	estimateLocks   *presence.EstimateLocks
+	licenseSessions *presence.LicenseSessions
+	webDir          string
+	static          http.Handler
 }
 
 type contextKey string
@@ -30,11 +34,13 @@ const claimsKey contextKey = "claims"
 
 func NewServer(store *store.FileStore, authService *auth.Service, gsnService *gsn.Service, webDir string) *Server {
 	return &Server{
-		store:  store,
-		auth:   authService,
-		gsn:    gsnService,
-		webDir: webDir,
-		static: http.FileServer(http.Dir(webDir)),
+		store:           store,
+		auth:            authService,
+		gsn:             gsnService,
+		estimateLocks:   presence.NewEstimateLocks(),
+		licenseSessions: presence.NewLicenseSessions(),
+		webDir:          webDir,
+		static:          http.FileServer(http.Dir(webDir)),
 	}
 }
 
@@ -46,15 +52,21 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/companies", s.withAuth(http.HandlerFunc(s.handleCompanies)))
 	mux.Handle("/api/users", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleUsers))))
 	mux.Handle("/api/users/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleUserByID))))
+	mux.Handle("/api/admin/estimate-locks", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLocks))))
+	mux.Handle("/api/admin/estimate-locks/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLockByID))))
+	mux.Handle("/api/admin/licenses", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminLicenses))))
 	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))
 	mux.Handle("/api/constructions/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructionByID))))
 	mux.Handle("/api/objects", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjects))))
 	mux.Handle("/api/objects/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjectByID))))
 	mux.Handle("/api/estimates", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimates))))
 	mux.Handle("/api/estimates/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimateByID))))
+	mux.Handle("/api/license-sessions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleLicenseSessions))))
+	mux.Handle("/api/estimate-locks", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimateLocks))))
 	mux.Handle("/api/gsn/supplements", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNSupplements))))
 	mux.Handle("/api/gsn/base-info", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNBaseInfo))))
 	mux.Handle("/api/gsn/hierarchy", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchy))))
+	mux.Handle("/api/gsn/hierarchy-search", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchySearch))))
 	mux.Handle("/api/gsn/document", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNDocument))))
 	mux.Handle("/api/gsn/record", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNRecord))))
 	mux.Handle("/api/gsn/hierarchy-records", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchyRecords))))
@@ -269,6 +281,13 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 
 		writeJSON(w, http.StatusOK, s.store.UserView(user))
 
+	case http.MethodDelete:
+		if err := s.store.DeleteUser(id, claims.CompanyID, includeAll); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -446,6 +465,11 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasSuffix(id, "/lock") {
+		s.handleEstimateLock(w, r, strings.TrimSuffix(id, "/lock"))
+		return
+	}
+
 	includeAll := claims.Role == domain.RoleSuperAdmin
 	switch r.Method {
 	case http.MethodPut:
@@ -484,6 +508,281 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+	user, ok := s.store.FindUserByID(claims.UserID)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "user not found")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		var input struct {
+			SubsectionIDs []string `json:"subsectionIds"`
+		}
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		validated := make([]string, 0, len(input.SubsectionIDs))
+		for _, id := range input.SubsectionIDs {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if !domain.ValidBaseSubsectionID(domain.BaseSubsectionID(id)) {
+				writeError(w, http.StatusBadRequest, "unknown subsection id")
+				return
+			}
+			validated = append(validated, id)
+		}
+
+		result := s.licenseSessions.Sync(
+			claims.CompanyID,
+			claims.UserID,
+			user.Name,
+			validated,
+			func(subsectionID string) int {
+				return s.store.LicenseAvailable(claims.CompanyID, subsectionID)
+			},
+			func(subsectionID string) string {
+				return domain.BaseSubsectionName(domain.BaseSubsectionID(subsectionID))
+			},
+		)
+		if !result.Granted {
+			writeJSON(w, http.StatusForbidden, result)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+
+	case http.MethodDelete:
+		s.licenseSessions.ReleaseAll(claims.UserID)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleEstimateLocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims := mustClaims(r)
+	writeJSON(w, http.StatusOK, s.estimateLocks.ListByCompany(claims.CompanyID))
+}
+
+func (s *Server) handleEstimateLock(w http.ResponseWriter, r *http.Request, estimateID string) {
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+
+	estimate, ok := s.findEstimate(estimateID, claims.CompanyID, includeAll)
+	if !ok {
+		writeError(w, http.StatusNotFound, "estimate not found")
+		return
+	}
+
+	user, ok := s.store.FindUserByID(claims.UserID)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "user not found")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		lock, err := s.estimateLocks.Acquire(estimateID, claims.UserID, user.Name, estimate.CompanyID)
+		if err != nil {
+			var conflict presence.LockConflict
+			if errors.As(err, &conflict) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error": "смета редактируется другим пользователем",
+					"lock":  conflict.Lock,
+				})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to acquire lock")
+			return
+		}
+		writeJSON(w, http.StatusOK, lock)
+
+	case http.MethodDelete:
+		s.estimateLocks.Release(estimateID, claims.UserID)
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) findEstimate(id, companyID string, includeAll bool) (domain.Estimate, bool) {
+	for _, estimate := range s.store.ListEstimates(companyID, includeAll) {
+		if estimate.ID == id {
+			return estimate, true
+		}
+	}
+	return domain.Estimate{}, false
+}
+
+type adminEstimateLockView struct {
+	EstimateID    string    `json:"estimateId"`
+	EstimateCode  string    `json:"estimateCode"`
+	EstimateTitle string    `json:"estimateTitle"`
+	UserID        string    `json:"userId"`
+	UserName      string    `json:"userName"`
+	CompanyID     string    `json:"companyId"`
+	CompanyName   string    `json:"companyName"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+func (s *Server) handleAdminEstimateLocks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	locks := s.estimateLocks.List(claims.CompanyID, includeAll)
+
+	companyNames := make(map[string]string, len(s.store.ListCompanies()))
+	for _, company := range s.store.ListCompanies() {
+		companyNames[company.ID] = company.Name
+	}
+
+	estimates := s.store.ListEstimates(claims.CompanyID, includeAll)
+	estimateByID := make(map[string]domain.Estimate, len(estimates))
+	for _, estimate := range estimates {
+		estimateByID[estimate.ID] = estimate
+	}
+
+	items := make([]adminEstimateLockView, 0, len(locks))
+	for _, lock := range locks {
+		item := adminEstimateLockView{
+			EstimateID:  lock.EstimateID,
+			UserID:      lock.UserID,
+			UserName:    lock.UserName,
+			CompanyID:   lock.CompanyID,
+			CompanyName: companyNames[lock.CompanyID],
+			UpdatedAt:   lock.UpdatedAt,
+		}
+		if estimate, ok := estimateByID[lock.EstimateID]; ok {
+			item.EstimateCode = estimate.Code
+			item.EstimateTitle = estimate.Title
+		}
+		items = append(items, item)
+	}
+
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleAdminLicenses(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+
+	switch r.Method {
+	case http.MethodGet:
+		companyID := strings.TrimSpace(r.URL.Query().Get("companyId"))
+		if claims.Role != domain.RoleSuperAdmin {
+			companyID = claims.CompanyID
+		} else if companyID == "" {
+			companyID = claims.CompanyID
+		}
+
+		view, err := s.store.GetCompanyLicenses(companyID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "company not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to read licenses")
+			return
+		}
+		view.Editable = claims.Role.CanManageLicenses()
+		writeJSON(w, http.StatusOK, view)
+	case http.MethodPut:
+		if !claims.Role.CanManageLicenses() {
+			writeError(w, http.StatusForbidden, "редактировать лицензии может только суперадминистратор")
+			return
+		}
+
+		var input struct {
+			CompanyID string         `json:"companyId"`
+			Items     map[string]int `json:"items"`
+		}
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+
+		companyID := strings.TrimSpace(input.CompanyID)
+		if companyID == "" {
+			writeError(w, http.StatusBadRequest, "companyId is required")
+			return
+		}
+
+		view, err := s.store.UpdateCompanyLicenses(companyID, store.UpdateCompanyLicensesInput{
+			Items: input.Items,
+		})
+		if err != nil {
+			switch {
+			case errors.Is(err, store.ErrNotFound):
+				writeError(w, http.StatusNotFound, "company not found")
+			case errors.Is(err, store.ErrConflict):
+				writeError(w, http.StatusBadRequest, "invalid license data")
+			default:
+				writeError(w, http.StatusInternalServerError, "failed to update licenses")
+			}
+			return
+		}
+		view.Editable = true
+		writeJSON(w, http.StatusOK, view)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleAdminEstimateLockByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	estimateID := strings.TrimPrefix(r.URL.Path, "/api/admin/estimate-locks/")
+	if estimateID == "" {
+		writeError(w, http.StatusNotFound, "estimate lock not found")
+		return
+	}
+
+	var targetLock *presence.EstimateLock
+	for _, lock := range s.estimateLocks.List(claims.CompanyID, includeAll) {
+		if lock.EstimateID == estimateID {
+			targetLock = &lock
+			break
+		}
+	}
+	if targetLock == nil {
+		writeError(w, http.StatusNotFound, "estimate lock not found")
+		return
+	}
+
+	if _, ok := s.estimateLocks.ForceRelease(estimateID); !ok {
+		writeError(w, http.StatusNotFound, "estimate lock not found")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleGSNSupplements(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -503,6 +802,49 @@ func (s *Server) handleGSNSupplements(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"supplements": supplements,
+	})
+}
+
+func (s *Server) handleGSNHierarchySearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	supplement := strings.TrimSpace(r.URL.Query().Get("supplement"))
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if supplement == "" {
+		writeError(w, http.StatusBadRequest, "supplement is required")
+		return
+	}
+	if query == "" {
+		writeError(w, http.StatusBadRequest, "q is required")
+		return
+	}
+
+	limit := 50
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		limit = parsed
+	}
+
+	matches, err := s.gsn.SearchHierarchy(r.Context(), supplement, query, limit)
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn hierarchy search failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to search GSN hierarchy")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"matches": matches,
 	})
 }
 

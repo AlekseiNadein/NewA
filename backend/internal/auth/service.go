@@ -23,7 +23,7 @@ var (
 )
 
 type UserReader interface {
-	FindUserByCompanyAndName(companyName, userName string) (domain.User, bool)
+	FindUserForLogin(companyName, login string) (domain.User, bool)
 }
 
 type Service struct {
@@ -59,7 +59,7 @@ func VerifyPassword(password, salt, expectedHash string) bool {
 }
 
 func (s *Service) Login(companyName, userName, password string) (string, domain.User, error) {
-	user, ok := s.users.FindUserByCompanyAndName(
+	user, ok := s.users.FindUserForLogin(
 		strings.TrimSpace(companyName),
 		strings.TrimSpace(userName),
 	)

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Role string
 
@@ -101,14 +104,15 @@ const (
 )
 
 type EstimateItem struct {
-	ID        string  `json:"id"`
-	Type      string  `json:"type"`
-	Code      string  `json:"code"`
-	Name      string  `json:"name"`
-	Quantity  float64 `json:"quantity"`
-	Unit      string  `json:"unit"`
-	UnitPrice float64 `json:"unitPrice"`
-	Total     float64 `json:"total"`
+	ID           string  `json:"id"`
+	Type         string  `json:"type"`
+	Code         string  `json:"code"`
+	OriginalCode string  `json:"originalCode,omitempty"`
+	Name         string  `json:"name"`
+	Quantity     float64 `json:"quantity"`
+	Unit         string  `json:"unit"`
+	UnitPrice    float64 `json:"unitPrice"`
+	Total        float64 `json:"total"`
 }
 
 type Claims struct {
@@ -129,4 +133,86 @@ func (r Role) CanManageUsers() bool {
 
 func (r Role) CanEditEstimates() bool {
 	return r == RoleSuperAdmin || r == RoleCompanyAdmin || r == RoleUser
+}
+
+func (r Role) CanManageLicenses() bool {
+	return r == RoleSuperAdmin
+}
+
+type BaseSubsectionID string
+
+const (
+	BaseSubsectionGSNSupplement18  BaseSubsectionID = "gsn_supplement_18"
+	BaseSubsectionFGISAlrosaQ22026 BaseSubsectionID = "fgis_alrosa_q2_2026"
+	BaseSubsectionFGISRZDQ12026    BaseSubsectionID = "fgis_rzd_q1_2026"
+)
+
+type BaseSubsection struct {
+	ID   BaseSubsectionID `json:"id"`
+	Name string           `json:"name"`
+}
+
+func BaseSubsections() []BaseSubsection {
+	return []BaseSubsection{
+		{ID: BaseSubsectionGSNSupplement18, Name: "ГСН-2022 доп. 18"},
+		{ID: BaseSubsectionFGISAlrosaQ22026, Name: "ФГИС ЦС Алроса II кв. 2026 г."},
+		{ID: BaseSubsectionFGISRZDQ12026, Name: "ФГИС ЦС РЖД I кв. 2026 г."},
+	}
+}
+
+func ValidBaseSubsectionID(id BaseSubsectionID) bool {
+	for _, item := range BaseSubsections() {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func BaseSubsectionName(id BaseSubsectionID) string {
+	for _, item := range BaseSubsections() {
+		if item.ID == id {
+			return item.Name
+		}
+	}
+	return string(id)
+}
+
+func SubsectionIDForGSNSupplement(code string) (BaseSubsectionID, bool) {
+	normalized := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(code), " ", ""))
+	if normalized == "доп.18" {
+		return BaseSubsectionGSNSupplement18, true
+	}
+	return "", false
+}
+
+func SubsectionIDForFGISSet(setID, setName string) (BaseSubsectionID, bool) {
+	switch strings.TrimSpace(setID) {
+	case "alrosa-2026-q2":
+		return BaseSubsectionFGISAlrosaQ22026, true
+	case "rzd-2026-q1":
+		return BaseSubsectionFGISRZDQ12026, true
+	}
+
+	name := strings.ToLower(strings.TrimSpace(setName))
+	if strings.Contains(name, "алроса") {
+		return BaseSubsectionFGISAlrosaQ22026, true
+	}
+	if strings.Contains(name, "ржд") {
+		return BaseSubsectionFGISRZDQ12026, true
+	}
+	return "", false
+}
+
+type CompanyLicense struct {
+	SubsectionID BaseSubsectionID `json:"subsectionId"`
+	Name         string           `json:"name"`
+	Available    int              `json:"available"`
+}
+
+type CompanyLicensesView struct {
+	CompanyID   string           `json:"companyId"`
+	CompanyName string           `json:"companyName"`
+	Editable    bool             `json:"editable"`
+	Items       []CompanyLicense `json:"items"`
 }

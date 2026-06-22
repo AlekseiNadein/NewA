@@ -35,6 +35,7 @@ type FileStore struct {
 	constructions map[string]domain.Construction
 	objects       map[string]domain.ConstructionObject
 	estimates     map[string]domain.Estimate
+	licenses      map[string]map[string]int
 }
 
 type snapshot struct {
@@ -43,6 +44,12 @@ type snapshot struct {
 	Constructions []domain.Construction       `json:"constructions"`
 	Objects       []domain.ConstructionObject `json:"objects"`
 	Estimates     []domain.Estimate           `json:"estimates"`
+	Licenses      []storedCompanyLicenses     `json:"licenses,omitempty"`
+}
+
+type storedCompanyLicenses struct {
+	CompanyID string         `json:"companyId"`
+	Items     map[string]int `json:"items"`
 }
 
 type storedUser struct {
@@ -129,6 +136,7 @@ func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 		constructions: map[string]domain.Construction{},
 		objects:       map[string]domain.ConstructionObject{},
 		estimates:     map[string]domain.Estimate{},
+		licenses:      map[string]map[string]int{},
 	}
 
 	if err := store.load(); err != nil {
@@ -203,6 +211,22 @@ func (s *FileStore) FindUserByEmail(email string) (domain.User, bool) {
 	return domain.User{}, false
 }
 
+func (s *FileStore) FindUserForLogin(companyName, login string) (domain.User, bool) {
+	login = strings.TrimSpace(login)
+	if login == "" {
+		return domain.User{}, false
+	}
+
+	normalizedEmail := strings.ToLower(login)
+	if strings.Contains(normalizedEmail, "@") {
+		if user, ok := s.FindUserByEmail(normalizedEmail); ok {
+			return user, true
+		}
+	}
+
+	return s.FindUserByCompanyAndName(companyName, login)
+}
+
 func (s *FileStore) FindUserByCompanyAndName(companyName, userName string) (domain.User, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -213,8 +237,16 @@ func (s *FileStore) FindUserByCompanyAndName(companyName, userName string) (doma
 	}
 
 	normalizedName := normalizePersonName(userName)
+	normalizedEmail := strings.ToLower(strings.TrimSpace(userName))
+	loginByEmail := strings.Contains(normalizedEmail, "@")
 	for _, user := range s.users {
-		if user.CompanyID == company.ID && normalizePersonName(user.Name) == normalizedName {
+		if user.CompanyID != company.ID {
+			continue
+		}
+		if normalizePersonName(user.Name) == normalizedName {
+			return user, true
+		}
+		if loginByEmail && user.Email == normalizedEmail {
 			return user, true
 		}
 	}
@@ -629,6 +661,25 @@ func (s *FileStore) UpdateUser(id string, actorCompanyID string, includeAll bool
 	return updated, s.saveLocked()
 }
 
+func (s *FileStore) DeleteUser(id string, actorCompanyID string, includeAll bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.users[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if current.IsSuperAdministrator {
+		return ErrForbidden
+	}
+	if !includeAll && current.CompanyID != actorCompanyID {
+		return ErrForbidden
+	}
+
+	delete(s.users, id)
+	return s.saveLocked()
+}
+
 func (s *FileStore) ListConstructions(companyID string, includeAll bool) []domain.Construction {
 	if s.treeDB != nil {
 		items, err := s.listConstructionsDB(context.Background(), companyID, includeAll)
@@ -973,6 +1024,12 @@ func (s *FileStore) load() error {
 	for _, estimate := range snap.Estimates {
 		s.estimates[estimate.ID] = estimate
 	}
+	for _, entry := range snap.Licenses {
+		if entry.CompanyID == "" || entry.Items == nil {
+			continue
+		}
+		s.licenses[entry.CompanyID] = normalizeLicenseItems(entry.Items)
+	}
 
 	return nil
 }
@@ -988,6 +1045,7 @@ func (s *FileStore) saveLocked() error {
 		Constructions: make([]domain.Construction, 0, len(s.constructions)),
 		Objects:       make([]domain.ConstructionObject, 0, len(s.objects)),
 		Estimates:     make([]domain.Estimate, 0, len(s.estimates)),
+		Licenses:      make([]storedCompanyLicenses, 0, len(s.licenses)),
 	}
 
 	for _, company := range s.companies {
@@ -1005,6 +1063,15 @@ func (s *FileStore) saveLocked() error {
 	for _, estimate := range s.estimates {
 		snap.Estimates = append(snap.Estimates, estimate)
 	}
+	for companyID, items := range s.licenses {
+		if len(items) == 0 {
+			continue
+		}
+		snap.Licenses = append(snap.Licenses, storedCompanyLicenses{
+			CompanyID: companyID,
+			Items:     items,
+		})
+	}
 
 	sort.Slice(snap.Companies, func(i, j int) bool {
 		return snap.Companies[i].Name < snap.Companies[j].Name
@@ -1020,6 +1087,9 @@ func (s *FileStore) saveLocked() error {
 	})
 	sort.Slice(snap.Estimates, func(i, j int) bool {
 		return compareCodes(snap.Estimates[i].Code, snap.Estimates[j].Code)
+	})
+	sort.Slice(snap.Licenses, func(i, j int) bool {
+		return snap.Licenses[i].CompanyID < snap.Licenses[j].CompanyID
 	})
 
 	content, err := json.MarshalIndent(snap, "", "  ")
@@ -1131,11 +1201,75 @@ func (s *FileStore) ensureDemoCredentials() (bool, error) {
 }
 
 func normalizeCompanyName(name string) string {
-	return strings.ToLower(strings.TrimSpace(name))
+	name = strings.ToLower(strings.TrimSpace(name))
+	replacements := []struct{ from, to string }{
+		{"«", "\""}, {"»", "\""},
+		{"“", "\""}, {"”", "\""},
+		{"„", "\""}, {"‟", "\""},
+	}
+	for _, item := range replacements {
+		name = strings.ReplaceAll(name, item.from, item.to)
+	}
+	return name
 }
 
 func normalizePersonName(name string) string {
-	return strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(name)), " "))
+	parts := strings.Fields(strings.ToLower(strings.TrimSpace(name)))
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) == 1 {
+		return parts[0]
+	}
+
+	initStart := len(parts)
+	for i := 1; i < len(parts); i++ {
+		if looksLikeInitial(parts[i]) {
+			initStart = i
+			break
+		}
+	}
+	if initStart == len(parts) {
+		return strings.Join(parts, " ")
+	}
+
+	surname := strings.Join(parts[:initStart], " ")
+	initials := compactInitials(parts[initStart:])
+	if initials == "" {
+		return surname
+	}
+	return strings.TrimSpace(surname + " " + initials)
+}
+
+func looksLikeInitial(part string) bool {
+	part = strings.TrimSuffix(part, ".")
+	runes := []rune(part)
+	return len(runes) > 0 && len(runes) <= 2
+}
+
+func compactInitials(parts []string) string {
+	letters := make([]rune, 0, len(parts))
+	for _, part := range parts {
+		for _, r := range part {
+			if r == '.' || r == ' ' {
+				continue
+			}
+			letters = append(letters, r)
+		}
+	}
+	if len(letters) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for i, r := range letters {
+		if i > 0 {
+			b.WriteRune('.')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteRune('.')
+	return b.String()
 }
 
 func buildEstimate(id string, companyID string, input EstimateInput, createdAt time.Time, updatedAt time.Time) (domain.Estimate, error) {
@@ -1160,6 +1294,7 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 	for _, item := range input.Items {
 		item.Type = estimateLineType(item.Type)
 		item.Code = strings.TrimSpace(item.Code)
+		item.OriginalCode = strings.TrimSpace(item.OriginalCode)
 		item.Name = strings.TrimSpace(item.Name)
 		item.Unit = strings.TrimSpace(item.Unit)
 		if !validEstimateLineType(item.Type) {
@@ -1334,6 +1469,7 @@ ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS district TEXT NOT NULL DEFAUL
 ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS fgis_set_id TEXT NOT NULL DEFAULT '';
 
 ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS code TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS original_code TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS app_estimate_lines (
     id TEXT PRIMARY KEY,
@@ -1402,9 +1538,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO N
 			return err
 		}
 		for order, line := range item.Items {
-			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING`,
-				line.ID, item.ID, estimateLineType(line.Type), line.Code, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
+			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, original_code, name, quantity, unit, unit_price, total, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING`,
+				line.ID, item.ID, estimateLineType(line.Type), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
 			if err != nil {
 				return err
 			}
@@ -1606,7 +1742,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 		return items, nil
 	}
 
-	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, code, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
+	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, code, original_code, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1615,7 +1751,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 	for lineRows.Next() {
 		var line domain.EstimateItem
 		var estimateID string
-		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Code, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
+		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Code, &line.OriginalCode, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
 			return nil, err
 		}
 		lineMap[estimateID] = append(lineMap[estimateID], line)
@@ -1731,9 +1867,9 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 		return err
 	}
 	for i, line := range item.Items {
-		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			line.ID, item.ID, estimateLineType(line.Type), line.Code, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
+		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, original_code, name, quantity, unit, unit_price, total, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			line.ID, item.ID, estimateLineType(line.Type), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
 		if err != nil {
 			return err
 		}
@@ -1850,4 +1986,106 @@ func validEstimateLineType(lineType string) bool {
 	default:
 		return false
 	}
+}
+
+func normalizeLicenseItems(items map[string]int) map[string]int {
+	normalized := make(map[string]int, len(domain.BaseSubsections()))
+	for _, subsection := range domain.BaseSubsections() {
+		count := 0
+		if items != nil {
+			if value, ok := items[string(subsection.ID)]; ok && value > 0 {
+				count = value
+			}
+		}
+		normalized[string(subsection.ID)] = count
+	}
+	return normalized
+}
+
+func (s *FileStore) companyLicensesLocked(companyID string) map[string]int {
+	if items, ok := s.licenses[companyID]; ok {
+		return normalizeLicenseItems(items)
+	}
+	return normalizeLicenseItems(nil)
+}
+
+func (s *FileStore) GetCompanyLicenses(companyID string) (domain.CompanyLicensesView, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	company, ok := s.companies[companyID]
+	if !ok {
+		return domain.CompanyLicensesView{}, ErrNotFound
+	}
+
+	items := s.companyLicensesLocked(companyID)
+	viewItems := make([]domain.CompanyLicense, 0, len(domain.BaseSubsections()))
+	for _, subsection := range domain.BaseSubsections() {
+		viewItems = append(viewItems, domain.CompanyLicense{
+			SubsectionID: subsection.ID,
+			Name:         subsection.Name,
+			Available:    items[string(subsection.ID)],
+		})
+	}
+
+	return domain.CompanyLicensesView{
+		CompanyID:   company.ID,
+		CompanyName: company.Name,
+		Items:       viewItems,
+	}, nil
+}
+
+type UpdateCompanyLicensesInput struct {
+	Items map[string]int `json:"items"`
+}
+
+func (s *FileStore) UpdateCompanyLicenses(companyID string, input UpdateCompanyLicensesInput) (domain.CompanyLicensesView, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.companies[companyID]; !ok {
+		return domain.CompanyLicensesView{}, ErrNotFound
+	}
+
+	items := normalizeLicenseItems(nil)
+	for key, value := range input.Items {
+		if !domain.ValidBaseSubsectionID(domain.BaseSubsectionID(key)) {
+			return domain.CompanyLicensesView{}, ErrConflict
+		}
+		if value < 0 {
+			return domain.CompanyLicensesView{}, ErrConflict
+		}
+		items[key] = value
+	}
+
+	s.licenses[companyID] = items
+	if err := s.saveLocked(); err != nil {
+		return domain.CompanyLicensesView{}, err
+	}
+
+	company := s.companies[companyID]
+	viewItems := make([]domain.CompanyLicense, 0, len(domain.BaseSubsections()))
+	for _, subsection := range domain.BaseSubsections() {
+		viewItems = append(viewItems, domain.CompanyLicense{
+			SubsectionID: subsection.ID,
+			Name:         subsection.Name,
+			Available:    items[string(subsection.ID)],
+		})
+	}
+
+	return domain.CompanyLicensesView{
+		CompanyID:   company.ID,
+		CompanyName: company.Name,
+		Items:       viewItems,
+	}, nil
+}
+
+func (s *FileStore) LicenseAvailable(companyID, subsectionID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, ok := s.companies[companyID]; !ok {
+		return 0
+	}
+	return s.companyLicensesLocked(companyID)[subsectionID]
 }

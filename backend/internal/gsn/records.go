@@ -18,12 +18,15 @@ type RecordResource struct {
 }
 
 type RecordDetail struct {
-	Code         string           `json:"code"`
-	OriginalCode string           `json:"originalCode,omitempty"`
-	Name         string           `json:"name"`
-	Unit         string           `json:"unit"`
-	HasResources bool             `json:"hasResources"`
-	Resources    []RecordResource `json:"resources,omitempty"`
+	Code          string           `json:"code"`
+	OriginalCode  string           `json:"originalCode,omitempty"`
+	Name          string           `json:"name"`
+	Unit          string           `json:"unit"`
+	IsWork        bool             `json:"isWork"`
+	HasResources  bool             `json:"hasResources"`
+	UnitPriceText string           `json:"unitPriceText,omitempty"`
+	UnitPriceIndex string          `json:"unitPriceIndex,omitempty"`
+	Resources     []RecordResource `json:"resources,omitempty"`
 }
 
 func parseNormListRefs(normList string) []string {
@@ -42,32 +45,48 @@ func parseNormListRefs(normList string) []string {
 	return refs
 }
 
-func (s *Service) lookupRecordDetail(ctx context.Context, code string) (RecordDetail, error) {
+func (s *Service) lookupRecordDetail(ctx context.Context, code string) (RecordDetail, string, string, error) {
 	var detail RecordDetail
+	var recordKind, costIndicators string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT code, original_code, name, unit
+		SELECT code, original_code, name, unit, record_kind, cost_indicators
 		FROM gsn.records
 		WHERE code = $1
-	`, code).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit)
+	`, code).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
 	if err == nil {
-		return detail, nil
+		return detail, recordKind, costIndicators, nil
 	}
 	if err != sql.ErrNoRows {
-		return RecordDetail{}, fmt.Errorf("query gsn record: %w", err)
+		return RecordDetail{}, "", "", fmt.Errorf("query gsn record: %w", err)
 	}
 
 	err = s.db.QueryRowContext(ctx, `
-		SELECT code, original_code, name, unit
+		SELECT code, original_code, name, unit, record_kind, cost_indicators
 		FROM gsn.records
 		WHERE original_code = $1
-	`, code).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit)
+	`, code).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return RecordDetail{}, fmt.Errorf("record not found")
+			return RecordDetail{}, "", "", fmt.Errorf("record not found")
 		}
-		return RecordDetail{}, fmt.Errorf("query gsn record by original code: %w", err)
+		return RecordDetail{}, "", "", fmt.Errorf("query gsn record by original code: %w", err)
 	}
-	return detail, nil
+	return detail, recordKind, costIndicators, nil
+}
+
+func (s *Service) applyRecordSelfPricing(ctx context.Context, code, fgisSetID, district, costIndicators string) (string, string, error) {
+	if strings.TrimSpace(fgisSetID) == "" {
+		return "", "", nil
+	}
+	prices, indexes, found, err := s.lookupFGISSetRow(ctx, fgisSetID, code)
+	if err != nil {
+		return "", "", err
+	}
+	if !found {
+		return "", "", nil
+	}
+	unitPriceText, unitPriceIndex := resolveResourceUnitPrice(prices, indexes, costIndicators, district)
+	return unitPriceText, unitPriceIndex, nil
 }
 
 func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district string) (RecordDetail, error) {
@@ -80,17 +99,29 @@ func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district
 		return RecordDetail{}, fmt.Errorf("record code is required")
 	}
 
-	detail, err := s.lookupRecordDetail(ctx, code)
+	detail, recordKind, costIndicators, err := s.lookupRecordDetail(ctx, code)
 	if err != nil {
 		return RecordDetail{}, err
 	}
 
-	resources, err := s.listRecordResources(ctx, detail.Code, fgisSetID, district)
+	detail.IsWork = isWorkNormRecord(detail.Code, recordKind)
+	if detail.IsWork {
+		resources, err := s.listRecordResources(ctx, detail.Code, fgisSetID, district)
+		if err != nil {
+			return RecordDetail{}, err
+		}
+		detail.Resources = resources
+		detail.HasResources = len(resources) > 0
+		return detail, nil
+	}
+
+	detail.HasResources = false
+	unitPriceText, unitPriceIndex, err := s.applyRecordSelfPricing(ctx, detail.Code, fgisSetID, district, costIndicators)
 	if err != nil {
 		return RecordDetail{}, err
 	}
-	detail.Resources = resources
-	detail.HasResources = len(resources) > 0
+	detail.UnitPriceText = unitPriceText
+	detail.UnitPriceIndex = unitPriceIndex
 	return detail, nil
 }
 

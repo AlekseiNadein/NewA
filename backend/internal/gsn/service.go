@@ -187,7 +187,7 @@ func (s *Service) ListChildren(ctx context.Context, supplementCode, parentCode s
 		if !node.HasChildren && node.OriginalCode == "" && strings.TrimSpace(node.NormList) != "" {
 			refs := parseNormListRefs(node.NormList)
 			if len(refs) > 0 {
-				if detail, err := s.lookupRecordDetail(ctx, refs[0]); err == nil {
+				if detail, _, _, err := s.lookupRecordDetail(ctx, refs[0]); err == nil {
 					node.OriginalCode = detail.OriginalCode
 					if node.OriginalCode == "" {
 						node.OriginalCode = detail.Code
