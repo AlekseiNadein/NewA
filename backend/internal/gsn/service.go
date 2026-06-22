@@ -13,14 +13,17 @@ import (
 var ErrNotConfigured = errors.New("gsn database is not configured")
 
 type Node struct {
-	Code        string `json:"code"`
-	ParentCode  string `json:"parentCode,omitempty"`
-	Level       int    `json:"level"`
-	Name        string `json:"name"`
-	Unit        string `json:"unit,omitempty"`
-	NormList    string `json:"normList,omitempty"`
-	RecordCount int    `json:"recordCount"`
-	HasChildren bool   `json:"hasChildren"`
+	Code         string `json:"code"`
+	ParentCode   string `json:"parentCode,omitempty"`
+	Level        int    `json:"level"`
+	Name         string `json:"name"`
+	Unit         string `json:"unit,omitempty"`
+	NormList     string `json:"normList,omitempty"`
+	NodeType     string `json:"nodeType,omitempty"`
+	DocumentRef  string `json:"documentRef,omitempty"`
+	DocumentFile string `json:"documentFile,omitempty"`
+	RecordCount  int    `json:"recordCount"`
+	HasChildren  bool   `json:"hasChildren"`
 }
 
 type Supplement struct {
@@ -35,6 +38,11 @@ type BaseInfo struct {
 	Supplement string `json:"supplement"`
 	Edition    string `json:"edition"`
 	Version    string `json:"version"`
+}
+
+type Region struct {
+	Code string `json:"code"`
+	Name string `json:"name"`
 }
 
 type Service struct {
@@ -117,6 +125,9 @@ func (s *Service) ListChildren(ctx context.Context, supplementCode, parentCode s
 			h.name,
 			h.unit,
 			h.raw_norm_list,
+			h.node_type,
+			h.document_ref,
+			h.document_file,
 			(
 				SELECT count(*)
 				FROM gsn.hierarchy_record_refs refs
@@ -150,6 +161,9 @@ func (s *Service) ListChildren(ctx context.Context, supplementCode, parentCode s
 			&node.Name,
 			&node.Unit,
 			&node.NormList,
+			&node.NodeType,
+			&node.DocumentRef,
+			&node.DocumentFile,
 			&node.RecordCount,
 			&node.HasChildren,
 		); err != nil {
@@ -220,4 +234,34 @@ func (s *Service) BaseInfo(ctx context.Context, supplementCode string) (BaseInfo
 	}
 
 	return info, nil
+}
+
+func (s *Service) ListRegions(ctx context.Context) ([]Region, error) {
+	if !s.Configured() {
+		return nil, ErrNotConfigured
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT code, name
+		FROM gsn.regions
+		ORDER BY line_no, code
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query gsn regions: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]Region, 0)
+	for rows.Next() {
+		var item Region
+		if err := rows.Scan(&item.Code, &item.Name); err != nil {
+			return nil, fmt.Errorf("scan gsn region: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read gsn regions: %w", err)
+	}
+
+	return items, nil
 }

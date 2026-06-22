@@ -101,6 +101,19 @@ p {
   margin-bottom: 1rem;
 }
 
+.hero-brand {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.hero-logo {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+
 .hero h1 {
   margin-bottom: 0.35rem;
   font-size: clamp(1.75rem, 3.4vw, 3.4rem);
@@ -206,6 +219,7 @@ p {
 
 .section-view {
   min-height: 480px;
+  min-width: 0;
 }
 
 .layout {
@@ -237,6 +251,49 @@ p {
 
 .stack-form h3 {
   margin-bottom: 0;
+}
+
+.estimate-line-type-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.estimate-line-type-readonly strong {
+  font-weight: 600;
+}
+
+.estimate-add-line-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.estimate-add-line-choice {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.estimate-add-line-dialog .dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.estimate-add-line-dialog .dialog-close-btn {
+  flex-shrink: 0;
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  font-size: 1.15rem;
+  line-height: 1;
+  border-radius: 6px;
+}
+
+.estimate-add-line-dialog .dialog-close-btn:hover {
+  transform: none;
 }
 
 .full {
@@ -449,6 +506,211 @@ p {
   border-left: 2px solid var(--border);
 }
 
+.user-positions-panel {
+  margin-top: 0.35rem;
+  min-width: 0;
+}
+
+.user-positions-panel .table-wrap {
+  overflow-x: visible;
+}
+
+.user-positions-table {
+  width: 100%;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  table-layout: fixed;
+}
+
+.user-positions-table th,
+.user-positions-table td {
+  min-width: 0;
+  padding: 0.4rem 0.4rem;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.user-positions-table th {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.user-positions-table .user-positions-index-cell {
+  width: 2rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  text-align: center;
+}
+
+.user-positions-table .user-positions-code-cell {
+  width: 9rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  font-size: 0.78rem;
+}
+
+.user-positions-code-text {
+  display: inline-block;
+  max-width: 100%;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.user-positions-table .user-positions-name-cell {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.user-positions-table .user-positions-unit-cell {
+  width: 3.5rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  font-size: 0.78rem;
+}
+
+.user-positions-table .user-positions-cost-cell {
+  width: 5.5rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  white-space: nowrap;
+  font-size: 0.78rem;
+}
+
+.user-positions-table .user-positions-actions-cell {
+  width: auto;
+  min-width: 11rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  text-align: right;
+  vertical-align: middle;
+}
+
+.user-positions-actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+}
+
+.user-positions-actions-row {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+}
+
+.user-positions-table .add-primitive {
+  font-size: 0.72rem;
+  padding: 0.28rem 0.38rem;
+}
+
+.user-positions-table .add-primitive-stepper {
+  gap: 0.15rem;
+}
+
+.user-positions-table .add-primitive-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  font-size: 0.88rem;
+}
+
+.user-positions-table .add-primitive-qty {
+  width: 2.75rem;
+  height: 1.5rem;
+  padding: 0 0.2rem;
+  font-size: 0.76rem;
+}
+
+.user-positions-table .icon-button {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.add-primitive {
+  border-radius: 8px;
+  font-size: 0.78rem;
+  padding: 0.35rem 0.55rem;
+  white-space: nowrap;
+}
+
+.add-primitive-stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.add-primitive-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.add-primitive-qty {
+  width: 3.4rem;
+  height: 1.65rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: center;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  background: #fff;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.icon-button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.icon-button-danger:hover {
+  background: #fdecec;
+  color: var(--danger);
+}
+
+.user-positions-footer {
+  margin-top: 0.85rem;
+}
+
+.user-positions-add-btn {
+  width: 100%;
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding: 0.7rem 1rem;
+}
+
 .construction-tree {
   margin-top: 0.35rem;
 }
@@ -542,6 +804,10 @@ p {
   gap: 0.55rem;
 }
 
+.dialog-actions-end {
+  justify-content: flex-end;
+}
+
 .level-1 {
   background: #f8fbff;
 }
@@ -562,6 +828,44 @@ p {
   max-height: 62vh;
   overflow: auto;
   padding-right: 0.25rem;
+}
+
+.gsn-node-label {
+  min-width: 0;
+}
+
+.gsn-node-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.gsn-node-title-row strong {
+  min-width: 0;
+}
+
+.gsn-pdf-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  color: #c0392b;
+}
+
+.gsn-pdf-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.gsn-node-pdf {
+  cursor: pointer;
+}
+
+.gsn-node-pdf:hover {
+  border-color: #c9d4ea;
+  background: #fbfcff;
 }
 
 .gsn-supplement-bar {
@@ -590,8 +894,308 @@ p {
   font-size: 0.92rem;
 }
 
+.fgis-prices-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.fgis-prices-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.fgis-prices-set-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.fgis-prices-set-label {
+  flex: 0 0 auto;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.fgis-prices-set-select {
+  flex: 1;
+  min-width: 0;
+  max-width: 36rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+  font-size: 0.92rem;
+}
+
+.fgis-prices-stats {
+  margin: 0;
+}
+
+.fgis-prices-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.fgis-prices-search-input {
+  flex: 1 1 16rem;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+}
+
+.fgis-prices-panel .table-wrap {
+  max-height: 58vh;
+  overflow: auto;
+}
+
+.fgis-prices-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.88rem;
+}
+
+.fgis-prices-table th,
+.fgis-prices-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.42rem 0.45rem;
+  vertical-align: top;
+  text-align: left;
+}
+
+.fgis-prices-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #fff;
+  font-weight: 600;
+}
+
+.fgis-prices-table .fgis-prices-index-cell {
+  width: 4.2rem;
+  white-space: nowrap;
+}
+
+.fgis-prices-table .fgis-prices-original-code-cell {
+  width: 11rem;
+}
+
+.fgis-prices-code-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.84rem;
+}
+
+.fgis-prices-table .fgis-prices-name-cell {
+  width: 28%;
+}
+
+.fgis-prices-table .fgis-prices-unit-cell {
+  width: 5.5rem;
+  white-space: nowrap;
+}
+
+.fgis-prices-table .fgis-prices-value-cell {
+  width: 18%;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.fgis-prices-pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.fgis-prices-pagination button {
+  color: var(--text);
+}
+
 .editor-content {
   margin-top: 0.8rem;
+  min-width: 0;
+}
+
+.editor-content .table-wrap {
+  overflow-x: visible;
+}
+
+.editor-estimate-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 1.1rem;
+  margin-bottom: 0.75rem;
+}
+
+.editor-estimate-header-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.editor-estimate-header-field-grow {
+  flex: 1 1 14rem;
+}
+
+.editor-estimate-header-field input,
+.editor-estimate-header-field select {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+
+.editor-estimate-header-field:not(.editor-estimate-header-field-grow) input {
+  width: 8rem;
+}
+
+.editor-estimate-header-field input[data-editor-district] {
+  width: 9rem;
+}
+
+.editor-district-field {
+  min-width: 5.5rem;
+  width: 9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+  font-size: 0.92rem;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.editor-district-field:hover {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.editor-estimate-header-field-fgis-set {
+  flex: 1 1 16rem;
+  max-width: 100%;
+}
+
+.editor-fgis-set-select {
+  min-width: 12rem;
+  width: 100%;
+  max-width: 28rem;
+}
+
+.editor-estimate-header-field-total {
+  flex: 0 0 auto;
+}
+
+.editor-estimate-total-value {
+  display: inline-block;
+  min-width: 7.5rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f5f7fb;
+  padding: 0.38rem 0.55rem;
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.district-dialog {
+  max-width: min(34rem, calc(100vw - 2rem));
+}
+
+.district-region-label {
+  margin: 0.15rem 0 0.25rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.district-region-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 16rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.35rem;
+  background: #fbfcff;
+}
+
+.district-region-item {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-weight: 500;
+  padding: 0.4rem 0.45rem;
+  text-align: left;
+  cursor: pointer;
+  transform: none;
+}
+
+.district-region-item:hover {
+  background: #eef3ff;
+  color: var(--text);
+  transform: none;
+}
+
+.district-region-item.active {
+  border-color: var(--primary);
+  background: #eef3ff;
+  color: var(--text);
+}
+
+.district-region-code {
+  flex: 0 0 auto;
+  min-width: 1.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.district-region-name {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.district-region-empty {
+  margin: 0.5rem;
+  font-size: 0.88rem;
+}
+
+.editor-estimate-header-field-grow input {
+  width: 100%;
 }
 
 .editor-estimate-meta {
@@ -609,12 +1213,6 @@ p {
   white-space: nowrap;
 }
 
-.editor-district-inline input {
-  width: 9rem;
-  padding: 0.35rem 0.5rem;
-  font-size: 0.88rem;
-}
-
 .nav-sublink-action {
   color: var(--primary);
 }
@@ -625,23 +1223,234 @@ p {
 
 .editor-estimate-table {
   width: 100%;
+  max-width: 100%;
   border-collapse: collapse;
-  font-size: 0.92rem;
+  font-size: 0.88rem;
+  font-variant-numeric: tabular-nums;
+  table-layout: fixed;
 }
 
 .editor-estimate-table th,
 .editor-estimate-table td {
+  min-width: 0;
   border: 1px solid var(--border);
-  padding: 0.45rem 0.55rem;
+  padding: 0.4rem 0.4rem;
   text-align: left;
   vertical-align: top;
+}
+
+.editor-estimate-table th {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.editor-estimate-table .editor-estimate-index-cell {
+  width: 2rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  text-align: center;
+}
+
+.editor-estimate-table th.editor-estimate-index-cell {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.editor-estimate-table td.editor-estimate-index-cell {
   white-space: nowrap;
 }
 
-.editor-estimate-table th:nth-child(3),
-.editor-estimate-table td:nth-child(3) {
+.editor-estimate-table .editor-estimate-code-cell {
+  width: 10rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
   white-space: normal;
-  min-width: 18rem;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  font-size: 0.78rem;
+}
+
+.editor-estimate-code-cell-inner {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.3rem;
+}
+
+.editor-estimate-structural-label {
+  font-weight: 500;
+}
+
+.editor-estimate-table tr.editor-estimate-row-section td {
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.editor-estimate-table tr.editor-estimate-row-subsection td {
+  font-size: 0.76rem;
+  color: #8a96a8;
+}
+
+.editor-line-expand-btn {
+  flex: 0 0 auto;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.editor-line-expand-btn:hover {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.editor-line-expand-placeholder {
+  flex: 0 0 1.35rem;
+  width: 1.35rem;
+}
+
+.editor-estimate-row-child .editor-line-expand-placeholder {
+  display: none;
+}
+
+.editor-estimate-name-cell-child {
+  padding-left: 1.1rem;
+}
+
+.editor-estimate-row-child td {
+  background: #fafbfd;
+  color: #8a96a8;
+  font-size: 0.76rem;
+}
+
+.editor-estimate-table .editor-estimate-row-child td.editor-estimate-code-cell,
+.editor-estimate-table .editor-estimate-row-child td.editor-estimate-unit-cell,
+.editor-estimate-table .editor-estimate-row-child td.editor-estimate-quantity-cell,
+.editor-estimate-table .editor-estimate-row-child td.editor-estimate-price-cell,
+.editor-estimate-table .editor-estimate-row-child td.editor-estimate-total-cell {
+  font-size: 0.72rem;
+}
+
+.editor-estimate-table .editor-estimate-name-cell {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.editor-estimate-table .editor-estimate-unit-cell {
+  width: 3.5rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  font-size: 0.78rem;
+}
+
+.editor-estimate-table .editor-estimate-quantity-cell {
+  width: 4rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.2;
+  font-size: 0.78rem;
+}
+
+.editor-estimate-header-sub {
+  color: #8a96a8;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.editor-estimate-price-index {
+  color: #8a96a8;
+  font-size: 0.72rem;
+}
+
+.editor-estimate-table .editor-estimate-price-cell,
+.editor-estimate-table .editor-estimate-total-cell {
+  width: 4.75rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  line-height: 1.25;
+  font-size: 0.78rem;
+}
+
+.editor-estimate-table .editor-estimate-price-cell {
+  white-space: normal;
+}
+
+.editor-estimate-table th.editor-estimate-price-cell,
+.editor-estimate-table th.editor-estimate-total-cell {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.editor-estimate-table td.editor-estimate-price-cell,
+.editor-estimate-table td.editor-estimate-total-cell {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.editor-estimate-table .editor-estimate-actions-cell {
+  width: 7.75rem;
+  padding-left: 0.2rem;
+  padding-right: 0.2rem;
+  text-align: right;
+  vertical-align: middle;
+}
+
+.editor-estimate-line-actions {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.15rem;
+}
+
+.editor-estimate-table .icon-button {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.editor-estimate-table .icon-button svg {
+  width: 0.92rem;
+  height: 0.92rem;
+}
+
+.editor-estimate-table .icon-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.editor-estimate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
 }
 
 .editor-list {

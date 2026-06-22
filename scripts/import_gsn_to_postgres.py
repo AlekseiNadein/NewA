@@ -29,6 +29,8 @@ NORM_RANGE_RE = re.compile(r"^[ЕЦУE]\d{4,5}-\d{3}-\d{2}$")
 RECORD_CODE_RE = re.compile(r"^[A-ZА-ЯЁ][A-ZА-ЯЁ0-9-]*\d", re.IGNORECASE)
 ORIGINAL_CODE_RE = re.compile(r"\(Ш([^)]*)\)")
 SUPPLEMENT_RE = re.compile(r"доп\.?\s*(\d+)", re.IGNORECASE)
+PDF_REF_RE = re.compile(r"^[\w~.-]+\.PDF$", re.IGNORECASE)
+NODE_TYPE_DOCUMENT = "Документ"
 
 
 def read_lines(path: Path) -> list[str]:
@@ -163,6 +165,14 @@ def write_tsv(path: Path, fieldnames: list[str], rows: list[dict[str, object]]) 
             )
 
 
+def extract_pdf_ref(fields: list[str]) -> str:
+    for field in fields[2:]:
+        candidate = field.strip()
+        if PDF_REF_RE.match(candidate):
+            return candidate
+    return ""
+
+
 def parse_hierarchy(source: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     rows: list[dict[str, object]] = []
     refs: list[dict[str, object]] = []
@@ -179,14 +189,21 @@ def parse_hierarchy(source: Path) -> tuple[list[dict[str, object]], list[dict[st
         while stack and stack[-1][0] >= level:
             stack.pop()
         parent_code = stack[-1][1] if stack else None
+        pdf_ref = extract_pdf_ref(fields)
+        unit = fields[4]
+        if pdf_ref and unit.strip().upper() == pdf_ref.upper():
+            unit = ""
         rows.append(
             {
                 "code": code,
                 "parent_code": parent_code,
                 "line_no": line_no,
                 "level": level,
+                "node_type": NODE_TYPE_DOCUMENT if pdf_ref else "",
                 "name": fields[3],
-                "unit": fields[4],
+                "unit": unit,
+                "document_ref": pdf_ref,
+                "document_file": "",
                 "raw_norm_list": fields[2],
                 "raw_line": line,
             }
@@ -431,6 +448,10 @@ def with_supplement(rows: list[dict[str, object]], supplement_code: str) -> list
     return tagged
 
 
+def sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def write_load_sql(out: Path, supplement_code: str, replace_all: bool) -> Path:
     def sql_path(name: str) -> str:
         return str((out / name).resolve()).replace("\\", "/")
@@ -440,9 +461,14 @@ def write_load_sql(out: Path, supplement_code: str, replace_all: bool) -> Path:
         "TRUNCATE gsn.record_amendments, gsn.amendment_impacts, gsn.amendments,",
         "    gsn.nsi, gsn.record_resources, gsn.records, gsn.import_batches CASCADE;",
     ]
+    sup = sql_literal(supplement_code)
     lines = [
         "BEGIN;",
-        f"DELETE FROM gsn.supplements WHERE code = '{supplement_code}';",
+        f"DELETE FROM gsn.hierarchy_record_refs WHERE supplement_code = {sup};",
+        f"DELETE FROM gsn.hierarchy WHERE supplement_code = {sup};",
+        f"DELETE FROM gsn.base_info_params WHERE supplement_code = {sup};",
+        f"DELETE FROM gsn.base_info WHERE supplement_code = {sup};",
+        f"DELETE FROM gsn.supplements WHERE code = {sup};",
     ]
     if replace_all:
         lines.extend(shared_truncates)
@@ -452,7 +478,7 @@ def write_load_sql(out: Path, supplement_code: str, replace_all: bool) -> Path:
             rf"\copy gsn.import_batches(id,source_path,prepared_path,imported_at) FROM '{sql_path('import_batches.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
             rf"\copy gsn.base_info(supplement_code,code,source_file,line_no,raw_line) FROM '{sql_path('base_info.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
             rf"\copy gsn.base_info_params(supplement_code,base_code,param_key,param_value,ordinal) FROM '{sql_path('base_info_params.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
-            rf"\copy gsn.hierarchy(supplement_code,code,parent_code,line_no,level,name,unit,raw_norm_list,raw_line) FROM '{sql_path('hierarchy.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
+            rf"\copy gsn.hierarchy(supplement_code,code,parent_code,line_no,level,node_type,name,unit,document_ref,document_file,raw_norm_list,raw_line) FROM '{sql_path('hierarchy.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
             rf"\copy gsn.hierarchy_record_refs(supplement_code,hierarchy_code,record_code,ordinal) FROM '{sql_path('hierarchy_record_refs.tsv')}' WITH (FORMAT csv, HEADER true, DELIMITER E'\t', NULL '\N');",
         ]
     )
@@ -549,7 +575,20 @@ def main() -> None:
     )
     write_tsv(
         out / "hierarchy.tsv",
-        ["supplement_code", "code", "parent_code", "line_no", "level", "name", "unit", "raw_norm_list", "raw_line"],
+        [
+            "supplement_code",
+            "code",
+            "parent_code",
+            "line_no",
+            "level",
+            "node_type",
+            "name",
+            "unit",
+            "document_ref",
+            "document_file",
+            "raw_norm_list",
+            "raw_line",
+        ],
         hierarchy,
     )
     write_tsv(
@@ -587,7 +626,13 @@ def main() -> None:
     print(f"Generated TSV files in: {out}")
     print(f"Generated psql load script: {load_sql}")
     print(f"Supplement: {supplement_code} ({supplement_label_value})")
-    print(f"Rows: base_info={len(base_info)}, base_info_params={len(base_info_params)}, hierarchy={len(hierarchy)}, records={len(records)}, resources={len(record_resources)}, nsi={len(nsi)}, amendments={len(amendments)}, incidences={len(record_amendments)}")
+    document_nodes = sum(1 for row in hierarchy if row.get("node_type") == NODE_TYPE_DOCUMENT)
+    print(
+        f"Rows: base_info={len(base_info)}, base_info_params={len(base_info_params)}, "
+        f"hierarchy={len(hierarchy)} (documents={document_nodes}), records={len(records)}, "
+        f"resources={len(record_resources)}, nsi={len(nsi)}, amendments={len(amendments)}, "
+        f"incidences={len(record_amendments)}"
+    )
     print(f"Missing amendment dictionary records referenced by amen: {len(missing_amendments)}")
 
     if args.load:

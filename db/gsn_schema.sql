@@ -60,14 +60,47 @@ CREATE TABLE IF NOT EXISTS gsn.hierarchy (
     parent_code TEXT,
     line_no INTEGER NOT NULL,
     level INTEGER NOT NULL,
+    node_type TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL DEFAULT '',
     unit TEXT NOT NULL DEFAULT '',
+    document_ref TEXT NOT NULL DEFAULT '',
+    document_file TEXT NOT NULL DEFAULT '',
     raw_norm_list TEXT NOT NULL DEFAULT '',
     raw_line TEXT NOT NULL,
     PRIMARY KEY (supplement_code, code),
     FOREIGN KEY (supplement_code, parent_code)
         REFERENCES gsn.hierarchy(supplement_code, code) ON DELETE CASCADE
 );
+
+ALTER TABLE gsn.hierarchy ADD COLUMN IF NOT EXISTS node_type TEXT NOT NULL DEFAULT '';
+ALTER TABLE gsn.hierarchy ADD COLUMN IF NOT EXISTS document_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE gsn.hierarchy ADD COLUMN IF NOT EXISTS document_file TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_gsn_hierarchy_node_type
+    ON gsn.hierarchy(supplement_code, node_type);
+
+CREATE TABLE IF NOT EXISTS gsn.documents (
+    file_name TEXT PRIMARY KEY,
+    content BYTEA NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    sha256 TEXT NOT NULL DEFAULT '',
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE VIEW gsn.hierarchy_documents AS
+SELECT
+    h.supplement_code,
+    h.code AS hierarchy_code,
+    h.level,
+    h.name,
+    h.document_ref,
+    h.document_file,
+    d.size_bytes,
+    d.sha256,
+    d.imported_at AS document_imported_at
+FROM gsn.hierarchy h
+LEFT JOIN gsn.documents d ON d.file_name = h.document_file
+WHERE h.node_type = 'Документ';
 
 CREATE INDEX IF NOT EXISTS idx_gsn_hierarchy_supplement_parent
     ON gsn.hierarchy(supplement_code, parent_code);
@@ -115,6 +148,17 @@ CREATE TABLE IF NOT EXISTS gsn.record_resources (
 
 CREATE INDEX IF NOT EXISTS idx_gsn_record_resources_resource_code
     ON gsn.record_resources(resource_code);
+
+CREATE TABLE IF NOT EXISTS gsn.resource_codifier (
+    number TEXT PRIMARY KEY,
+    code TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL DEFAULT '',
+    unit TEXT NOT NULL DEFAULT '',
+    line_no INTEGER NOT NULL,
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gsn_resource_codifier_code ON gsn.resource_codifier(code);
 
 CREATE TABLE IF NOT EXISTS gsn.nsi (
     record_code TEXT NOT NULL,
@@ -165,4 +209,37 @@ CREATE INDEX IF NOT EXISTS idx_gsn_record_amendments_record_code
 
 CREATE INDEX IF NOT EXISTS idx_gsn_record_amendments_amendment_code
     ON gsn.record_amendments(amendment_code);
+
+CREATE TABLE IF NOT EXISTS gsn.regions (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    line_no INTEGER NOT NULL,
+    raw_line TEXT NOT NULL,
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gsn_regions_line_no ON gsn.regions(line_no);
+
+-- Сметные цены и индексы ФГИС ЦС (несколько наборов)
+CREATE SCHEMA IF NOT EXISTS fgis_cs;
+
+CREATE TABLE IF NOT EXISTS fgis_cs.sets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prices_source TEXT NOT NULL DEFAULT '',
+    indexes_source TEXT NOT NULL DEFAULT '',
+    imported_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS fgis_cs.set_rows (
+    set_id TEXT NOT NULL REFERENCES fgis_cs.sets(id) ON DELETE CASCADE,
+    code TEXT NOT NULL,
+    prices TEXT NOT NULL DEFAULT '',
+    indexes TEXT NOT NULL DEFAULT '',
+    line_no_prices INTEGER,
+    line_no_indexes INTEGER,
+    PRIMARY KEY (set_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fgis_cs_set_rows_code ON fgis_cs.set_rows(code);
 

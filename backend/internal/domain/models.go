@@ -83,6 +83,8 @@ type Estimate struct {
 	Code        string         `json:"code"`
 	Title       string         `json:"title"`
 	Description string         `json:"description"`
+	District    string         `json:"district"`
+	FgisSetID   string         `json:"fgisSetId"`
 	Status      EstimateStatus `json:"status"`
 	Items       []EstimateItem `json:"items"`
 	Total       float64        `json:"total"`
@@ -101,6 +103,7 @@ const (
 type EstimateItem struct {
 	ID        string  `json:"id"`
 	Type      string  `json:"type"`
+	Code      string  `json:"code"`
 	Name      string  `json:"name"`
 	Quantity  float64 `json:"quantity"`
 	Unit      string  `json:"unit"`

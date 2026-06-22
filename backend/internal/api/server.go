@@ -55,6 +55,12 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/gsn/supplements", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNSupplements))))
 	mux.Handle("/api/gsn/base-info", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNBaseInfo))))
 	mux.Handle("/api/gsn/hierarchy", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchy))))
+	mux.Handle("/api/gsn/document", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNDocument))))
+	mux.Handle("/api/gsn/record", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNRecord))))
+	mux.Handle("/api/gsn/hierarchy-records", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchyRecords))))
+	mux.Handle("/api/gsn/regions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNRegions))))
+	mux.Handle("/api/gsn/fgis-sets", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNFGISSets))))
+	mux.Handle("/api/gsn/fgis-rows", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNFGISRows))))
 	mux.HandleFunc("/admin", s.serveAdmin)
 	mux.HandleFunc("/admin/", s.serveAdmin)
 	mux.Handle("/", s.static)
@@ -538,6 +544,42 @@ func (s *Server) handleGSNHierarchy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleGSNDocument(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	supplement := strings.TrimSpace(r.URL.Query().Get("supplement"))
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if supplement == "" || code == "" {
+		writeError(w, http.StatusBadRequest, "supplement and code are required")
+		return
+	}
+
+	document, err := s.gsn.GetHierarchyDocument(r.Context(), supplement, code)
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "not imported") {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		slog.Error("gsn document query failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to read GSN document")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/pdf")
+	w.Header().Set("Content-Disposition", "inline; filename=\""+document.FileName+"\"")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(document.Content); err != nil {
+		slog.Error("gsn document write failed", "error", err)
+	}
+}
+
 func (s *Server) handleGSNBaseInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -562,6 +604,156 @@ func (s *Server) handleGSNBaseInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleGSNRecord(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	code := strings.TrimSpace(r.URL.Query().Get("code"))
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "code is required")
+		return
+	}
+	fgisSetID := strings.TrimSpace(r.URL.Query().Get("fgisSet"))
+	district := strings.TrimSpace(r.URL.Query().Get("district"))
+
+	record, err := s.gsn.GetRecordDetail(r.Context(), code, fgisSetID, district)
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "record not found")
+			return
+		}
+		slog.Error("gsn record query failed", "error", err, "code", code)
+		writeError(w, http.StatusBadGateway, "failed to read GSN record")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"record": record,
+	})
+}
+
+func (s *Server) handleGSNHierarchyRecords(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	supplement := strings.TrimSpace(r.URL.Query().Get("supplement"))
+	hierarchy := strings.TrimSpace(r.URL.Query().Get("hierarchy"))
+	if supplement == "" || hierarchy == "" {
+		writeError(w, http.StatusBadRequest, "supplement and hierarchy are required")
+		return
+	}
+
+	fgisSetID := strings.TrimSpace(r.URL.Query().Get("fgisSet"))
+	district := strings.TrimSpace(r.URL.Query().Get("district"))
+
+	records, err := s.gsn.ListHierarchyRecords(r.Context(), supplement, hierarchy, fgisSetID, district)
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn hierarchy records query failed", "error", err, "supplement", supplement, "hierarchy", hierarchy)
+		writeError(w, http.StatusBadGateway, "failed to read GSN hierarchy records")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"records": records,
+	})
+}
+
+func (s *Server) handleGSNRegions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	regions, err := s.gsn.ListRegions(r.Context())
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn regions query failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to read GSN regions")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"regions": regions,
+	})
+}
+
+func (s *Server) handleGSNFGISSets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	sets, err := s.gsn.ListFGISSets(r.Context())
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn fgis sets query failed", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to read FGIS sets")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sets": sets,
+	})
+}
+
+func (s *Server) handleGSNFGISRows(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	setID := strings.TrimSpace(r.URL.Query().Get("set"))
+	if setID == "" {
+		writeError(w, http.StatusBadRequest, "set query parameter is required")
+		return
+	}
+
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			offset = parsed
+		}
+	}
+
+	result, err := s.gsn.ListFGISSetRows(r.Context(), setID, r.URL.Query().Get("q"), limit, offset)
+	if err != nil {
+		if errors.Is(err, gsn.ErrNotConfigured) {
+			writeError(w, http.StatusServiceUnavailable, "GSN database is not configured; set APP_GSN_DATABASE_URL")
+			return
+		}
+		slog.Error("gsn fgis rows query failed", "error", err, "set", setID)
+		writeError(w, http.StatusBadGateway, "failed to read FGIS rows")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) {

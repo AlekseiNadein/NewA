@@ -99,6 +99,8 @@ type EstimateInput struct {
 	Code        string                `json:"code"`
 	Title       string                `json:"title"`
 	Description string                `json:"description"`
+	District    string                `json:"district"`
+	FgisSetID   string                `json:"fgisSetId"`
 	Status      domain.EstimateStatus `json:"status"`
 	Items       []domain.EstimateItem `json:"items"`
 }
@@ -885,6 +887,9 @@ func (s *FileStore) UpdateEstimate(id string, companyID string, includeAll bool,
 	if input.Description == "" {
 		input.Description = current.Description
 	}
+	if input.District == "" {
+		input.District = current.District
+	}
 	if input.Status == "" {
 		input.Status = current.Status
 	}
@@ -1138,6 +1143,8 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 	input.Code = strings.TrimSpace(input.Code)
 	input.Title = strings.TrimSpace(input.Title)
 	input.Description = strings.TrimSpace(input.Description)
+	input.District = strings.TrimSpace(input.District)
+	input.FgisSetID = strings.TrimSpace(input.FgisSetID)
 	if input.ObjectID == "" || input.Code == "" || input.Title == "" {
 		return domain.Estimate{}, ErrConflict
 	}
@@ -1152,6 +1159,7 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 	var total float64
 	for _, item := range input.Items {
 		item.Type = estimateLineType(item.Type)
+		item.Code = strings.TrimSpace(item.Code)
 		item.Name = strings.TrimSpace(item.Name)
 		item.Unit = strings.TrimSpace(item.Unit)
 		if !validEstimateLineType(item.Type) {
@@ -1175,6 +1183,8 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 		Code:        input.Code,
 		Title:       input.Title,
 		Description: input.Description,
+		District:    input.District,
+		FgisSetID:   input.FgisSetID,
 		Status:      input.Status,
 		Items:       items,
 		Total:       total,
@@ -1310,6 +1320,8 @@ CREATE TABLE IF NOT EXISTS app_estimates (
     code TEXT NOT NULL,
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    district TEXT NOT NULL DEFAULT '',
+    fgis_set_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK (status IN ('draft', 'approved', 'archived')),
     total NUMERIC(14, 2) NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1318,10 +1330,16 @@ CREATE TABLE IF NOT EXISTS app_estimates (
 CREATE INDEX IF NOT EXISTS idx_app_estimates_company_id ON app_estimates(company_id);
 CREATE INDEX IF NOT EXISTS idx_app_estimates_object_id ON app_estimates(object_id);
 
+ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS district TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS fgis_set_id TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS code TEXT NOT NULL DEFAULT '';
+
 CREATE TABLE IF NOT EXISTS app_estimate_lines (
     id TEXT PRIMARY KEY,
     estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
     line_type TEXT NOT NULL CHECK (line_type IN ('section', 'subsection', 'position')),
+    code TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,
     quantity NUMERIC(14, 3) NOT NULL DEFAULT 0,
     unit TEXT NOT NULL DEFAULT '',
@@ -1377,16 +1395,16 @@ VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING`, item.ID, item.
 		}
 	}
 	for _, item := range estimates {
-		_, err = tx.Exec(ctx, `INSERT INTO app_estimates (id, company_id, object_id, code, title, description, status, total, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING`,
-			item.ID, item.CompanyID, item.ObjectID, item.Code, item.Title, item.Description, item.Status, item.Total, item.CreatedAt, item.UpdatedAt)
+		_, err = tx.Exec(ctx, `INSERT INTO app_estimates (id, company_id, object_id, code, title, description, district, fgis_set_id, status, total, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING`,
+			item.ID, item.CompanyID, item.ObjectID, item.Code, item.Title, item.Description, item.District, item.FgisSetID, item.Status, item.Total, item.CreatedAt, item.UpdatedAt)
 		if err != nil {
 			return err
 		}
 		for order, line := range item.Items {
-			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING`,
-				line.ID, item.ID, estimateLineType(line.Type), line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
+			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, name, quantity, unit, unit_price, total, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING`,
+				line.ID, item.ID, estimateLineType(line.Type), line.Code, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
 			if err != nil {
 				return err
 			}
@@ -1558,7 +1576,7 @@ func (s *FileStore) updateObjectDB(ctx context.Context, id, companyID string, in
 }
 
 func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, includeAll bool) ([]domain.Estimate, error) {
-	query := `SELECT id, company_id, object_id, code, title, description, status, total, created_at, updated_at FROM app_estimates`
+	query := `SELECT id, company_id, object_id, code, title, description, district, fgis_set_id, status, total, created_at, updated_at FROM app_estimates`
 	args := []any{}
 	if !includeAll {
 		query += ` WHERE company_id = $1`
@@ -1575,7 +1593,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 	ids := []string{}
 	for rows.Next() {
 		var item domain.Estimate
-		if err := rows.Scan(&item.ID, &item.CompanyID, &item.ObjectID, &item.Code, &item.Title, &item.Description, &item.Status, &item.Total, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.CompanyID, &item.ObjectID, &item.Code, &item.Title, &item.Description, &item.District, &item.FgisSetID, &item.Status, &item.Total, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -1588,7 +1606,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 		return items, nil
 	}
 
-	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
+	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, code, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1597,7 +1615,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 	for lineRows.Next() {
 		var line domain.EstimateItem
 		var estimateID string
-		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
+		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Code, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
 			return nil, err
 		}
 		lineMap[estimateID] = append(lineMap[estimateID], line)
@@ -1663,6 +1681,9 @@ func (s *FileStore) updateEstimateDB(ctx context.Context, id, companyID string, 
 	if input.Description == "" {
 		input.Description = current.Description
 	}
+	if input.District == "" {
+		input.District = current.District
+	}
 	if input.Status == "" {
 		input.Status = current.Status
 	}
@@ -1698,10 +1719,10 @@ func (s *FileStore) upsertEstimateDB(ctx context.Context, item domain.Estimate) 
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `INSERT INTO app_estimates (id, company_id, object_id, code, title, description, status, total, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.code, title = EXCLUDED.title, description = EXCLUDED.description, status = EXCLUDED.status, total = EXCLUDED.total, updated_at = EXCLUDED.updated_at`,
-		item.ID, item.CompanyID, item.ObjectID, item.Code, item.Title, item.Description, item.Status, item.Total, item.CreatedAt, item.UpdatedAt)
+	_, err = tx.Exec(ctx, `INSERT INTO app_estimates (id, company_id, object_id, code, title, description, district, fgis_set_id, status, total, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.code, title = EXCLUDED.title, description = EXCLUDED.description, district = EXCLUDED.district, fgis_set_id = EXCLUDED.fgis_set_id, status = EXCLUDED.status, total = EXCLUDED.total, updated_at = EXCLUDED.updated_at`,
+		item.ID, item.CompanyID, item.ObjectID, item.Code, item.Title, item.Description, item.District, item.FgisSetID, item.Status, item.Total, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -1710,9 +1731,9 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 		return err
 	}
 	for i, line := range item.Items {
-		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			line.ID, item.ID, estimateLineType(line.Type), line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
+		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, name, quantity, unit, unit_price, total, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			line.ID, item.ID, estimateLineType(line.Type), line.Code, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
 		if err != nil {
 			return err
 		}

@@ -14,18 +14,50 @@ const state = {
   gsnSupplement: localStorage.getItem("nav_gsn_supplement") || "",
   gsnBaseInfoLoaded: false,
   gsnBaseInfo: null,
+  gsnRegions: [],
+  gsnRegionsLoaded: false,
+  fgisSets: [],
+  fgisSetsLoaded: false,
+  fgisSetId: localStorage.getItem("nav_fgis_set") || "",
+  fgisRows: [],
+  fgisStats: null,
+  fgisFilteredTotal: 0,
+  fgisLimit: 100,
+  fgisOffset: 0,
+  fgisSearch: "",
+  fgisSearchDraft: "",
+  fgisLoadedSetId: "",
+  fgisLoading: false,
+  districtPickerRegionCode: "",
   showHierarchyCode: localStorage.getItem("nav_show_hierarchy_code") === "true",
   editorTab: sessionStorage.getItem("nav_editor_tab") || "buffer",
   buffer: readSessionJSON("nav_editor_buffer", []),
   openEstimates: readSessionJSON("nav_editor_estimates", []),
+  estimateLinesExpanded: readSessionJSON("nav_editor_expanded", {}),
   constructionExpanded: {},
   objectExpanded: {},
+  userPositions: [],
+  addPrimitiveQuantities: {},
+  addLineTargetEstimateId: null,
 };
+
+let userPositionDialogEditId = "";
+let userPositionDialogSaving = false;
+const persistEstimateInflight = new Map();
 
 const money = new Intl.NumberFormat("ru-RU", {
   style: "currency",
   currency: "RUB",
   maximumFractionDigits: 0,
+});
+
+const estimateCost = new Intl.NumberFormat("ru-RU", {
+  maximumFractionDigits: 0,
+});
+
+const estimateCostDetailed = new Intl.NumberFormat("ru-RU", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
 });
 
 const els = {
@@ -48,16 +80,32 @@ const els = {
   documentsSection: document.querySelector("#documentsSection"),
   settingsSection: document.querySelector("#settingsSection"),
   editorSubitems: document.querySelector("#editorSubitems"),
+  editorEyebrow: document.querySelector("#editorEyebrow"),
   editorTitle: document.querySelector("#editorTitle"),
   editorDescription: document.querySelector("#editorDescription"),
   editorContent: document.querySelector("#editorContent"),
   estimateLineDialog: document.querySelector("#estimateLineDialog"),
   estimateLineDialogForm: document.querySelector("#estimateLineDialogForm"),
+  estimateLineDialogTitle: document.querySelector("#estimateLineDialogTitle"),
+  estimateLineDialogSubmit: document.querySelector("#estimateLineDialogSubmit"),
+  estimateLineTypeLabel: document.querySelector("#estimateLineTypeLabel"),
+  estimateAddLineDialog: document.querySelector("#estimateAddLineDialog"),
+  estimateAddLineDialogForm: document.querySelector("#estimateAddLineDialogForm"),
+  districtDialog: document.querySelector("#districtDialog"),
+  districtDialogForm: document.querySelector("#districtDialogForm"),
+  districtRegionFilter: document.querySelector("#districtRegionFilter"),
+  districtRegionList: document.querySelector("#districtRegionList"),
+  districtZoneSelect: document.querySelector("#districtZoneSelect"),
   baseTitle: document.querySelector("#baseTitle"),
   baseDescription: document.querySelector("#baseDescription"),
   gsnSupplementBar: document.querySelector("#gsnSupplementBar"),
   gsnSupplementSelect: document.querySelector("#gsnSupplementSelect"),
   gsnTree: document.querySelector("#gsnTree"),
+  fgisPricesPanel: document.querySelector("#fgisPricesPanel"),
+  userPositionsPanel: document.querySelector("#userPositionsPanel"),
+  userPositionDialog: document.querySelector("#userPositionDialog"),
+  userPositionDialogForm: document.querySelector("#userPositionDialogForm"),
+  userPositionDialogTitle: document.querySelector("#userPositionDialogTitle"),
   showHierarchyCodeToggle: document.querySelector("#showHierarchyCodeToggle"),
   constructionTree: document.querySelector("#constructionTree"),
   constructionDialog: document.querySelector("#constructionDialog"),
@@ -135,6 +183,40 @@ els.baseSubLinks.forEach((button) => {
     state.baseTab = button.dataset.baseTab;
     renderSections();
   });
+});
+
+els.fgisPricesPanel.addEventListener("change", (event) => {
+  const select = event.target.closest("#fgisSetSelect");
+  if (select) {
+    changeFGISSet(select.value);
+  }
+});
+
+els.fgisPricesPanel.addEventListener("submit", (event) => {
+  const form = event.target.closest("#fgisSearchForm");
+  if (!form) {
+    return;
+  }
+  event.preventDefault();
+  const input = form.querySelector("#fgisSearchInput");
+  state.fgisSearch = String(input?.value || "").trim();
+  state.fgisSearchDraft = state.fgisSearch;
+  void loadFGISRows({ resetOffset: true });
+});
+
+els.fgisPricesPanel.addEventListener("click", (event) => {
+  const resetButton = event.target.closest("[data-fgis-search-reset]");
+  if (resetButton) {
+    state.fgisSearch = "";
+    state.fgisSearchDraft = "";
+    void loadFGISRows({ resetOffset: true });
+    return;
+  }
+
+  const pageButton = event.target.closest("[data-fgis-page]");
+  if (pageButton) {
+    changeFGISPage(pageButton.dataset.fgisPage);
+  }
 });
 
 els.constructionTree.addEventListener("click", (event) => {
@@ -224,6 +306,12 @@ els.gsnTree.addEventListener("click", async (event) => {
     return;
   }
 
+  const pdfNode = event.target.closest(".gsn-node-pdf");
+  if (pdfNode && !event.target.closest("[data-gsn-toggle]")) {
+    await openGSNPdf(pdfNode.dataset.gsnPdfCode, pdfNode.dataset.gsnPdfTitle);
+    return;
+  }
+
   const button = event.target.closest("[data-gsn-toggle]");
   if (!button) {
     return;
@@ -277,27 +365,79 @@ els.editorSubitems.addEventListener("click", (event) => {
 els.editorContent.addEventListener("click", (event) => {
   const addLineButton = event.target.closest("[data-editor-add-line]");
   if (addLineButton) {
-    openEstimateLineDialog(addLineButton.dataset.editorAddLine);
+    openEstimateAddLineDialog(addLineButton.dataset.editorAddLine);
+    return;
+  }
+
+  const closeButton = event.target.closest("[data-editor-close-estimate]");
+  if (closeButton) {
+    closeEstimateFromEditor(closeButton.dataset.editorCloseEstimate);
+    return;
+  }
+
+  const districtButton = event.target.closest("[data-editor-district-open]");
+  if (districtButton) {
+    void openDistrictDialog(districtButton.dataset.editorDistrictOpen);
+    return;
+  }
+
+  const expandButton = event.target.closest("[data-editor-line-expand]");
+  if (expandButton) {
+    void toggleEstimateLineExpand(expandButton.dataset.editorLineExpand, expandButton.dataset.editorLineId);
+    return;
+  }
+
+  const editLineButton = event.target.closest("[data-editor-line-edit]");
+  if (editLineButton) {
+    openEstimateLineDialog(editLineButton.dataset.editorLineEdit, editLineButton.dataset.editorLineId);
+    return;
+  }
+
+  const deleteLineButton = event.target.closest("[data-editor-line-delete]");
+  if (deleteLineButton) {
+    void deleteEstimateLine(deleteLineButton.dataset.editorLineDelete, deleteLineButton.dataset.editorLineId);
+    return;
+  }
+
+  const upLineButton = event.target.closest("[data-editor-line-up]");
+  if (upLineButton) {
+    void moveEstimateLine(upLineButton.dataset.editorLineUp, upLineButton.dataset.editorLineId, -1);
+    return;
+  }
+
+  const downLineButton = event.target.closest("[data-editor-line-down]");
+  if (downLineButton) {
+    void moveEstimateLine(downLineButton.dataset.editorLineDown, downLineButton.dataset.editorLineId, 1);
   }
 });
 
-els.editorContent.addEventListener("input", (event) => {
-  const input = event.target.closest("[data-editor-district]");
-  if (!input) {
+els.editorContent.addEventListener("change", (event) => {
+  const codeInput = event.target.closest("[data-editor-estimate-code]");
+  if (codeInput) {
+    void updateEstimateHeaderField(codeInput.dataset.editorEstimateCode, "code", codeInput.value);
     return;
   }
-  const estimate = state.openEstimates.find((item) => item.id === input.dataset.editorDistrict);
-  if (!estimate) {
+
+  const titleInput = event.target.closest("[data-editor-estimate-title]");
+  if (titleInput) {
+    void updateEstimateHeaderField(titleInput.dataset.editorEstimateTitle, "title", titleInput.value);
     return;
   }
-  estimate.district = input.value;
-  saveEditorState();
+
+  const fgisSetSelect = event.target.closest("[data-editor-fgis-set]");
+  if (fgisSetSelect) {
+    void updateEstimateFgisSet(fgisSetSelect.dataset.editorFgisSet, fgisSetSelect.value);
+  }
 });
 
-els.estimateLineDialogForm.addEventListener("submit", (event) => {
+els.estimateLineDialogForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = formData(els.estimateLineDialogForm);
-  addEstimateLine(data.estimateId, data.lineType, data.name);
+  if (data.lineId) {
+    await updateEstimateLine(data.estimateId, data.lineId, data);
+  } else if (data.lineType === "section" || data.lineType === "subsection") {
+    await addEstimateLine(data.estimateId, data.lineType, data.name);
+  }
   els.estimateLineDialog.close();
   els.estimateLineDialogForm.reset();
 });
@@ -305,6 +445,113 @@ els.estimateLineDialogForm.addEventListener("submit", (event) => {
 els.estimateLineDialogForm.querySelector("[data-dialog-cancel]").addEventListener("click", () => {
   els.estimateLineDialog.close();
   els.estimateLineDialogForm.reset();
+});
+
+els.estimateAddLineDialogForm.addEventListener("click", (event) => {
+  const choiceButton = event.target.closest("[data-add-line-choice]");
+  if (!choiceButton) {
+    return;
+  }
+
+  const estimateID = els.estimateAddLineDialogForm.elements.estimateId.value;
+  const choice = choiceButton.dataset.addLineChoice;
+  els.estimateAddLineDialog.close();
+
+  if (choice === "gsn") {
+    navigateToBaseForAddLine(estimateID, "gsn");
+    return;
+  }
+  if (choice === "userPosition") {
+    navigateToBaseForAddLine(estimateID, "userPositions");
+    return;
+  }
+  if (choice === "section" || choice === "subsection") {
+    openEstimateStructuralLineDialog(estimateID, choice);
+  }
+});
+
+els.estimateAddLineDialogForm.querySelector("[data-dialog-cancel]").addEventListener("click", () => {
+  els.estimateAddLineDialog.close();
+});
+
+els.districtRegionFilter.addEventListener("input", () => {
+  renderDistrictRegionList(els.districtRegionFilter.value);
+});
+
+els.districtRegionList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-district-region]");
+  if (!button) {
+    return;
+  }
+  state.districtPickerRegionCode = button.dataset.districtRegion;
+  els.districtZoneSelect.value = "";
+  renderDistrictRegionList(els.districtRegionFilter.value);
+  applyDistrictToEstimate(els.districtDialogForm.elements.estimateId.value);
+});
+
+els.districtDialogForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void applyDistrictDialog();
+});
+
+els.districtDialogForm.querySelector("[data-dialog-cancel]").addEventListener("click", () => {
+  els.districtDialog.close();
+});
+
+els.userPositionsPanel.addEventListener("click", (event) => {
+  if (handleAddPrimitiveClick(event, els.userPositionsPanel, onAddPrimitiveQuantityChange)) {
+    return;
+  }
+
+  const addButton = event.target.closest("[data-user-position-add]");
+  if (addButton) {
+    openUserPositionDialog();
+    return;
+  }
+
+  const editButton = event.target.closest("[data-user-position-edit]");
+  if (editButton) {
+    openUserPositionDialog(editButton.dataset.userPositionEdit);
+    return;
+  }
+
+  const deleteButton = event.target.closest("[data-user-position-delete]");
+  if (deleteButton) {
+    deleteUserPosition(deleteButton.dataset.userPositionDelete);
+  }
+});
+
+els.userPositionsPanel.addEventListener("focusout", (event) => {
+  handleAddPrimitiveQuantityBlur(event, els.userPositionsPanel, onAddPrimitiveQuantityChange);
+});
+
+els.userPositionsPanel.addEventListener("keydown", (event) => {
+  handleAddPrimitiveQuantityKeydown(event, els.userPositionsPanel, onAddPrimitiveQuantityChange);
+});
+
+els.userPositionDialogForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (userPositionDialogSaving) {
+    return;
+  }
+
+  userPositionDialogSaving = true;
+  try {
+    const data = formData(els.userPositionDialogForm);
+    if (saveUserPositionDialog(data)) {
+      userPositionDialogEditId = "";
+      els.userPositionDialog.close();
+      els.userPositionDialogForm.reset();
+    }
+  } finally {
+    userPositionDialogSaving = false;
+  }
+});
+
+els.userPositionDialogForm.querySelector("[data-dialog-cancel]").addEventListener("click", () => {
+  userPositionDialogEditId = "";
+  els.userPositionDialog.close();
+  els.userPositionDialogForm.reset();
 });
 
 async function loadApp() {
@@ -321,6 +568,9 @@ async function loadApp() {
     }
 
     await Promise.all([refreshCompanies(), refreshConstructionData()]);
+    void loadGSNRegions().catch(() => {});
+    void loadFGISSets().catch(() => {});
+    loadUserPositions();
     renderShell();
   } catch {
     state.token = "";
@@ -411,22 +661,337 @@ function renderSections() {
   renderEditorSubitems();
 
   if (state.section === "base" && state.baseTab === "gsn") {
+    els.baseTitle.textContent = "ГСН-2022";
     els.baseDescription.classList.add("hidden");
+    els.userPositionsPanel.classList.add("hidden");
+    els.fgisPricesPanel.classList.add("hidden");
     renderGSNBaseInfo();
     els.gsnTree.classList.remove("hidden");
     els.gsnSupplementBar.classList.remove("hidden");
     loadGSNPanel();
-  } else if (state.section === "base") {
-    els.baseTitle.textContent = "Позиции пользователя";
-    els.baseDescription.textContent =
-      "Здесь будут пользовательские позиции, которые пользователь сможет применять в сметах.";
-    els.baseDescription.classList.remove("hidden");
+  } else if (state.section === "base" && state.baseTab === "fgisPrices") {
+    els.baseTitle.textContent = "Сметные цены и индексы";
+    els.baseDescription.classList.add("hidden");
     els.gsnTree.classList.add("hidden");
     els.gsnSupplementBar.classList.add("hidden");
+    els.userPositionsPanel.classList.add("hidden");
+    els.fgisPricesPanel.classList.remove("hidden");
+    loadFGISPricesPanel();
+  } else if (state.section === "base" && state.baseTab === "userPositions") {
+    els.baseTitle.textContent = "Позиции пользователя";
+    els.baseDescription.classList.add("hidden");
+    els.gsnTree.classList.add("hidden");
+    els.gsnSupplementBar.classList.add("hidden");
+    els.userPositionsPanel.classList.remove("hidden");
+    renderUserPositionsPanel();
   }
 
   if (state.section === "editor") {
     renderEditor();
+  }
+}
+
+function getAddLineTargetEstimate() {
+  const targetId = state.addLineTargetEstimateId;
+  if (targetId) {
+    const estimate = state.openEstimates.find((item) => item.id === targetId);
+    if (estimate) {
+      return estimate;
+    }
+  }
+  if (state.openEstimates.length === 1) {
+    return state.openEstimates[0];
+  }
+  return null;
+}
+
+function userPositionBufferKey(positionId) {
+  return `buffer:user-position:${positionId}`;
+}
+
+function userPositionEstimateKey(positionId) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate) {
+    return null;
+  }
+  return `estimate:${estimate.id}:user-position:${positionId}`;
+}
+
+function refreshUserPositionsPanelIfVisible() {
+  if (state.section === "base" && state.baseTab === "userPositions") {
+    renderUserPositionsPanel();
+  }
+}
+
+function renderUserPositionsPanel() {
+  const positions = [...state.userPositions].sort(compareByCode);
+  const showEstimatePrimitive = Boolean(getAddLineTargetEstimate());
+  const rows = positions.map((position, index) => {
+    const bufferKey = userPositionBufferKey(position.id);
+    const estimateKey = showEstimatePrimitive ? userPositionEstimateKey(position.id) : null;
+    const activeQuantity = state.addPrimitiveQuantities[bufferKey] ?? null;
+    const estimateActiveQuantity = estimateKey ? (state.addPrimitiveQuantities[estimateKey] ?? null) : null;
+    return `
+    <tr>
+      <td class="user-positions-index-cell">${index + 1}</td>
+      <td class="user-positions-code-cell"><span class="user-positions-code-text">${formatBreakableCode(position.code)}</span></td>
+      <td class="user-positions-name-cell">${escapeHTML(position.name || "")}</td>
+      <td class="user-positions-unit-cell">${escapeHTML(position.unit || "")}</td>
+      <td class="user-positions-cost-cell">${money.format(Number(position.cost || 0))}</td>
+      <td class="user-positions-actions-cell">
+        <div class="user-positions-actions">
+          <div class="user-positions-actions-row">
+            <button
+              class="icon-button secondary"
+              data-user-position-edit="${escapeHTML(position.id)}"
+              type="button"
+              title="Редактировать"
+              aria-label="Редактировать"
+            >${iconPencil()}</button>
+            <button
+              class="icon-button secondary icon-button-danger"
+              data-user-position-delete="${escapeHTML(position.id)}"
+              type="button"
+              title="Удалить"
+              aria-label="Удалить"
+            >${iconTrash()}</button>
+          </div>
+          <div class="user-positions-actions-row">
+            ${renderAddPrimitive(bufferKey, "В буфер", activeQuantity)}
+          </div>
+          ${
+            estimateKey
+              ? `<div class="user-positions-actions-row">${renderAddPrimitive(estimateKey, "В смету", estimateActiveQuantity)}</div>`
+              : ""
+          }
+        </div>
+      </td>
+    </tr>
+  `;
+  });
+
+  els.userPositionsPanel.innerHTML = `
+    <div class="table-wrap">
+      <table class="user-positions-table">
+        <thead>
+          <tr>
+            <th class="user-positions-index-cell">№ п/п</th>
+            <th class="user-positions-code-cell">Шифр</th>
+            <th class="user-positions-name-cell">Наименование</th>
+            <th class="user-positions-unit-cell">Единица измерения</th>
+            <th class="user-positions-cost-cell">Стоимость</th>
+            <th class="user-positions-actions-cell"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.length ? rows.join("") : `<tr><td colspan="6" class="muted">Позиции пользователя отсутствуют</td></tr>`}
+        </tbody>
+      </table>
+    </div>
+    <div class="user-positions-footer">
+      <button class="user-positions-add-btn" data-user-position-add type="button">
+        Добавить позицию пользователя
+      </button>
+    </div>
+  `;
+}
+
+function userPositionsStorageKey() {
+  const companyId = state.me?.companyId || "default";
+  return `nav_user_positions_${companyId}`;
+}
+
+function loadUserPositions() {
+  const items = readLocalJSON(userPositionsStorageKey(), []);
+  const seen = new Set();
+  state.userPositions = items.filter((item) => {
+    if (!item?.id || seen.has(item.id)) {
+      return false;
+    }
+    seen.add(item.id);
+    return true;
+  });
+  if (seen.size !== items.length) {
+    saveUserPositions();
+  }
+}
+
+function saveUserPositions() {
+  localStorage.setItem(userPositionsStorageKey(), JSON.stringify(state.userPositions));
+}
+
+function openUserPositionDialog(editId = "") {
+  const position = editId ? state.userPositions.find((item) => item.id === editId) : null;
+  const isEdit = Boolean(position);
+
+  userPositionDialogEditId = isEdit ? position.id : "";
+  els.userPositionDialogForm.reset();
+  els.userPositionDialogTitle.textContent = isEdit
+    ? "Редактировать позицию пользователя"
+    : "Добавить позицию пользователя";
+  userPositionField("code").value = isEdit ? position.code || "" : "";
+  userPositionField("name").value = isEdit ? position.name || "" : "";
+  userPositionField("unit").value = isEdit ? position.unit || "" : "";
+  userPositionField("cost").value = isEdit ? String(position.cost ?? 0) : "0";
+  els.userPositionDialog.showModal();
+  userPositionField("code").focus();
+}
+
+function userPositionField(name) {
+  return els.userPositionDialogForm.querySelector(`[name="${name}"]`);
+}
+
+function newUserPositionId() {
+  return `upos_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function saveUserPositionDialog(data) {
+  const code = String(data.code || "").trim();
+  const name = String(data.name || "").trim();
+  const unit = String(data.unit || "").trim();
+  const cost = Number(data.cost || 0);
+
+  if (!code || !name) {
+    showMessage("Укажите шифр и наименование", "error");
+    return false;
+  }
+
+  if (!Number.isFinite(cost) || cost < 0) {
+    showMessage("Укажите корректную стоимость", "error");
+    return false;
+  }
+
+  if (userPositionDialogEditId) {
+    const index = state.userPositions.findIndex((item) => item.id === userPositionDialogEditId);
+    if (index < 0) {
+      showMessage("Позиция не найдена", "error");
+      return false;
+    }
+    state.userPositions[index] = { ...state.userPositions[index], code, name, unit, cost };
+  } else {
+    state.userPositions.push({
+      id: newUserPositionId(),
+      code,
+      name,
+      unit,
+      cost,
+    });
+  }
+
+  saveUserPositions();
+  renderUserPositionsPanel();
+  showMessage(userPositionDialogEditId ? "Позиция сохранена" : "Позиция добавлена", "ok");
+  return true;
+}
+
+function deleteUserPosition(id) {
+  const index = state.userPositions.findIndex((item) => item.id === id);
+  if (index < 0) {
+    showMessage("Позиция не найдена", "error");
+    return;
+  }
+
+  if (userPositionDialogEditId === id) {
+    userPositionDialogEditId = "";
+    els.userPositionDialog.close();
+    els.userPositionDialogForm.reset();
+  }
+
+  state.userPositions.splice(index, 1);
+  saveUserPositions();
+  renderUserPositionsPanel();
+  showMessage("Позиция удалена", "ok");
+}
+
+function iconPencil() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M4 20h4l10.5-10.5a1.8 1.8 0 0 0 0-2.5l-1.5-1.5a1.8 1.8 0 0 0-2.5 0L4 16v4z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linejoin="round"
+      />
+      <path d="M13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+    </svg>
+  `;
+}
+
+function iconTrash() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M5 7h14M9 7V5h6v2M8 7l.7 12h6.6L16 7"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+      <path d="M10 10v6M14 10v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+    </svg>
+  `;
+}
+
+function iconPdf() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M7 4h7l4 4v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linejoin="round"
+      />
+      <path d="M14 4v4h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" />
+      <path
+        d="M8.5 13.5h7M8.5 16.5h5"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.6"
+        stroke-linecap="round"
+      />
+    </svg>
+  `;
+}
+
+function iconArrowUp() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 7l-5 5M12 7l5 5"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  `;
+}
+
+function iconArrowDown() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 17l-5-5M12 17l5-5"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  `;
+}
+
+function readLocalJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
   }
 }
 
@@ -582,30 +1147,41 @@ async function fetchGSNChildren(parentCode) {
 }
 
 function renderGSNNode(node) {
+  const isPdf = isGSNPdfNode(node);
   const toggle = node.hasChildren
     ? `<button class="tree-toggle" data-gsn-toggle="${escapeHTML(node.code)}" type="button">+</button>`
     : `<span class="tree-toggle-placeholder"></span>`;
   const encodedNode = encodeNodeAction(node);
-  const actions = !node.hasChildren
-    ? `
+  const actions =
+    !node.hasChildren && !isPdf
+      ? `
       <div class="node-actions">
         <button class="micro-button secondary" data-gsn-buffer="${encodedNode}" type="button">В буфер</button>
         ${
-          state.openEstimates.length === 1
+          getAddLineTargetEstimate()
             ? `<button class="micro-button" data-gsn-estimate="${encodedNode}" type="button">В смету</button>`
             : ""
         }
       </div>
     `
+      : "";
+  const pdfIcon = isPdf
+    ? `<span class="gsn-pdf-icon" title="PDF документ" aria-hidden="true">${iconPdf()}</span>`
     : "";
-
   return `
-    <article class="tree-node gsn-node">
+    <article class="tree-node gsn-node${isPdf ? " gsn-node-pdf" : ""}"${
+      isPdf
+        ? ` data-gsn-pdf-code="${escapeHTML(node.code)}" data-gsn-pdf-title="${escapeHTML(gsnNodeTitle(node))}"`
+        : ""
+    }>
       <header>
         <div class="tree-title">
           ${toggle}
-          <div>
-            <strong>${escapeHTML(gsnNodeTitle(node))}</strong>
+          <div class="gsn-node-label">
+            <div class="gsn-node-title-row">
+              ${pdfIcon}
+              <strong>${escapeHTML(gsnNodeTitle(node))}</strong>
+            </div>
             ${actions}
           </div>
         </div>
@@ -623,6 +1199,8 @@ function renderEditor() {
 
   renderEditorSubitems();
   if (state.editorTab === "buffer") {
+    els.editorEyebrow.textContent = "Редактор";
+    els.editorTitle.classList.remove("hidden");
     els.editorTitle.textContent = "Буфер";
     els.editorDescription.textContent = "Сессионный буфер для элементов, добавленных из базы ГСН-2022.";
     els.editorDescription.classList.remove("hidden");
@@ -634,14 +1212,24 @@ function renderEditor() {
 
   const estimate = state.openEstimates.find((item) => item.id === state.editorTab);
   if (!estimate) {
+    els.editorEyebrow.textContent = "Редактор";
+    els.editorTitle.classList.remove("hidden");
     els.editorTitle.textContent = "Редактор";
     els.editorDescription.textContent = "";
     els.editorDescription.classList.add("hidden");
     els.editorContent.innerHTML = `<p class="muted">Выберите смету для редактирования.</p>`;
     return;
   }
-  els.editorTitle.textContent = editorEstimateLabel(estimate);
+  els.editorEyebrow.textContent = "Редактор сметы";
+  els.editorTitle.classList.add("hidden");
   els.editorDescription.classList.add("hidden");
+  void loadFGISSets()
+    .then(() => {
+      if (state.editorTab === estimate.id) {
+        els.editorContent.innerHTML = renderEstimateEditor(estimate);
+      }
+    })
+    .catch(() => {});
   els.editorContent.innerHTML = renderEstimateEditor(estimate);
 }
 
@@ -654,6 +1242,11 @@ function renderEditorItems(items) {
             <article class="editor-item">
               <strong>${escapeHTML(editorItemTitle(item))}</strong>
               ${item.unit ? `<span class="muted">Ед. изм.: ${escapeHTML(item.unit)}</span>` : ""}
+              ${
+                item.quantity != null
+                  ? `<span class="muted">Кол-во: ${formatNumber(item.quantity)}</span>`
+                  : ""
+              }
             </article>
           `,
         )
@@ -662,22 +1255,1114 @@ function renderEditorItems(items) {
   `;
 }
 
-function renderEstimateEditor(estimate) {
-  const rows = (estimate.items || []).map(
-    (item, index) => `
-      <tr>
-        <td>${index + 1}</td>
-        <td>${escapeHTML(item.code || "")}</td>
-        <td>${escapeHTML(item.name || "")}</td>
-        <td>${escapeHTML(item.unit || "")}</td>
-        <td>${formatNumber(item.quantity)}</td>
-        <td>${money.format(Number(item.unitPrice || 0))}</td>
-        <td>${money.format(Number(item.total || Number(item.quantity || 0) * Number(item.unitPrice || 0)))}</td>
-      </tr>
-    `,
+function normalizeDistrictRegionCode(code) {
+  const trimmed = String(code || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const numeric = Number.parseInt(trimmed, 10);
+  return Number.isFinite(numeric) ? String(numeric) : trimmed;
+}
+
+function normalizeDistrictZone(zone) {
+  const text = String(zone || "").trim();
+  if (!text) {
+    return "";
+  }
+  const numeric = Number.parseInt(text, 10);
+  if (!Number.isFinite(numeric) || numeric < 1 || numeric > 11) {
+    return "";
+  }
+  return String(numeric);
+}
+
+function parseDistrictValue(district) {
+  const text = String(district || "").trim();
+  if (!text) {
+    return { regionCode: "", zone: "" };
+  }
+
+  const dotIndex = text.indexOf(".");
+  if (dotIndex < 0) {
+    return { regionCode: normalizeDistrictRegionCode(text), zone: "" };
+  }
+
+  const regionCode = normalizeDistrictRegionCode(text.slice(0, dotIndex));
+  const zonePart = text.slice(dotIndex + 1);
+  if (zonePart.includes(".")) {
+    return { regionCode, zone: "" };
+  }
+
+  return {
+    regionCode,
+    zone: normalizeDistrictZone(zonePart),
+  };
+}
+
+function formatDistrictValue(regionCode, zone) {
+  const base = normalizeDistrictRegionCode(regionCode);
+  if (!base) {
+    return "";
+  }
+  const zoneText = normalizeDistrictZone(zone);
+  if (!zoneText) {
+    return base;
+  }
+  return `${base}.${zoneText}`;
+}
+
+function findRegionByDistrictCode(regionCode) {
+  const normalized = normalizeDistrictRegionCode(regionCode);
+  if (!normalized) {
+    return null;
+  }
+
+  return (
+    state.gsnRegions.find((item) => normalizeDistrictRegionCode(item.code) === normalized) ||
+    state.gsnRegions.find((item) => item.code === normalized) ||
+    state.gsnRegions.find((item) => item.code === normalized.padStart(2, "0")) ||
+    null
+  );
+}
+
+function districtRegionName(district) {
+  const { regionCode } = parseDistrictValue(district);
+  const region = findRegionByDistrictCode(regionCode);
+  return region?.name || "";
+}
+
+function districtRegionHint(district) {
+  const name = districtRegionName(district);
+  if (name) {
+    return name;
+  }
+  return district ? "Регион не найден в классификаторе" : "Нажмите, чтобы выбрать сметный район";
+}
+
+async function loadGSNRegions() {
+  if (state.gsnRegionsLoaded && state.gsnRegions.length) {
+    return state.gsnRegions;
+  }
+
+  try {
+    const result = await api("/api/gsn/regions");
+    state.gsnRegions = result.regions || [];
+  } catch (apiError) {
+    state.gsnRegions = [];
+  }
+
+  if (!state.gsnRegions.length) {
+    try {
+      const response = await fetch("/regions.json");
+      if (response.ok) {
+        state.gsnRegions = await response.json();
+      }
+    } catch {
+      // ignore fallback errors
+    }
+  }
+
+  if (!state.gsnRegions.length) {
+    throw new Error("Классификатор регионов недоступен");
+  }
+
+  state.gsnRegionsLoaded = true;
+  return state.gsnRegions;
+}
+
+async function loadFGISSets() {
+  if (state.fgisSetsLoaded) {
+    return state.fgisSets;
+  }
+
+  try {
+    const result = await api("/api/gsn/fgis-sets");
+    state.fgisSets = result.sets || [];
+  } catch {
+    state.fgisSets = [];
+  }
+
+  state.fgisSetsLoaded = true;
+  return state.fgisSets;
+}
+
+function renderFgisSetSelectOptions(selectedId) {
+  const selected = String(selectedId || "");
+  const options = [`<option value="">Не выбраны</option>`];
+  for (const set of state.fgisSets) {
+    const setId = String(set.id || "");
+    options.push(
+      `<option value="${escapeHTML(setId)}" ${selected === setId ? "selected" : ""}>${escapeHTML(set.name || setId)}</option>`,
+    );
+  }
+  if (selected && !state.fgisSets.some((set) => set.id === selected)) {
+    options.push(`<option value="${escapeHTML(selected)}" selected>${escapeHTML(selected)}</option>`);
+  }
+  return options.join("");
+}
+
+function renderFgisPricesSetSelectOptions(selectedId) {
+  const selected = String(selectedId || "");
+  if (!state.fgisSets.length) {
+    return `<option value="">Наборы не загружены</option>`;
+  }
+  return state.fgisSets
+    .map((set) => {
+      const setId = String(set.id || "");
+      return `<option value="${escapeHTML(setId)}" ${selected === setId ? "selected" : ""}>${escapeHTML(set.name || setId)}</option>`;
+    })
+    .join("");
+}
+
+function formatFGISCount(value) {
+  return new Intl.NumberFormat("ru-RU").format(Number(value || 0));
+}
+
+function renderFGISPricesPanelContent() {
+  const setSelected = Boolean(state.fgisSetId);
+  const stats = state.fgisStats;
+  const rows = state.fgisRows;
+  const pageStart = state.fgisFilteredTotal ? state.fgisOffset + 1 : 0;
+  const pageEnd = state.fgisFilteredTotal
+    ? Math.min(state.fgisOffset + rows.length, state.fgisFilteredTotal)
+    : 0;
+  const canPrev = state.fgisOffset > 0;
+  const canNext = state.fgisOffset + state.fgisLimit < state.fgisFilteredTotal;
+
+  const tableRows = rows.map((row, index) => `
+    <tr>
+      <td class="fgis-prices-index-cell">${state.fgisOffset + index + 1}</td>
+      <td class="fgis-prices-original-code-cell"><span class="fgis-prices-code-text">${formatBreakableCode(row.originalCode || row.code)}</span></td>
+      <td class="fgis-prices-name-cell">${escapeHTML(row.name || "")}</td>
+      <td class="fgis-prices-unit-cell">${escapeHTML(row.unit || "")}</td>
+      <td class="fgis-prices-value-cell">${escapeHTML(row.prices || "")}</td>
+      <td class="fgis-prices-value-cell">${escapeHTML(row.indexes || "")}</td>
+    </tr>
+  `);
+
+  els.fgisPricesPanel.innerHTML = `
+    <div class="fgis-prices-toolbar">
+      <div class="fgis-prices-set-bar">
+        <span class="fgis-prices-set-label">Набор:</span>
+        <select id="fgisSetSelect" class="fgis-prices-set-select" aria-label="Набор сметных цен и индексов">
+          ${renderFgisPricesSetSelectOptions(state.fgisSetId)}
+        </select>
+      </div>
+      ${
+        setSelected && stats
+          ? `<p class="fgis-prices-stats muted">Сметных цен — ${formatFGISCount(stats.pricesCount)}, индексов — ${formatFGISCount(stats.indexesCount)}.</p>`
+          : ""
+      }
+      ${
+        setSelected
+          ? `
+            <form id="fgisSearchForm" class="fgis-prices-search">
+              <input
+                id="fgisSearchInput"
+                class="fgis-prices-search-input"
+                type="search"
+                placeholder="Поиск по шифру или наименованию"
+                value="${escapeHTML(state.fgisSearchDraft)}"
+              />
+              <button type="submit">Найти</button>
+              ${
+                state.fgisSearch
+                  ? `<button class="secondary" type="button" data-fgis-search-reset>Очистить</button>`
+                  : ""
+              }
+            </form>
+          `
+          : ""
+      }
+    </div>
+    ${
+      !setSelected
+        ? `<p class="muted">Выберите набор сметных цен и индексов.</p>`
+        : state.fgisLoading
+          ? `<p class="muted">Загрузка записей...</p>`
+          : `
+            <div class="table-wrap">
+              <table class="fgis-prices-table">
+                <thead>
+                  <tr>
+                    <th class="fgis-prices-index-cell">№ п/п</th>
+                    <th class="fgis-prices-original-code-cell">Оригинальный шифр</th>
+                    <th class="fgis-prices-name-cell">Наименование</th>
+                    <th class="fgis-prices-unit-cell">Ед. изм.</th>
+                    <th class="fgis-prices-value-cell">Сметные цены</th>
+                    <th class="fgis-prices-value-cell">Индексы</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${
+                    tableRows.length
+                      ? tableRows.join("")
+                      : `<tr><td colspan="6" class="muted">${
+                          state.fgisSearch ? "Ничего не найдено" : "Записи отсутствуют"
+                        }</td></tr>`
+                  }
+                </tbody>
+              </table>
+            </div>
+            <div class="fgis-prices-pagination">
+              <button class="secondary" type="button" data-fgis-page="prev" ${canPrev ? "" : "disabled"}>Назад</button>
+              <span class="muted">${pageStart}–${pageEnd} из ${formatFGISCount(state.fgisFilteredTotal)}</span>
+              <button class="secondary" type="button" data-fgis-page="next" ${canNext ? "" : "disabled"}>Вперёд</button>
+            </div>
+          `
+    }
+  `;
+}
+
+async function loadFGISRows(options = {}) {
+  if (!state.token || !state.fgisSetId) {
+    state.fgisRows = [];
+    state.fgisStats = null;
+    state.fgisFilteredTotal = 0;
+    state.fgisLoadedSetId = "";
+    renderFGISPricesPanelContent();
+    return;
+  }
+
+  if (options.resetOffset) {
+    state.fgisOffset = 0;
+  }
+
+  state.fgisLoading = true;
+  if (!options.silent) {
+    renderFGISPricesPanelContent();
+  }
+
+  try {
+    const params = new URLSearchParams({
+      set: state.fgisSetId,
+      limit: String(state.fgisLimit),
+      offset: String(state.fgisOffset),
+    });
+    if (state.fgisSearch) {
+      params.set("q", state.fgisSearch);
+    }
+    const result = await api(`/api/gsn/fgis-rows?${params.toString()}`);
+    state.fgisRows = result.rows || [];
+    state.fgisStats = result.stats || null;
+    state.fgisFilteredTotal = Number(result.filteredTotal || 0);
+    state.fgisLoadedSetId = state.fgisSetId;
+  } catch (error) {
+    state.fgisRows = [];
+    state.fgisStats = null;
+    state.fgisFilteredTotal = 0;
+    state.fgisLoadedSetId = "";
+    els.fgisPricesPanel.innerHTML = `<p class="muted">${escapeHTML(error.message)}</p>`;
+    return;
+  } finally {
+    state.fgisLoading = false;
+  }
+
+  renderFGISPricesPanelContent();
+}
+
+async function loadFGISPricesPanel(force = false) {
+  if (!state.token) {
+    els.fgisPricesPanel.innerHTML = `<p class="muted">Войдите в систему для просмотра сметных цен и индексов.</p>`;
+    return;
+  }
+
+  try {
+    await loadFGISSets();
+  } catch (error) {
+    els.fgisPricesPanel.innerHTML = `<p class="muted">${escapeHTML(error.message)}</p>`;
+    return;
+  }
+
+  if (!state.fgisSets.length) {
+    els.fgisPricesPanel.innerHTML = `<p class="muted">Наборы сметных цен и индексов не найдены.</p>`;
+    return;
+  }
+
+  const knownIds = new Set(state.fgisSets.map((set) => set.id));
+  if (!knownIds.has(state.fgisSetId)) {
+    state.fgisSetId = state.fgisSets[0].id;
+    localStorage.setItem("nav_fgis_set", state.fgisSetId);
+    state.fgisOffset = 0;
+    state.fgisSearch = "";
+    state.fgisSearchDraft = "";
+    force = true;
+  }
+
+  if (
+    force ||
+    state.fgisLoadedSetId !== state.fgisSetId ||
+    (state.section === "base" && state.baseTab === "fgisPrices" && !state.fgisLoading && !state.fgisRows.length)
+  ) {
+    await loadFGISRows({ silent: state.fgisRows.length > 0 && state.fgisLoadedSetId === state.fgisSetId });
+    return;
+  }
+
+  renderFGISPricesPanelContent();
+}
+
+function changeFGISSet(nextSetId) {
+  if (!nextSetId || nextSetId === state.fgisSetId) {
+    return;
+  }
+  state.fgisSetId = nextSetId;
+  localStorage.setItem("nav_fgis_set", state.fgisSetId);
+  state.fgisOffset = 0;
+  state.fgisSearch = "";
+  state.fgisSearchDraft = "";
+  void loadFGISRows();
+}
+
+function changeFGISPage(direction) {
+  if (direction === "prev" && state.fgisOffset > 0) {
+    state.fgisOffset = Math.max(0, state.fgisOffset - state.fgisLimit);
+    void loadFGISRows({ silent: true });
+    return;
+  }
+  if (direction === "next" && state.fgisOffset + state.fgisLimit < state.fgisFilteredTotal) {
+    state.fgisOffset += state.fgisLimit;
+    void loadFGISRows({ silent: true });
+  }
+}
+
+function renderDistrictRegionList(filterText = "") {
+  const query = String(filterText || "").trim().toLowerCase();
+  const regions = state.gsnRegions.filter((region) => {
+    if (!query) {
+      return true;
+    }
+    const code = normalizeDistrictRegionCode(region.code);
+    return (
+      code.includes(query) ||
+      String(region.code).toLowerCase().includes(query) ||
+      String(region.name || "").toLowerCase().includes(query)
+    );
+  });
+
+  if (!regions.length) {
+    els.districtRegionList.innerHTML = `<p class="muted district-region-empty">${
+      state.gsnRegions.length ? "Ничего не найдено" : "Классификатор регионов не загружен"
+    }</p>`;
+    return;
+  }
+
+  els.districtRegionList.innerHTML = regions
+    .map((region) => {
+      const selected = state.districtPickerRegionCode === region.code;
+      return `
+        <button
+          class="district-region-item ${selected ? "active" : ""}"
+          data-district-region="${escapeHTML(region.code)}"
+          type="button"
+        >
+          <span class="district-region-code">${escapeHTML(normalizeDistrictRegionCode(region.code))}</span>
+          <span class="district-region-name">${escapeHTML(region.name || "")}</span>
+        </button>
+      `;
+    })
+    .join("");
+}
+
+function scrollDistrictRegionSelectionIntoView() {
+  const activeItem = els.districtRegionList.querySelector(".district-region-item.active");
+  if (activeItem) {
+    activeItem.scrollIntoView({ block: "nearest" });
+  }
+}
+
+async function openDistrictDialog(estimateID) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate) {
+    return;
+  }
+
+  try {
+    await loadGSNRegions();
+  } catch (error) {
+    showMessage(error.message, "error");
+    return;
+  }
+
+  const parsed = parseDistrictValue(estimate.district);
+  const region = findRegionByDistrictCode(parsed.regionCode);
+  state.districtPickerRegionCode = region?.code || "";
+
+  els.districtDialogForm.elements.estimateId.value = estimateID;
+  els.districtRegionFilter.value = "";
+  els.districtZoneSelect.value = parsed.zone || "";
+  renderDistrictRegionList();
+
+  els.districtDialog.showModal();
+  requestAnimationFrame(() => {
+    scrollDistrictRegionSelectionIntoView();
+  });
+  els.districtRegionFilter.focus();
+}
+
+function applyDistrictToEstimate(estimateID, options = {}) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate || !state.districtPickerRegionCode) {
+    return false;
+  }
+
+  estimate.district = formatDistrictValue(state.districtPickerRegionCode, els.districtZoneSelect.value);
+  saveEditorState();
+  renderEditor();
+  if (options.persist !== false) {
+    void persistOpenEstimate(estimateID).catch(() => {});
+  }
+  return true;
+}
+
+async function applyDistrictDialog() {
+  const estimateID = els.districtDialogForm.elements.estimateId.value;
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate) {
+    els.districtDialog.close();
+    return;
+  }
+
+  if (!state.districtPickerRegionCode) {
+    showMessage("Выберите регион", "error");
+    return;
+  }
+
+  const previousDistrict = estimate.district || "";
+  applyDistrictToEstimate(estimateID, { persist: false });
+  els.districtDialog.close();
+
+  if (estimate.district !== previousDistrict) {
+    try {
+      await recalculateEstimatePricing(estimate);
+      showMessage("Сметный район обновлён, стоимости пересчитаны", "ok");
+    } catch (error) {
+      showMessage(error.message || "Не удалось пересчитать стоимости", "error");
+    }
+  }
+
+  saveEditorState();
+  renderEditor();
+  try {
+    await persistOpenEstimate(estimateID);
+  } catch {
+    return;
+  }
+}
+
+function parseLocalizedNumber(value) {
+  const text = String(value ?? "").trim().replace(/\s/g, "").replace(",", ".");
+  if (!text) {
+    return 0;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function normalizeResourcePricing(item) {
+  if (!item || item.unitPriceIndex) {
+    return item;
+  }
+  const text = String(item.unitPriceText || "").trim();
+  const starIndex = text.indexOf("*");
+  if (starIndex < 0) {
+    return item;
+  }
+  return {
+    ...item,
+    unitPriceText: text.slice(0, starIndex).trim(),
+    unitPriceIndex: text.slice(starIndex + 1).trim(),
+  };
+}
+
+function estimateResourceUnitPriceValue(item) {
+  const normalized = normalizeResourcePricing(item);
+  const base = parseLocalizedNumber(normalized.unitPriceText);
+  const index = parseLocalizedNumber(normalized.unitPriceIndex);
+  if (index) {
+    return base * index;
+  }
+  if (base) {
+    return base;
+  }
+  return Number(normalized.unitPrice || 0);
+}
+
+function estimateResourceLineTotal(child, parentQuantity) {
+  const unitPrice = estimateResourceUnitPriceValue(child);
+  const consumption = Number(child?.quantity || 0);
+  const positionQuantity = Number(parentQuantity || 0);
+  return unitPrice * consumption * positionQuantity;
+}
+
+function estimatePositionTotalFromResources(item) {
+  return (item?.children || []).reduce(
+    (sum, child) => sum + estimateResourceLineTotal(child, item.quantity),
+    0,
+  );
+}
+
+function estimateLineTotal(item, parentItem = null) {
+  if (item?.type === "resource" && parentItem) {
+    return estimateResourceLineTotal(item, parentItem.quantity);
+  }
+  if (item?.children?.length) {
+    return estimatePositionTotalFromResources(item);
+  }
+  return Number(item?.total ?? Number(item?.quantity || 0) * Number(item?.unitPrice || 0));
+}
+
+function estimateGrandTotal(items) {
+  return (items || []).reduce((sum, item) => sum + estimateLineTotal(item), 0);
+}
+
+function formatEstimateMoney(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number) || number === 0) {
+    return "";
+  }
+  return estimateCostDetailed.format(number);
+}
+
+function estimateLineDisplayCode(item) {
+  return String(item?.originalCode || item?.code || "").trim();
+}
+
+function estimateRecordFetchCode(item) {
+  return String(item?.recordCode || item?.code || "").trim();
+}
+
+function estimateRecordLookupCode(item) {
+  return estimateRecordFetchCode(item) || estimateLineDisplayCode(item);
+}
+
+function applyRecordDetailToEstimateItem(item, record) {
+  if (!item || !record) {
+    return;
+  }
+  if (record.code) {
+    item.recordCode = record.code;
+  }
+  if (record.originalCode) {
+    item.originalCode = record.originalCode;
+  }
+}
+
+function estimateLineIsStructural(item) {
+  return item?.type === "section" || item?.type === "subsection";
+}
+
+function estimateLineStructuralLabel(item) {
+  if (item?.type === "section") {
+    return "Раздел";
+  }
+  if (item?.type === "subsection") {
+    return "Подраздел";
+  }
+  return "";
+}
+
+function estimateLineHasResources(item) {
+  return Boolean(item?.hasResources || item?.children?.length);
+}
+
+function estimateLineCanExpand(item) {
+  if (estimateLineHasResources(item)) {
+    return true;
+  }
+  if (item?.source === "user_position") {
+    return false;
+  }
+  return Boolean(estimateLineDisplayCode(item));
+}
+
+function estimateLineIsWorkPosition(item) {
+  if (item?.type !== "position" || item?.source === "user_position") {
+    return false;
+  }
+  return estimateLineCanExpand(item);
+}
+
+function estimateLineKindLabel(line) {
+  if (!line) {
+    return "";
+  }
+  if (line.type === "section") {
+    return "Раздел";
+  }
+  if (line.type === "subsection") {
+    return "Подраздел";
+  }
+  if (estimateLineIsWorkPosition(line)) {
+    return "Позиция-работа";
+  }
+  if (line.type === "position") {
+    return "Позиция";
+  }
+  return line.type || "";
+}
+
+function formatEstimateLineQuantityInput(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "";
+  }
+  if (number === 0) {
+    return "0";
+  }
+  return quantityInputFormat.format(number);
+}
+
+function formatEstimateLinePriceInput(line) {
+  const value = Number(line?.unitPrice || 0);
+  if (!Number.isFinite(value) || value === 0) {
+    return "";
+  }
+  return estimateCostDetailed.format(value);
+}
+
+function configureEstimateLineDialogForm(options) {
+  const { mode, line } = options;
+  const form = els.estimateLineDialogForm;
+  const typeReadonly = form.querySelector("[data-estimate-line-type-readonly]");
+  const positionFields = form.querySelectorAll("[data-estimate-line-field]");
+
+  if (mode === "edit") {
+    typeReadonly.classList.remove("hidden");
+    els.estimateLineTypeLabel.textContent = estimateLineKindLabel(line);
+
+    const isPosition = line?.type === "position";
+    positionFields.forEach((field) => {
+      const fieldName = field.dataset.estimateLineField;
+      const show = isPosition && (fieldName !== "unitPrice" || !estimateLineIsWorkPosition(line));
+      field.classList.toggle("hidden", !show);
+    });
+    els.estimateLineDialogSubmit.textContent = "Сохранить";
+    return;
+  }
+
+  typeReadonly.classList.add("hidden");
+  positionFields.forEach((field) => {
+    field.classList.add("hidden");
+  });
+  els.estimateLineDialogSubmit.textContent = "Добавить";
+}
+
+function getExpandedLineIds(estimateId) {
+  if (!state.estimateLinesExpanded[estimateId]) {
+    state.estimateLinesExpanded[estimateId] = [];
+  }
+  return new Set(state.estimateLinesExpanded[estimateId]);
+}
+
+function saveEstimateLinesExpanded() {
+  sessionStorage.setItem("nav_editor_expanded", JSON.stringify(state.estimateLinesExpanded));
+}
+
+function parseResourceQuantityText(value) {
+  const text = String(value || "").trim().replace(/\s/g, "").replace(",", ".");
+  if (!text) {
+    return 0;
+  }
+  const number = Number(text);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function formatEstimateUnitPrice(item) {
+  const normalized = normalizeResourcePricing(item);
+  const base = String(normalized?.unitPriceText || "").trim();
+  const index = String(normalized?.unitPriceIndex || "").trim();
+  if (index) {
+    const basePart = base ? escapeHTML(base) : "";
+    const indexPart = `<span class="editor-estimate-price-index">*${escapeHTML(index)}</span>`;
+    return basePart ? `${basePart}<br>${indexPart}` : indexPart;
+  }
+  if (base) {
+    return escapeHTML(base);
+  }
+  const value = Number(normalized?.unitPrice || 0);
+  return value ? estimateCostDetailed.format(value) : "";
+}
+
+function estimateChildFromResource(resource, index, parentId) {
+  return {
+    id: `${parentId}_res_${index}`,
+    type: "resource",
+    code: resource.code || "",
+    originalCode: resource.originalCode || "",
+    name: resource.name || "",
+    unit: resource.unit || "",
+    quantity: parseResourceQuantityText(resource.quantityText),
+    unitPrice: 0,
+    unitPriceText: resource.unitPriceText || "",
+    unitPriceIndex: resource.unitPriceIndex || "",
+    total: 0,
+  };
+}
+
+function estimateLineNeedsDistrictPricing(item) {
+  if (item?.type !== "position" || item?.source === "user_position") {
+    return false;
+  }
+  if (!estimateRecordLookupCode(item)) {
+    return false;
+  }
+  return estimateLineCanExpand(item) || Boolean(item.children?.length);
+}
+
+function refreshEstimateItemChildrenPricing(item, resources) {
+  const existingChildren = item.children || [];
+  const existingByCode = new Map(
+    existingChildren.map((child) => [String(child.code || child.originalCode || ""), child]),
   );
 
+  item.children = resources.map((resource, index) => {
+    const next = estimateChildFromResource(resource, index, item.id);
+    const codeKey = String(next.code || next.originalCode || "");
+    const existing = existingByCode.get(codeKey) || existingChildren[index];
+    if (existing?.id) {
+      next.id = existing.id;
+    }
+    return next;
+  });
+  item.hasResources = resources.length > 0;
+}
+
+async function recalculateEstimatePricing(estimate) {
+  const items = estimate?.items || [];
+  if (!items.length) {
+    return;
+  }
+
+  const district = estimate.district || "";
+  const fgisSetId = estimate.fgisSetId || "";
+  const tasks = items
+    .filter((item) => estimateLineNeedsDistrictPricing(item))
+    .map(async (item) => {
+      try {
+        const code = estimateRecordLookupCode(item);
+        if (!code) {
+          return;
+        }
+        const record = await fetchGSNRecordDetail(code, fgisSetId, district);
+        if (!record) {
+          return;
+        }
+        applyRecordDetailToEstimateItem(item, record);
+        if (record.resources?.length) {
+          refreshEstimateItemChildrenPricing(item, record.resources);
+        }
+      } catch {
+        return;
+      }
+    });
+
+  await Promise.all(tasks);
+}
+
+function estimateLineFromGSNRecord(record, node, lineId = `line_${Date.now()}`) {
+  const children = (record.resources || []).map((resource, index) =>
+    estimateChildFromResource(resource, index, lineId),
+  );
+  return {
+    id: lineId,
+    type: "position",
+    code: record.code || "",
+    recordCode: record.code || "",
+    originalCode: record.originalCode || "",
+    name: record.name || node.name || "",
+    unit: record.unit || node.unit || "",
+    quantity: 1,
+    unitPrice: 0,
+    total: 0,
+    hasResources: Boolean(record.hasResources || children.length),
+    children: children.length ? children : undefined,
+  };
+}
+
+async function fetchGSNHierarchyRecords(hierarchyCode, fgisSetId = "", district = "") {
+  const params = new URLSearchParams({
+    supplement: state.gsnSupplement,
+    hierarchy: hierarchyCode,
+  });
+  if (fgisSetId) {
+    params.set("fgisSet", fgisSetId);
+  }
+  if (district) {
+    params.set("district", district);
+  }
+  const result = await api(`/api/gsn/hierarchy-records?${params.toString()}`);
+  return result.records || [];
+}
+
+async function fetchGSNRecordDetail(code, fgisSetId = "", district = "") {
+  const params = new URLSearchParams({ code });
+  if (fgisSetId) {
+    params.set("fgisSet", fgisSetId);
+  }
+  if (district) {
+    params.set("district", district);
+  }
+  const result = await api(`/api/gsn/record?${params.toString()}`);
+  return result.record || null;
+}
+
+function renderEstimateLineActions(estimateId, item, index, total, options = {}) {
+  const encodedEstimateId = escapeHTML(estimateId);
+  const encodedLineId = escapeHTML(item.id);
+
+  if (options.rowKind === "child") {
+    return `<td class="editor-estimate-actions-cell"></td>`;
+  }
+
   return `
+    <td class="editor-estimate-actions-cell">
+      <div class="editor-estimate-line-actions">
+        <button
+          class="icon-button secondary"
+          data-editor-line-edit="${encodedEstimateId}"
+          data-editor-line-id="${encodedLineId}"
+          type="button"
+          title="Редактировать"
+          aria-label="Редактировать"
+        >${iconPencil()}</button>
+        <button
+          class="icon-button secondary icon-button-danger"
+          data-editor-line-delete="${encodedEstimateId}"
+          data-editor-line-id="${encodedLineId}"
+          type="button"
+          title="Удалить"
+          aria-label="Удалить"
+        >${iconTrash()}</button>
+        <button
+          class="icon-button secondary"
+          data-editor-line-up="${encodedEstimateId}"
+          data-editor-line-id="${encodedLineId}"
+          type="button"
+          title="Переместить вверх"
+          aria-label="Переместить вверх"
+          ${index === 0 ? "disabled" : ""}
+        >${iconArrowUp()}</button>
+        <button
+          class="icon-button secondary"
+          data-editor-line-down="${encodedEstimateId}"
+          data-editor-line-id="${encodedLineId}"
+          type="button"
+          title="Переместить вниз"
+          aria-label="Переместить вниз"
+          ${index >= total - 1 ? "disabled" : ""}
+        >${iconArrowDown()}</button>
+      </div>
+    </td>
+  `;
+}
+
+function renderEstimateCodeCell(estimateId, item, options = {}) {
+  const structuralLabel = estimateLineStructuralLabel(item);
+  const displayCode = estimateLineDisplayCode(item);
+  const encodedEstimateId = escapeHTML(estimateId);
+  const encodedLineId = escapeHTML(item.id);
+  const expandButton =
+    options.rowKind === "main" && options.hasResources
+      ? `<button
+          class="editor-line-expand-btn"
+          data-editor-line-expand="${encodedEstimateId}"
+          data-editor-line-id="${encodedLineId}"
+          type="button"
+          title="${options.isExpanded ? "Свернуть ресурсы" : "Развернуть ресурсы"}"
+          aria-label="${options.isExpanded ? "Свернуть ресурсы" : "Развернуть ресурсы"}"
+        >${options.isExpanded ? "−" : "+"}</button>`
+      : `<span class="editor-line-expand-placeholder"></span>`;
+
+  const codeContent = structuralLabel
+    ? `<span class="editor-estimate-structural-label">${escapeHTML(structuralLabel)}</span>`
+    : `<span class="user-positions-code-text">${formatBreakableCode(displayCode)}</span>`;
+
+  return `
+    <td class="editor-estimate-code-cell">
+      <div class="editor-estimate-code-cell-inner">
+        ${expandButton}
+        ${codeContent}
+      </div>
+    </td>
+  `;
+}
+
+function estimateTableRowClass(item, rowKind) {
+  const classes = [rowKind === "child" ? "editor-estimate-row-child" : "editor-estimate-row-main"];
+  if (item?.type === "section") {
+    classes.push("editor-estimate-row-section");
+  } else if (item?.type === "subsection") {
+    classes.push("editor-estimate-row-subsection");
+  }
+  return classes.join(" ");
+}
+
+function renderEstimateTableRow(options) {
+  const { estimateId, item, indexLabel, rowKind, hasResources, isExpanded, lineIndex, lineCount, parentItem } =
+    options;
+  const isChild = rowKind === "child";
+  const isStructural = estimateLineIsStructural(item);
+  const lineTotal = estimateLineTotal(item, parentItem);
+  const quantityCell = isStructural ? "" : formatNumber(item.quantity);
+  return `
+    <tr class="${estimateTableRowClass(item, rowKind)}">
+      <td class="editor-estimate-index-cell">${escapeHTML(indexLabel)}</td>
+      ${renderEstimateCodeCell(estimateId, item, { rowKind, hasResources, isExpanded })}
+      <td class="editor-estimate-name-cell${isChild ? " editor-estimate-name-cell-child" : ""}">${escapeHTML(item.name || "")}</td>
+      <td class="editor-estimate-unit-cell">${escapeHTML(item.unit || "")}</td>
+      <td class="editor-estimate-quantity-cell">${quantityCell}</td>
+      <td class="editor-estimate-price-cell">${formatEstimateUnitPrice(item)}</td>
+      <td class="editor-estimate-total-cell">${formatEstimateMoney(lineTotal)}</td>
+      ${renderEstimateLineActions(estimateId, item, lineIndex, lineCount, {
+        rowKind,
+        hasResources,
+        isExpanded,
+      })}
+    </tr>
+  `;
+}
+
+function buildEstimateTableRows(estimate) {
+  const items = estimate.items || [];
+  const expanded = getExpandedLineIds(estimate.id);
+  const rows = [];
+  let positionNumber = 0;
+
+  items.forEach((item, index) => {
+    const isStructural = estimateLineIsStructural(item);
+    if (!isStructural) {
+      positionNumber += 1;
+    }
+    const indexLabel = isStructural ? "" : String(positionNumber);
+    const hasResources = estimateLineCanExpand(item);
+    const isExpanded = expanded.has(item.id);
+    rows.push(
+      renderEstimateTableRow({
+        estimateId: estimate.id,
+        item,
+        indexLabel,
+        rowKind: "main",
+        hasResources,
+        isExpanded,
+        lineIndex: index,
+        lineCount: items.length,
+      }),
+    );
+    if (hasResources && isExpanded) {
+      (item.children || []).forEach((child, childIndex) => {
+        rows.push(
+          renderEstimateTableRow({
+            estimateId: estimate.id,
+            item: child,
+            indexLabel: `${positionNumber}.${childIndex + 1}`,
+            rowKind: "child",
+            lineIndex: index,
+            lineCount: items.length,
+            parentItem: item,
+          }),
+        );
+      });
+    }
+  });
+
+  return rows;
+}
+
+async function toggleEstimateLineExpand(estimateId, lineId) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  const item = estimate?.items?.find((line) => line.id === lineId);
+  if (!estimate || !item) {
+    return;
+  }
+
+  const expanded = getExpandedLineIds(estimateId);
+  if (expanded.has(lineId)) {
+    expanded.delete(lineId);
+    state.estimateLinesExpanded[estimateId] = [...expanded];
+    saveEstimateLinesExpanded();
+    renderEditor();
+    return;
+  }
+
+  if (!item.children?.length) {
+    const fetchCode = estimateRecordLookupCode(item);
+    if (fetchCode) {
+      try {
+        const record = await fetchGSNRecordDetail(fetchCode, estimate.fgisSetId || "", estimate.district || "");
+        if (!record) {
+          showMessage("Запись не найдена", "error");
+          return;
+        }
+        applyRecordDetailToEstimateItem(item, record);
+        if (record.resources?.length) {
+          refreshEstimateItemChildrenPricing(item, record.resources);
+          item.hasResources = true;
+          saveEditorState();
+        } else {
+          item.hasResources = false;
+          showMessage("У позиции нет ресурсов", "ok");
+          renderEditor();
+          return;
+        }
+      } catch (error) {
+        showMessage(error.message || "Не удалось загрузить ресурсы", "error");
+        return;
+      }
+    }
+  }
+
+  if (!item.children?.length) {
+    showMessage("У позиции нет ресурсов", "ok");
+    return;
+  }
+
+  expanded.add(lineId);
+  state.estimateLinesExpanded[estimateId] = [...expanded];
+  saveEstimateLinesExpanded();
+  renderEditor();
+}
+
+function renderEstimateEditor(estimate) {
+  const items = estimate.items || [];
+  const rows = buildEstimateTableRows(estimate);
+
+  return `
+    <div class="editor-estimate-header">
+      <label class="editor-estimate-header-field">
+        <span class="muted">Шифр</span>
+        <input
+          data-editor-estimate-code="${escapeHTML(estimate.id)}"
+          value="${escapeHTML(estimate.code || "")}"
+        />
+      </label>
+      <label class="editor-estimate-header-field editor-estimate-header-field-grow">
+        <span class="muted">Наименование</span>
+        <input
+          data-editor-estimate-title="${escapeHTML(estimate.id)}"
+          value="${escapeHTML(estimate.title || "")}"
+        />
+      </label>
+      <label class="editor-estimate-header-field">
+        <span class="muted">Сметный район</span>
+        <button
+          class="editor-district-field"
+          data-editor-district-open="${escapeHTML(estimate.id)}"
+          type="button"
+          title="${escapeHTML(districtRegionHint(estimate.district))}"
+        >${escapeHTML(estimate.district || "—")}</button>
+      </label>
+      <label class="editor-estimate-header-field editor-estimate-header-field-fgis-set">
+        <span class="muted">Сметные цены и индексы</span>
+        <select
+          class="editor-fgis-set-select"
+          data-editor-fgis-set="${escapeHTML(estimate.id)}"
+        >${renderFgisSetSelectOptions(estimate.fgisSetId)}</select>
+      </label>
+      <div class="editor-estimate-header-field editor-estimate-header-field-total">
+        <span class="muted">Сметная стоимость</span>
+        <output class="editor-estimate-total-value">${money.format(estimateGrandTotal(items))}</output>
+      </div>
+    </div>
     <div class="editor-estimate-meta">
       <span class="editor-meta-inline">
         <span class="muted">Стройка:</span>
@@ -687,35 +2372,71 @@ function renderEstimateEditor(estimate) {
         <span class="muted">Объект:</span>
         <strong>${escapeHTML(estimate.objectLabel || "-")}</strong>
       </span>
-      <label class="editor-meta-inline editor-district-inline">
-        <span class="muted">Сметный район</span>
-        <input data-editor-district="${escapeHTML(estimate.id)}" value="${escapeHTML(estimate.district || "")}" />
-      </label>
-      <button
-        class="secondary construction-add-btn"
-        data-editor-add-line="${escapeHTML(estimate.id)}"
-        type="button"
-      >+ Добавить строку сметы</button>
     </div>
     <div class="table-wrap">
       <table class="editor-estimate-table">
         <thead>
           <tr>
-            <th>№ п/п</th>
-            <th>Шифр</th>
-            <th>Наименование</th>
-            <th>Ед. изм.</th>
-            <th>Объем</th>
-            <th>Стоимость ед.</th>
-            <th>Стоимость на объем</th>
+            <th class="editor-estimate-index-cell">№ п/п</th>
+            <th class="editor-estimate-code-cell">Шифр</th>
+            <th class="editor-estimate-name-cell">Наименование</th>
+            <th class="editor-estimate-unit-cell">Ед. изм.</th>
+            <th class="editor-estimate-quantity-cell">Объем<br><span class="editor-estimate-header-sub">/ расход</span></th>
+            <th class="editor-estimate-price-cell">Стоимость ед.</th>
+            <th class="editor-estimate-total-cell">Стоимость на объем</th>
+            <th class="editor-estimate-actions-cell">Действия</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.length ? rows.join("") : `<tr><td colspan="7" class="muted">Строки сметы отсутствуют</td></tr>`}
+          ${rows.length ? rows.join("") : `<tr><td colspan="8" class="muted">Строки сметы отсутствуют</td></tr>`}
         </tbody>
       </table>
     </div>
+    <div class="editor-estimate-actions">
+      <button
+        class="secondary construction-add-btn"
+        data-editor-add-line="${escapeHTML(estimate.id)}"
+        type="button"
+      >+ Добавить строку сметы</button>
+      <button
+        class="secondary construction-add-btn"
+        data-editor-close-estimate="${escapeHTML(estimate.id)}"
+        type="button"
+      >Закрыть смету</button>
+    </div>
   `;
+}
+
+function buildEditorEstimateFromSource(sourceEstimate) {
+  const object = state.objects.find((item) => item.id === sourceEstimate.objectId);
+  const construction = object
+    ? state.constructions.find((item) => item.id === object.constructionId)
+    : null;
+
+  return {
+    id: sourceEstimate.id,
+    objectId: sourceEstimate.objectId,
+    code: sourceEstimate.code || "",
+    title: sourceEstimate.title || "",
+    description: sourceEstimate.description || "",
+    status: sourceEstimate.status || "draft",
+    district: sourceEstimate.district || "",
+    fgisSetId: sourceEstimate.fgisSetId || "",
+    constructionLabel: construction ? `${construction.code || ""} ${construction.name || ""}`.trim() : "",
+    objectLabel: object ? `${object.code || ""} ${object.name || ""}`.trim() : "",
+    items: (sourceEstimate.items || []).map((item) => ({
+      id: item.id,
+      type: item.type || "position",
+      code: item.code || "",
+      recordCode: item.code || "",
+      name: item.name || "",
+      unit: item.unit || "",
+      quantity: Number(item.quantity || 0),
+      unitPrice: Number(item.unitPrice || 0),
+      total: Number(item.total || Number(item.quantity || 0) * Number(item.unitPrice || 0)),
+      hasResources: Boolean(item.hasResources),
+    })),
+  };
 }
 
 function createEditorEstimate() {
@@ -724,6 +2445,7 @@ function createEditorEstimate() {
     title: `Смета ${state.openEstimates.length + 1}`,
     code: "",
     district: "",
+    fgisSetId: "",
     constructionLabel: "",
     objectLabel: "",
     items: [],
@@ -744,15 +2466,242 @@ function addNodeToBuffer(node) {
   showMessage("Позиция добавлена в буфер", "ok");
 }
 
-function addNodeToOnlyEstimate(node) {
+function editorItemFromUserPosition(position, quantity) {
+  return {
+    code: position.code || "",
+    name: position.name || "",
+    unit: position.unit || "",
+    quantity: Number(quantity || 1),
+    unitPrice: Number(position.cost || 0),
+    source: "user_position",
+    sourceId: position.id,
+  };
+}
+
+function estimateLineFromUserPosition(position, quantity, existingItem = null) {
+  const qty = Number(quantity || 1);
+  const unitPrice = Number(position.cost || 0);
+  return {
+    id: existingItem?.id || `line_${Date.now()}`,
+    type: "position",
+    code: position.code || "",
+    name: position.name || "",
+    unit: position.unit || "",
+    quantity: qty,
+    unitPrice,
+    total: qty * unitPrice,
+    source: "user_position",
+    sourceId: position.id,
+  };
+}
+
+function getOnlyOpenEstimate() {
   if (state.openEstimates.length !== 1) {
+    return null;
+  }
+  return state.openEstimates[0];
+}
+
+function upsertUserPositionInBuffer(positionId, quantity, options = {}) {
+  const position = state.userPositions.find((item) => item.id === positionId);
+  if (!position) {
     return;
   }
 
-  state.openEstimates[0].items.push(editorItemFromNode(node));
+  const item = editorItemFromUserPosition(position, quantity);
+  const existingIndex = state.buffer.findIndex(
+    (bufferItem) => bufferItem.source === "user_position" && bufferItem.sourceId === positionId,
+  );
+  const isNew = existingIndex < 0;
+
+  if (existingIndex >= 0) {
+    state.buffer[existingIndex] = item;
+  } else {
+    state.buffer.push(item);
+  }
+
   saveEditorState();
-  renderEditor();
-  showMessage("Позиция добавлена в смету", "ok");
+  if (state.section === "editor" && state.editorTab === "buffer") {
+    renderEditor();
+  }
+
+  if (isNew && options.notify !== false) {
+    showMessage("Позиция добавлена в буфер", "ok");
+  }
+}
+
+function removeUserPositionFromBuffer(positionId) {
+  let existingIndex = -1;
+  for (let index = state.buffer.length - 1; index >= 0; index -= 1) {
+    const bufferItem = state.buffer[index];
+    if (bufferItem.source === "user_position" && bufferItem.sourceId === positionId) {
+      existingIndex = index;
+      break;
+    }
+  }
+
+  if (existingIndex < 0) {
+    return;
+  }
+
+  state.buffer.splice(existingIndex, 1);
+  saveEditorState();
+  if (state.section === "editor" && state.editorTab === "buffer") {
+    renderEditor();
+  }
+}
+
+function upsertUserPositionInEstimate(positionId, quantity, options = {}) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate) {
+    return;
+  }
+
+  const position = state.userPositions.find((item) => item.id === positionId);
+  if (!position) {
+    return;
+  }
+
+  if (!estimate.items) {
+    estimate.items = [];
+  }
+
+  const existingIndex = estimate.items.findIndex(
+    (item) => item.source === "user_position" && item.sourceId === positionId,
+  );
+  const existingItem = existingIndex >= 0 ? estimate.items[existingIndex] : null;
+  const item = estimateLineFromUserPosition(position, quantity, existingItem);
+  const isNew = existingIndex < 0;
+
+  if (existingIndex >= 0) {
+    estimate.items[existingIndex] = item;
+  } else {
+    estimate.items.push(item);
+  }
+
+  saveEditorState();
+  if (state.section === "editor" && state.editorTab === estimate.id) {
+    renderEditor();
+  }
+  void persistOpenEstimate(estimate.id)
+    .then(() => {
+      if (isNew && options.notify !== false) {
+        showMessage("Позиция добавлена в смету", "ok");
+      }
+    })
+    .catch(() => {});
+}
+
+function removeUserPositionFromEstimate(positionId) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate || !estimate.items?.length) {
+    return;
+  }
+
+  let existingIndex = -1;
+  for (let index = estimate.items.length - 1; index >= 0; index -= 1) {
+    const item = estimate.items[index];
+    if (item.source === "user_position" && item.sourceId === positionId) {
+      existingIndex = index;
+      break;
+    }
+  }
+
+  if (existingIndex < 0) {
+    return;
+  }
+
+  estimate.items.splice(existingIndex, 1);
+  saveEditorState();
+  void persistOpenEstimate(estimate.id).then(() => {
+    if (state.section === "editor" && state.editorTab === estimate.id) {
+      renderEditor();
+    }
+  });
+}
+
+function parseUserPositionEstimateKey(key) {
+  const prefix = "estimate:";
+  if (!key.startsWith(prefix)) {
+    return null;
+  }
+
+  const rest = key.slice(prefix.length);
+  const marker = ":user-position:";
+  const markerIndex = rest.indexOf(marker);
+  if (markerIndex < 0) {
+    return null;
+  }
+
+  return {
+    estimateId: rest.slice(0, markerIndex),
+    positionId: rest.slice(markerIndex + marker.length),
+  };
+}
+
+function onAddPrimitiveQuantityChange(key, quantity, options = {}) {
+  if (key.startsWith("buffer:user-position:")) {
+    const positionId = key.slice("buffer:user-position:".length);
+    if (options.deactivated) {
+      removeUserPositionFromBuffer(positionId);
+      return;
+    }
+    upsertUserPositionInBuffer(positionId, quantity, options);
+    return;
+  }
+
+  const estimateKey = parseUserPositionEstimateKey(key);
+  if (estimateKey) {
+    if (options.deactivated) {
+      removeUserPositionFromEstimate(estimateKey.positionId);
+      return;
+    }
+    upsertUserPositionInEstimate(estimateKey.positionId, quantity, options);
+  }
+}
+
+function addNodeToOnlyEstimate(node) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate) {
+    return;
+  }
+  if (!estimate.items) {
+    estimate.items = [];
+  }
+
+  void (async () => {
+    try {
+      const records = await fetchGSNHierarchyRecords(node.code, estimate.fgisSetId || "", estimate.district || "");
+      const record = records[0];
+      const lineId = `line_${Date.now()}`;
+      const item = record
+        ? estimateLineFromGSNRecord(record, node, lineId)
+        : {
+            id: lineId,
+            type: "position",
+            code: node.code || "",
+            name: node.name || "",
+            unit: node.unit || "",
+            quantity: 1,
+            unitPrice: 0,
+            total: 0,
+          };
+
+      estimate.items.push(item);
+      if (item.children?.length) {
+        getExpandedLineIds(estimate.id).add(item.id);
+        state.estimateLinesExpanded[estimate.id] = [...getExpandedLineIds(estimate.id)];
+        saveEstimateLinesExpanded();
+      }
+
+      saveEditorState();
+      await persistOpenEstimate(estimate.id);
+      renderEditor();
+      showMessage("Позиция добавлена в смету", "ok");
+    } catch (error) {
+      showMessage(error.message || "Не удалось добавить позицию", "error");
+    }
+  })();
 }
 
 function editorItemFromNode(node) {
@@ -767,6 +2716,94 @@ function saveEditorState() {
   sessionStorage.setItem("nav_editor_buffer", JSON.stringify(state.buffer));
   sessionStorage.setItem("nav_editor_estimates", JSON.stringify(state.openEstimates));
   sessionStorage.setItem("nav_editor_tab", state.editorTab);
+  refreshUserPositionsPanelIfVisible();
+}
+
+function isPersistedEstimateId(estimateId) {
+  if (!estimateId || String(estimateId).startsWith("session_est_")) {
+    return false;
+  }
+  if (state.estimates.some((item) => item.id === estimateId)) {
+    return true;
+  }
+  const openEstimate = state.openEstimates.find((item) => item.id === estimateId);
+  return Boolean(openEstimate?.objectId);
+}
+
+function estimateItemsForApi(items) {
+  return (items || []).map((item) => ({
+    id: item.id || "",
+    type: item.type || "position",
+    code: estimateRecordFetchCode(item) || item.code || "",
+    name: item.name || "",
+    quantity: Number(item.quantity || 0),
+    unit: item.unit || "",
+    unitPrice: Number(item.unitPrice || 0),
+    total: Number(item.total ?? Number(item.quantity || 0) * Number(item.unitPrice || 0)),
+  }));
+}
+
+async function persistOpenEstimate(estimateId) {
+  if (!state.token || !isPersistedEstimateId(estimateId)) {
+    return;
+  }
+
+  const pending = persistEstimateInflight.get(estimateId);
+  if (pending) {
+    await pending;
+  }
+
+  const editorEstimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!editorEstimate) {
+    return;
+  }
+
+  const sourceEstimate = state.estimates.find((item) => item.id === estimateId);
+  const objectId = editorEstimate.objectId || sourceEstimate?.objectId;
+  const code = editorEstimate.code || sourceEstimate?.code;
+  const title = editorEstimate.title || sourceEstimate?.title;
+  if (!objectId || !code || !title) {
+    return;
+  }
+
+  const request = (async () => {
+    try {
+      const updated = await api(`/api/estimates/${estimateId}`, {
+        method: "PUT",
+        body: {
+          objectId,
+          code,
+          title,
+          description: editorEstimate.description ?? sourceEstimate?.description ?? "",
+          district: editorEstimate.district ?? sourceEstimate?.district ?? "",
+          fgisSetId: editorEstimate.fgisSetId ?? sourceEstimate?.fgisSetId ?? "",
+          status: editorEstimate.status || sourceEstimate?.status || "draft",
+          items: estimateItemsForApi(editorEstimate.items),
+        },
+      });
+
+      const index = state.estimates.findIndex((item) => item.id === estimateId);
+      if (index >= 0) {
+        state.estimates[index] = updated;
+      }
+    } catch (error) {
+      showMessage(error.message || "Не удалось сохранить смету", "error");
+      throw error;
+    }
+  })();
+
+  persistEstimateInflight.set(estimateId, request);
+  try {
+    await request;
+  } finally {
+    if (persistEstimateInflight.get(estimateId) === request) {
+      persistEstimateInflight.delete(estimateId);
+    }
+  }
+}
+
+async function flushPersistOpenEstimate(estimateId) {
+  await persistOpenEstimate(estimateId);
 }
 
 function editorEstimateLabel(estimate) {
@@ -778,15 +2815,195 @@ function editorEstimateLabel(estimate) {
   return title || code || "Смета";
 }
 
-function openEstimateLineDialog(estimateID) {
-  els.estimateLineDialogForm.elements.estimateId.value = estimateID;
-  els.estimateLineDialogForm.elements.lineType.value = "position";
-  els.estimateLineDialogForm.elements.name.value = "";
-  els.estimateLineDialog.showModal();
-  els.estimateLineDialogForm.elements.name.focus();
+function openEstimateAddLineDialog(estimateID) {
+  state.addLineTargetEstimateId = estimateID;
+  state.editorTab = estimateID;
+  sessionStorage.setItem("nav_editor_tab", estimateID);
+  els.estimateAddLineDialogForm.elements.estimateId.value = estimateID;
+  els.estimateAddLineDialog.showModal();
 }
 
-function addEstimateLine(estimateID, lineType, name) {
+function navigateToBaseForAddLine(estimateID, baseTab) {
+  state.addLineTargetEstimateId = estimateID;
+  state.editorTab = estimateID;
+  sessionStorage.setItem("nav_editor_tab", estimateID);
+  state.section = "base";
+  state.baseTab = baseTab;
+  if (baseTab === "gsn") {
+    state.gsnLoaded = false;
+  }
+  renderSections();
+}
+
+function openEstimateStructuralLineDialog(estimateID, lineType) {
+  const form = els.estimateLineDialogForm;
+  form.elements.estimateId.value = estimateID;
+  form.elements.lineId.value = "";
+  form.elements.lineType.value = lineType;
+  els.estimateLineDialogTitle.textContent =
+    lineType === "section" ? "Добавить раздел" : "Добавить подраздел";
+  configureEstimateLineDialogForm({ mode: "addStructural" });
+  form.elements.name.value = "";
+  els.estimateLineDialog.showModal();
+  form.elements.name.focus();
+}
+
+function openEstimateLineDialog(estimateID, lineID = "") {
+  const form = els.estimateLineDialogForm;
+  form.elements.estimateId.value = estimateID;
+  form.elements.lineId.value = lineID || "";
+
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  const line = estimate?.items?.find((item) => item.id === lineID);
+  els.estimateLineDialogTitle.textContent = "Редактировать строку сметы";
+  configureEstimateLineDialogForm({ mode: "edit", line });
+  form.elements.name.value = line?.name || "";
+  form.elements.code.value = estimateLineDisplayCode(line);
+  form.elements.unit.value = line?.unit || "";
+  form.elements.quantity.value = formatEstimateLineQuantityInput(line?.quantity);
+  form.elements.unitPrice.value = formatEstimateLinePriceInput(line);
+
+  els.estimateLineDialog.showModal();
+  form.elements.name.focus();
+}
+
+async function updateEstimateHeaderField(estimateID, field, value) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate) {
+    return;
+  }
+
+  const trimmed = String(value || "").trim();
+  if (field === "code") {
+    estimate.code = trimmed;
+  } else if (field === "title") {
+    estimate.title = trimmed;
+  } else {
+    return;
+  }
+
+  saveEditorState();
+  renderEditorSubitems();
+  try {
+    await persistOpenEstimate(estimateID);
+  } catch {
+    return;
+  }
+}
+
+async function updateEstimateFgisSet(estimateID, value) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate) {
+    return;
+  }
+
+  estimate.fgisSetId = String(value || "");
+  saveEditorState();
+  try {
+    await persistOpenEstimate(estimateID);
+  } catch {
+    return;
+  }
+}
+
+async function updateEstimateLine(estimateID, lineID, fields) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate?.items?.length) {
+    return;
+  }
+
+  const line = estimate.items.find((item) => item.id === lineID);
+  if (!line) {
+    return;
+  }
+
+  const trimmedName = String(fields.name || "").trim();
+  if (!trimmedName) {
+    showMessage("Укажите наименование строки", "error");
+    return;
+  }
+
+  line.name = trimmedName;
+
+  if (line.type === "position") {
+    const trimmedCode = String(fields.code || "").trim();
+    line.code = trimmedCode;
+    if (String(line.originalCode || "").trim()) {
+      line.originalCode = trimmedCode;
+    }
+
+    line.unit = String(fields.unit || "").trim();
+    if (!line.unit) {
+      line.unit = "шт";
+    }
+
+    line.quantity = parseLocalizedNumber(fields.quantity);
+
+    if (!estimateLineIsWorkPosition(line)) {
+      line.unitPrice = parseLocalizedNumber(fields.unitPrice);
+      line.total = line.quantity * line.unitPrice;
+    } else if (line.children?.length) {
+      line.total = estimateLineTotal(line);
+    }
+  } else {
+    line.unit = "";
+  }
+
+  saveEditorState();
+  await persistOpenEstimate(estimateID);
+  renderEditor();
+  showMessage("Строка обновлена", "ok");
+}
+
+async function deleteEstimateLine(estimateID, lineID) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate?.items?.length) {
+    return;
+  }
+
+  const index = estimate.items.findIndex((item) => item.id === lineID);
+  if (index < 0) {
+    return;
+  }
+
+  const line = estimate.items[index];
+  const lineLabel = String(line.name || line.code || "строка").trim();
+  if (!window.confirm(`Удалить строку «${lineLabel}»?`)) {
+    return;
+  }
+
+  estimate.items.splice(index, 1);
+  const expanded = getExpandedLineIds(estimateID);
+  if (expanded.delete(lineID)) {
+    state.estimateLinesExpanded[estimateID] = [...expanded];
+    saveEstimateLinesExpanded();
+  }
+  saveEditorState();
+  await persistOpenEstimate(estimateID);
+  renderEditor();
+  showMessage("Строка удалена", "ok");
+}
+
+async function moveEstimateLine(estimateID, lineID, direction) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateID);
+  if (!estimate?.items?.length) {
+    return;
+  }
+
+  const index = estimate.items.findIndex((item) => item.id === lineID);
+  const targetIndex = index + direction;
+  if (index < 0 || targetIndex < 0 || targetIndex >= estimate.items.length) {
+    return;
+  }
+
+  const [line] = estimate.items.splice(index, 1);
+  estimate.items.splice(targetIndex, 0, line);
+  saveEditorState();
+  await persistOpenEstimate(estimateID);
+  renderEditor();
+}
+
+async function addEstimateLine(estimateID, lineType, name) {
   const estimate = state.openEstimates.find((item) => item.id === estimateID);
   if (!estimate) {
     return;
@@ -814,51 +3031,99 @@ function addEstimateLine(estimateID, lineType, name) {
   });
 
   saveEditorState();
+  await persistOpenEstimate(estimateID);
   renderEditor();
   showMessage("Строка добавлена", "ok");
 }
 
-function openEstimateInEditor(estimateID) {
+async function closeEstimateFromEditor(estimateID) {
+  const index = state.openEstimates.findIndex((item) => item.id === estimateID);
+  if (index < 0) {
+    return;
+  }
+
+  await flushPersistOpenEstimate(estimateID);
+
+  state.openEstimates.splice(index, 1);
+
+  if (state.editorTab === estimateID) {
+    state.editorTab =
+      state.openEstimates.length > 0
+        ? state.openEstimates[Math.min(index, state.openEstimates.length - 1)].id
+        : "buffer";
+  }
+
+  state.gsnLoaded = false;
+  saveEditorState();
+  renderEditor();
+  showMessage("Смета закрыта", "ok");
+}
+
+async function openEstimateInEditor(estimateID) {
+  await flushPersistOpenEstimate(estimateID);
+
+  try {
+    const [constructions, objects, estimates] = await Promise.all([
+      api("/api/constructions"),
+      api("/api/objects"),
+      api("/api/estimates"),
+    ]);
+    state.constructions = constructions;
+    state.objects = objects;
+    state.estimates = estimates;
+  } catch (error) {
+    showMessage(error.message, "error");
+    return;
+  }
+
   const sourceEstimate = state.estimates.find((item) => item.id === estimateID);
   if (!sourceEstimate) {
     showMessage("Смета не найдена", "error");
     return;
   }
 
-  const object = state.objects.find((item) => item.id === sourceEstimate.objectId);
-  const construction = object
-    ? state.constructions.find((item) => item.id === object.constructionId)
-    : null;
-
-  const editorEstimate = {
-    id: sourceEstimate.id,
-    code: sourceEstimate.code || "",
-    title: sourceEstimate.title || "",
-    district: sourceEstimate.district || "",
-    constructionLabel: construction ? `${construction.code || ""} ${construction.name || ""}`.trim() : "",
-    objectLabel: object ? `${object.code || ""} ${object.name || ""}`.trim() : "",
-    items: (sourceEstimate.items || []).map((item) => ({
-      id: item.id,
-      type: item.type || "position",
-      code: item.code || "",
-      name: item.name || "",
-      unit: item.unit || "",
-      quantity: Number(item.quantity || 0),
-      unitPrice: Number(item.unitPrice || 0),
-      total: Number(item.total || Number(item.quantity || 0) * Number(item.unitPrice || 0)),
-    })),
-  };
-
-  const existingIndex = state.openEstimates.findIndex((item) => item.id === editorEstimate.id);
+  const existingEstimate = state.openEstimates.find((item) => item.id === estimateID);
+  const editorEstimate = buildEditorEstimateFromSource(sourceEstimate);
+  if (existingEstimate?.items?.length) {
+    editorEstimate.items = editorEstimate.items.map((item) => {
+      const previous = existingEstimate.items.find((line) => line.id === item.id);
+      if (!previous) {
+        return item;
+      }
+      return {
+        ...item,
+        recordCode: previous.recordCode || item.recordCode || item.code,
+        originalCode: previous.originalCode || item.originalCode,
+        children: previous.children,
+        hasResources: previous.hasResources ?? item.hasResources,
+      };
+    });
+  }
+  if (existingEstimate?.district && !editorEstimate.district) {
+    editorEstimate.district = existingEstimate.district;
+    void persistOpenEstimate(estimateID).catch(() => {});
+  }
+  if (existingEstimate?.fgisSetId && !editorEstimate.fgisSetId) {
+    editorEstimate.fgisSetId = existingEstimate.fgisSetId;
+    void persistOpenEstimate(estimateID).catch(() => {});
+  }
+  if (existingEstimate?.code && !editorEstimate.code) {
+    editorEstimate.code = existingEstimate.code;
+  }
+  if (existingEstimate?.title && !editorEstimate.title) {
+    editorEstimate.title = existingEstimate.title;
+  }
+  const existingIndex = state.openEstimates.findIndex((item) => item.id === estimateID);
   if (existingIndex >= 0) {
     state.openEstimates[existingIndex] = editorEstimate;
   } else {
     state.openEstimates.push(editorEstimate);
   }
 
-  state.editorTab = editorEstimate.id;
+  state.editorTab = estimateID;
   state.section = "editor";
   saveEditorState();
+  renderConstructionTree();
   renderSections();
   showMessage("Смета открыта в редакторе", "ok");
 }
@@ -868,8 +3133,245 @@ function formatNumber(value) {
   return Number.isFinite(number) ? new Intl.NumberFormat("ru-RU").format(number) : "0";
 }
 
+const quantityInputFormat = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 6 });
+
+function parseQuantityInput(value) {
+  const text = String(value).trim().replace(/\s/g, "").replace(",", ".");
+  if (!text) {
+    return null;
+  }
+  const number = Number(text);
+  if (!Number.isFinite(number) || number <= 0) {
+    return null;
+  }
+  return number;
+}
+
+function formatQuantityInput(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "1";
+  }
+  return quantityInputFormat.format(number);
+}
+
+const addPrimitiveInitialQuantity = 1;
+
+function renderAddPrimitive(key, label, quantity = null) {
+  if (quantity == null) {
+    return `
+      <button
+        class="add-primitive secondary"
+        data-add-primitive="${escapeHTML(key)}"
+        data-add-primitive-label="${escapeHTML(label)}"
+        type="button"
+      >
+        ${escapeHTML(label)}
+      </button>
+    `;
+  }
+
+  return `
+    <div
+      class="add-primitive-stepper"
+      data-add-primitive-stepper="${escapeHTML(key)}"
+      data-add-primitive-label="${escapeHTML(label)}"
+    >
+      <button
+        class="add-primitive-btn secondary"
+        data-add-primitive-minus="${escapeHTML(key)}"
+        type="button"
+        aria-label="Уменьшить"
+      >−</button>
+      <input
+        class="add-primitive-qty"
+        data-add-primitive-qty="${escapeHTML(key)}"
+        type="text"
+        inputmode="decimal"
+        value="${escapeHTML(formatQuantityInput(quantity))}"
+        aria-label="Количество"
+      />
+      <button
+        class="add-primitive-btn secondary"
+        data-add-primitive-plus="${escapeHTML(key)}"
+        type="button"
+        aria-label="Увеличить"
+      >+</button>
+    </div>
+  `;
+}
+
+function setAddPrimitiveQuantity(container, key, quantity) {
+  state.addPrimitiveQuantities[key] = quantity;
+  const input = container.querySelector(`[data-add-primitive-qty="${key}"]`);
+  if (input) {
+    input.value = formatQuantityInput(quantity);
+  }
+}
+
+function collapseAddPrimitive(container, key, label) {
+  delete state.addPrimitiveQuantities[key];
+  const stepper = container.querySelector(`[data-add-primitive-stepper="${key}"]`);
+  if (stepper) {
+    stepper.outerHTML = renderAddPrimitive(key, label, null);
+  }
+}
+
+function getAddPrimitiveCurrentQuantity(container, key) {
+  const input = container.querySelector(`[data-add-primitive-qty="${key}"]`);
+  const fromInput = input ? parseQuantityInput(input.value) : null;
+  if (fromInput != null) {
+    return fromInput;
+  }
+  return state.addPrimitiveQuantities[key] ?? addPrimitiveInitialQuantity;
+}
+
+function handleAddPrimitiveClick(event, container, onQuantityChange) {
+  const activateButton = event.target.closest("[data-add-primitive]");
+  if (activateButton) {
+    const key = activateButton.dataset.addPrimitive;
+    const label = activateButton.dataset.addPrimitiveLabel || "";
+    const quantity = addPrimitiveInitialQuantity;
+    state.addPrimitiveQuantities[key] = quantity;
+    activateButton.outerHTML = renderAddPrimitive(key, label, quantity);
+    onQuantityChange(key, quantity, { first: true });
+    const input = container.querySelector(`[data-add-primitive-qty="${key}"]`);
+    input?.focus();
+    input?.select();
+    return true;
+  }
+
+  const minusButton = event.target.closest("[data-add-primitive-minus]");
+  if (minusButton) {
+    const key = minusButton.dataset.addPrimitiveMinus;
+    const stepper = minusButton.closest("[data-add-primitive-stepper]");
+    const label = stepper?.dataset.addPrimitiveLabel || "";
+    const current = getAddPrimitiveCurrentQuantity(container, key);
+    if (current <= addPrimitiveInitialQuantity) {
+      collapseAddPrimitive(container, key, label);
+      onQuantityChange(key, null, { deactivated: true });
+      return true;
+    }
+
+    const quantity = current - 1;
+    setAddPrimitiveQuantity(container, key, quantity);
+    onQuantityChange(key, quantity);
+    return true;
+  }
+
+  const plusButton = event.target.closest("[data-add-primitive-plus]");
+  if (plusButton) {
+    const key = plusButton.dataset.addPrimitivePlus;
+    const current = getAddPrimitiveCurrentQuantity(container, key);
+    const quantity = current + 1;
+    setAddPrimitiveQuantity(container, key, quantity);
+    onQuantityChange(key, quantity);
+    return true;
+  }
+
+  return false;
+}
+
+function handleAddPrimitiveQuantityBlur(event, container, onQuantityChange) {
+  const input = event.target.closest("[data-add-primitive-qty]");
+  if (!input) {
+    return;
+  }
+
+  const key = input.dataset.addPrimitiveQty;
+  window.setTimeout(() => {
+    if (!container.querySelector(`[data-add-primitive-qty="${key}"]`)) {
+      return;
+    }
+
+    const activeInput = container.querySelector(`[data-add-primitive-qty="${key}"]`);
+    const parsed = parseQuantityInput(activeInput.value);
+    const quantity = parsed ?? state.addPrimitiveQuantities[key] ?? addPrimitiveInitialQuantity;
+    setAddPrimitiveQuantity(container, key, quantity);
+    onQuantityChange(key, quantity);
+  }, 0);
+}
+
+function handleAddPrimitiveQuantityKeydown(event, container, onQuantityChange) {
+  if (event.key !== "Enter") {
+    return;
+  }
+
+  const input = event.target.closest("[data-add-primitive-qty]");
+  if (!input) {
+    return;
+  }
+
+  event.preventDefault();
+  const key = input.dataset.addPrimitiveQty;
+  const parsed = parseQuantityInput(input.value);
+  const quantity = parsed ?? state.addPrimitiveQuantities[key] ?? 1;
+  setAddPrimitiveQuantity(container, key, quantity);
+  onQuantityChange(key, quantity);
+  input.blur();
+}
+
 function gsnNodeTitle(node) {
   return state.showHierarchyCode ? `${node.code} ${node.name || ""}` : node.name || node.code;
+}
+
+function isGSNPdfNode(node) {
+  return Boolean(node.documentRef || node.nodeType === "Документ");
+}
+
+async function openGSNPdf(code, title = "") {
+  if (!code || !state.gsnSupplement) {
+    return;
+  }
+
+  const params = new URLSearchParams({
+    supplement: state.gsnSupplement,
+    code,
+  });
+
+  try {
+    const response = await fetch(`/api/gsn/document?${params.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${state.token}`,
+      },
+    });
+
+    if (!response.ok) {
+      const isJSON = response.headers.get("content-type")?.includes("application/json");
+      const payload = isJSON ? await response.json() : null;
+      throw new Error(payload?.error || `HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const pdfUrl = URL.createObjectURL(blob);
+    const tabTitle = String(title || code).trim() || "PDF";
+    const safeTitle = escapeHTML(tabTitle);
+    const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>${safeTitle}</title>
+<style>html,body{margin:0;height:100%;background:#f3f5f9}iframe{display:block;border:0;width:100%;height:100%}</style>
+</head>
+<body>
+<iframe src="${pdfUrl}" title="${safeTitle}"></iframe>
+</body>
+</html>`;
+    const htmlUrl = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+    const tab = window.open(htmlUrl, "_blank");
+    if (!tab) {
+      URL.revokeObjectURL(htmlUrl);
+      URL.revokeObjectURL(pdfUrl);
+      showMessage("Разрешите открытие новых вкладок в браузере", "error");
+      return;
+    }
+    window.setTimeout(() => {
+      URL.revokeObjectURL(htmlUrl);
+      URL.revokeObjectURL(pdfUrl);
+    }, 60_000);
+  } catch (error) {
+    showMessage(error.message, "error");
+  }
 }
 
 function editorItemTitle(item) {
@@ -1197,6 +3699,16 @@ function escapeHTML(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function formatBreakableCode(code) {
+  const text = String(code || "");
+  if (!text) {
+    return "";
+  }
+
+  const chunks = text.match(/.{1,3}/gu) || [];
+  return chunks.map((chunk) => escapeHTML(chunk)).join("<wbr>");
 }
 
 loadApp();

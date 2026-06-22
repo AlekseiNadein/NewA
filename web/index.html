@@ -4,14 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ABC-RU WEB</title>
+    <link rel="icon" href="/Abc_Icon.ico" type="image/x-icon" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="shell">
       <section class="hero">
-        <div>
-          <p class="eyebrow">Автоматизация выпуска смет на платформе SaaS 2026.6</p>
-          <h2>ABC-RU WEB</h2>
+        <div class="hero-brand">
+          <img class="hero-logo" src="/Abc_Icon.ico" alt="" width="64" height="64" />
+          <div>
+            <p class="eyebrow">Автоматизация выпуска смет на платформе SaaS 2026.6</p>
+            <h2>ABC-RU WEB</h2>
+          </div>
         </div>
         <button id="logoutButton" class="secondary hidden">Выйти</button>
       </section>
@@ -82,6 +86,7 @@
             <button class="nav-link active" data-section="base" type="button">База</button>
             <div class="nav-subitems" data-subitems="base">
               <button class="nav-sublink active" data-base-tab="gsn" type="button">ГСН-2022</button>
+              <button class="nav-sublink" data-base-tab="fgisPrices" type="button">Сметные цены и индексы</button>
               <button class="nav-sublink" data-base-tab="userPositions" type="button">Позиции пользователя</button>
             </div>
             <button class="nav-link" data-section="constructions" type="button">Стройки</button>
@@ -102,12 +107,40 @@
               <select id="gsnSupplementSelect" class="gsn-supplement-select" aria-label="Версия дополнения"></select>
             </div>
             <div id="gsnTree" class="tree gsn-tree"></div>
+            <div id="fgisPricesPanel" class="fgis-prices-panel hidden"></div>
+            <div id="userPositionsPanel" class="user-positions-panel hidden"></div>
           </section>
 
           <section id="constructionsSection" class="section-view card hidden">
             <p class="eyebrow">Стройки</p>
             <div id="constructionTree" class="construction-tree"></div>
           </section>
+
+          <dialog id="userPositionDialog" class="construction-dialog">
+            <form id="userPositionDialogForm" class="stack-form">
+              <h3 id="userPositionDialogTitle">Позиция пользователя</h3>
+              <label>
+                Шифр
+                <input name="code" required />
+              </label>
+              <label>
+                Наименование
+                <input name="name" required />
+              </label>
+              <label>
+                Единица измерения
+                <input name="unit" />
+              </label>
+              <label>
+                Стоимость
+                <input name="cost" type="number" min="0" step="0.01" required />
+              </label>
+              <div class="dialog-actions">
+                <button type="submit">Сохранить</button>
+                <button class="secondary" data-dialog-cancel type="button">Отмена</button>
+              </div>
+            </form>
+          </dialog>
 
           <dialog id="constructionDialog" class="construction-dialog">
             <form id="constructionDialogForm" class="stack-form" method="dialog">
@@ -131,30 +164,107 @@
           </dialog>
 
           <section id="editorSection" class="section-view card hidden">
-            <p class="eyebrow">Редактор</p>
+            <p class="eyebrow" id="editorEyebrow">Редактор</p>
             <h2 id="editorTitle">Буфер</h2>
             <p id="editorDescription" class="muted">Сессионный буфер для элементов, добавленных из базы ГСН-2022.</p>
             <div id="editorContent" class="editor-content"></div>
           </section>
 
+          <dialog id="estimateAddLineDialog" class="construction-dialog estimate-add-line-dialog">
+            <form id="estimateAddLineDialogForm" class="stack-form" method="dialog">
+              <div class="dialog-header">
+                <h3>Добавить строку</h3>
+                <button
+                  class="secondary dialog-close-btn"
+                  data-dialog-cancel
+                  type="button"
+                  aria-label="Закрыть"
+                >×</button>
+              </div>
+              <input name="estimateId" type="hidden" />
+              <div class="estimate-add-line-choices">
+                <button class="secondary estimate-add-line-choice" data-add-line-choice="gsn" type="button">
+                  Позиция из базы
+                </button>
+                <button class="secondary estimate-add-line-choice" data-add-line-choice="userPosition" type="button">
+                  Позиция пользователя
+                </button>
+                <button class="secondary estimate-add-line-choice" data-add-line-choice="section" type="button">
+                  Раздел
+                </button>
+                <button class="secondary estimate-add-line-choice" data-add-line-choice="subsection" type="button">
+                  Подраздел
+                </button>
+              </div>
+            </form>
+          </dialog>
+
           <dialog id="estimateLineDialog" class="construction-dialog">
             <form id="estimateLineDialogForm" class="stack-form" method="dialog">
-              <h3>Добавить строку сметы</h3>
+              <h3 id="estimateLineDialogTitle">Редактировать строку сметы</h3>
               <input name="estimateId" type="hidden" />
-              <label>
-                Тип строки
-                <select name="lineType" required>
-                  <option value="section">Раздел</option>
-                  <option value="subsection">Подраздел</option>
-                  <option value="position">Позиция</option>
-                </select>
+              <input name="lineId" type="hidden" />
+              <input name="lineType" type="hidden" />
+              <div class="estimate-line-type-readonly hidden" data-estimate-line-type-readonly>
+                <span class="muted">Тип строки</span>
+                <strong id="estimateLineTypeLabel"></strong>
+              </div>
+              <label class="hidden" data-estimate-line-field="code">
+                Шифр
+                <input name="code" autocomplete="off" />
               </label>
               <label>
                 Наименование
-                <input name="name" required />
+                <input name="name" required autocomplete="off" />
+              </label>
+              <label class="hidden" data-estimate-line-field="unit">
+                Ед. изм.
+                <input name="unit" autocomplete="off" />
+              </label>
+              <label class="hidden" data-estimate-line-field="quantity">
+                Объем
+                <input name="quantity" autocomplete="off" inputmode="decimal" />
+              </label>
+              <label class="hidden" data-estimate-line-field="unitPrice">
+                Стоимость ед.
+                <input name="unitPrice" autocomplete="off" inputmode="decimal" />
               </label>
               <div class="dialog-actions">
-                <button type="submit">Добавить</button>
+                <button id="estimateLineDialogSubmit" type="submit">Добавить</button>
+                <button class="secondary" data-dialog-cancel type="button">Отмена</button>
+              </div>
+            </form>
+          </dialog>
+
+          <dialog id="districtDialog" class="construction-dialog district-dialog">
+            <form id="districtDialogForm" class="stack-form" method="dialog">
+              <h3>Сметный район</h3>
+              <input name="estimateId" type="hidden" />
+              <label>
+                Поиск региона
+                <input id="districtRegionFilter" type="search" placeholder="Код или наименование" autocomplete="off" />
+              </label>
+              <div class="district-region-label muted">Классификатор регионов</div>
+              <div id="districtRegionList" class="district-region-list" role="listbox" aria-label="Классификатор регионов"></div>
+              <label>
+                Зона
+                <select name="zone" id="districtZoneSelect">
+                  <option value="">Не выбрана</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                  <option value="5">5</option>
+                  <option value="6">6</option>
+                  <option value="7">7</option>
+                  <option value="8">8</option>
+                  <option value="9">9</option>
+                  <option value="10">10</option>
+                  <option value="11">11</option>
+                </select>
+              </label>
+              <div class="dialog-actions dialog-actions-end">
+                <button type="submit">Выбрать</button>
                 <button class="secondary" data-dialog-cancel type="button">Отмена</button>
               </div>
             </form>
