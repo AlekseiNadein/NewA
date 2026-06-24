@@ -13,7 +13,6 @@ function readLoginDraft(storageKey) {
     return {
       companyName: String(parsed.companyName || ""),
       name: String(parsed.name || ""),
-      password: String(parsed.password || ""),
     };
   } catch {
     return null;
@@ -26,7 +25,6 @@ function saveLoginDraft(storageKey, data) {
     JSON.stringify({
       companyName: String(data.companyName || ""),
       name: String(data.name || ""),
-      password: String(data.password || ""),
     }),
   );
 }
@@ -39,15 +37,11 @@ function applyLoginDraft(form, storageKey) {
   }
   const companyInput = target.querySelector('[name="companyName"]');
   const nameInput = target.querySelector('[name="name"]');
-  const passwordInput = target.querySelector('[name="password"]');
   if (companyInput) {
     companyInput.value = draft.companyName;
   }
   if (nameInput) {
     nameInput.value = draft.name;
-  }
-  if (passwordInput) {
-    passwordInput.value = draft.password;
   }
 }
 
@@ -83,7 +77,6 @@ function formData(form) {
 }
 
 const state = {
-  token: localStorage.getItem("nav_token") || "",
   me: null,
   authScreen: "login",
   section: "base",
@@ -126,6 +119,7 @@ const state = {
   estimateLocks: {},
   userPositions: [],
   addPrimitiveQuantities: {},
+  addPrimitiveSources: {},
   addLineTargetEstimateId: null,
   licenseBlocked: [],
   licenseHeld: [],
@@ -225,15 +219,15 @@ els.loginForm?.addEventListener("submit", async (event) => {
     const result = await api("/api/auth/login", {
       method: "POST",
       body: credentials,
-      skipAuth: true,
     });
     if (!result.access?.app) {
+      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
       throw new Error("Доступ к системе не открыт. Ожидайте подтверждения администратора");
     }
 
-    state.token = result.token;
     state.me = result.user;
-    localStorage.setItem("nav_token", state.token);
+    localStorage.removeItem("nav_token");
+    localStorage.removeItem("nav_admin_token");
     await loadApp();
     showMessage("Вход выполнен", "ok");
   } catch (error) {
@@ -258,7 +252,6 @@ els.registerForm?.addEventListener("submit", async (event) => {
     const result = await api("/api/auth/register", {
       method: "POST",
       body: data,
-      skipAuth: true,
     });
     els.registerForm.reset();
     showAuthScreen("login");
@@ -276,21 +269,26 @@ els.logoutButton?.addEventListener("click", async () => {
   stopEstimateLockSync();
   await releaseLicenseSessions();
   stopLicenseSessionSync();
-  state.token = "";
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {
+    // ignore logout errors
+  }
   state.me = null;
   state.estimateLocks = {};
   localStorage.removeItem("nav_token");
+  localStorage.removeItem("nav_admin_token");
   renderShell();
   applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
 });
 
 window.addEventListener("beforeunload", () => {
-  if (!state.token) {
+  if (!state.me) {
     return;
   }
   fetch("/api/license-sessions", {
     method: "DELETE",
-    headers: { Authorization: `Bearer ${state.token}` },
+    credentials: "include",
     keepalive: true,
   });
   for (const estimate of state.openEstimates) {
@@ -299,7 +297,7 @@ window.addEventListener("beforeunload", () => {
     }
     fetch(`/api/estimates/${estimate.id}/lock`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${state.token}` },
+      credentials: "include",
       keepalive: true,
     });
   }
@@ -469,15 +467,7 @@ els.gsnSupplementSelect.addEventListener("change", () => {
 });
 
 els.gsnTree.addEventListener("click", async (event) => {
-  const bufferButton = event.target.closest("[data-gsn-buffer]");
-  if (bufferButton) {
-    addNodeToBuffer(decodeNodeAction(bufferButton.dataset.gsnBuffer));
-    return;
-  }
-
-  const estimateButton = event.target.closest("[data-gsn-estimate]");
-  if (estimateButton) {
-    addNodeToOnlyEstimate(decodeNodeAction(estimateButton.dataset.gsnEstimate));
+  if (handleAddPrimitiveClick(event, els.gsnTree, onAddPrimitiveQuantityChange)) {
     return;
   }
 
@@ -518,6 +508,14 @@ els.gsnTree.addEventListener("click", async (event) => {
   } finally {
     button.disabled = false;
   }
+});
+
+els.gsnTree.addEventListener("focusout", (event) => {
+  handleAddPrimitiveQuantityBlur(event, els.gsnTree, onAddPrimitiveQuantityChange);
+});
+
+els.gsnTree.addEventListener("keydown", (event) => {
+  handleAddPrimitiveQuantityKeydown(event, els.gsnTree, onAddPrimitiveQuantityChange);
 });
 
 els.editorSubitems.addEventListener("click", (event) => {
@@ -742,12 +740,6 @@ els.userPositionDialogForm.querySelector("[data-dialog-cancel]").addEventListene
 });
 
 async function loadApp() {
-  if (!state.token) {
-    renderShell();
-    applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
-    return;
-  }
-
   try {
     const me = await api("/api/me");
     state.me = me.user;
@@ -766,15 +758,20 @@ async function loadApp() {
     stopEstimateLockSync();
     const message = error?.message || "Не удалось загрузить приложение";
     const unauthorized = /HTTP 401|HTTP 403|Нет доступа/i.test(message);
+    const hadSession = Boolean(state.me);
     if (unauthorized) {
-      state.token = "";
       state.me = null;
       state.estimateLocks = {};
       localStorage.removeItem("nav_token");
+      localStorage.removeItem("nav_admin_token");
     }
     renderShell();
     applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
-    showMessage(unauthorized ? "Сессия истекла, войдите снова" : message, "error");
+    if (unauthorized && hadSession) {
+      showMessage("Сессия истекла, войдите снова", "error");
+    } else if (!unauthorized) {
+      showMessage(message, "error");
+    }
   }
 }
 
@@ -816,7 +813,7 @@ function userRoleLabel(user) {
 }
 
 function renderShell() {
-  const loggedIn = Boolean(state.token && state.me);
+  const loggedIn = Boolean(state.me);
   els.loginView.classList.toggle("hidden", loggedIn || state.authScreen !== "login");
   els.registerView.classList.toggle("hidden", loggedIn || state.authScreen !== "register");
   els.appView.classList.toggle("hidden", !loggedIn);
@@ -955,7 +952,7 @@ function renderLicenseBlockMessage(section, blockedItems) {
 }
 
 async function releaseLicenseSessions() {
-  if (!state.token) {
+  if (!state.me) {
     state.licenseBlocked = [];
     state.licenseHeld = [];
     return;
@@ -964,7 +961,7 @@ async function releaseLicenseSessions() {
   try {
     await fetch("/api/license-sessions", {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${state.token}` },
+      credentials: "include",
     });
   } catch {
     // ignore release errors on logout/navigation
@@ -975,7 +972,7 @@ async function releaseLicenseSessions() {
 
 async function syncLicenseSessionsForCurrentSection() {
   const subsectionIds = getRequiredLicenseSubsectionIds();
-  if (!state.token) {
+  if (!state.me) {
     return [];
   }
 
@@ -989,8 +986,8 @@ async function syncLicenseSessionsForCurrentSection() {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${state.token}`,
       },
+      credentials: "include",
       body: JSON.stringify({ subsectionIds }),
     });
     const payload = await response.json().catch(() => ({}));
@@ -1112,6 +1109,77 @@ function refreshUserPositionsPanelIfVisible() {
   if (state.section === "base" && state.baseTab === "userPositions") {
     renderUserPositionsPanel();
   }
+}
+
+function gsnBufferKey(nodeCode) {
+  return `buffer:gsn:${state.gsnSupplement}:${nodeCode}`;
+}
+
+function gsnEstimateKey(nodeCode) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate) {
+    return null;
+  }
+  return `estimate:${estimate.id}:gsn:${nodeCode}`;
+}
+
+function registerAddPrimitiveSource(key, node) {
+  state.addPrimitiveSources[key] = {
+    kind: "gsn",
+    node: {
+      code: node.code,
+      originalCode: node.originalCode || "",
+      name: node.name || "",
+      unit: node.unit || "",
+    },
+  };
+}
+
+function getAddPrimitiveGSNNode(key) {
+  return state.addPrimitiveSources[key]?.node || null;
+}
+
+function renderGSNLeafPrimitives(node) {
+  const bufferKey = gsnBufferKey(node.code);
+  registerAddPrimitiveSource(bufferKey, node);
+  const bufferQuantity = state.addPrimitiveQuantities[bufferKey] ?? null;
+
+  const estimateKey = gsnEstimateKey(node.code);
+  if (estimateKey) {
+    registerAddPrimitiveSource(estimateKey, node);
+  }
+  const estimateQuantity = estimateKey ? (state.addPrimitiveQuantities[estimateKey] ?? null) : null;
+
+  return `
+    <div class="gsn-leaf-primitives">
+      <div class="gsn-leaf-primitives-row">${renderAddPrimitive(bufferKey, "В буфер", bufferQuantity)}</div>
+      ${
+        estimateKey
+          ? `<div class="gsn-leaf-primitives-row">${renderAddPrimitive(estimateKey, "В смету", estimateQuantity)}</div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function refreshGSNLeafActionsInDOM() {
+  if (state.section !== "base" || state.baseTab !== "gsn") {
+    return;
+  }
+
+  els.gsnTree.querySelectorAll(".gsn-node-leaf[data-gsn-node]").forEach((article) => {
+    let node;
+    try {
+      node = decodeNodeAction(article.dataset.gsnNode);
+    } catch {
+      return;
+    }
+
+    const actions = article.querySelector(".gsn-leaf-actions");
+    if (actions) {
+      actions.innerHTML = renderGSNLeafPrimitives(node);
+    }
+  });
 }
 
 function renderUserPositionsPanel() {
@@ -1419,7 +1487,7 @@ function stopEstimateLockSync() {
 }
 
 async function refreshEstimateLocks() {
-  if (!state.token) {
+  if (!state.me) {
     return;
   }
 
@@ -1445,13 +1513,12 @@ async function refreshEstimateLocks() {
 }
 
 async function acquireEstimateLock(estimateId) {
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${state.token}`,
-  };
   const response = await fetch(`/api/estimates/${estimateId}/lock`, {
     method: "PUT",
-    headers,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    credentials: "include",
   });
   const isJSON = response.headers.get("content-type")?.includes("application/json");
   const payload = isJSON ? await response.json() : null;
@@ -1473,7 +1540,7 @@ async function acquireEstimateLock(estimateId) {
 }
 
 async function releaseEstimateLock(estimateId) {
-  if (!state.token || !isPersistedEstimateId(estimateId)) {
+  if (!state.me || !isPersistedEstimateId(estimateId)) {
     return;
   }
 
@@ -1509,7 +1576,7 @@ async function restoreOpenEstimateLocks() {
 }
 
 async function refreshOwnedEstimateLocks() {
-  if (!state.token) {
+  if (!state.me) {
     return;
   }
 
@@ -1599,7 +1666,7 @@ function renderEditorSubitems() {
 }
 
 async function loadGSNPanel() {
-  if (!state.token || state.baseTab !== "gsn") {
+  if (!state.me || state.baseTab !== "gsn") {
     return;
   }
 
@@ -1613,7 +1680,7 @@ async function loadGSNPanel() {
 }
 
 async function loadGSNSupplements() {
-  if (!state.token || state.gsnSupplementsLoaded) {
+  if (!state.me || state.gsnSupplementsLoaded) {
     return;
   }
 
@@ -1675,7 +1742,7 @@ function renderGSNSupplementSelect() {
 }
 
 async function loadGSNBaseInfo() {
-  if (!state.token || state.gsnBaseInfoLoaded || !state.gsnSupplement) {
+  if (!state.me || state.gsnBaseInfoLoaded || !state.gsnSupplement) {
     return;
   }
 
@@ -1708,7 +1775,7 @@ function renderGSNSearchForm() {
 }
 
 async function loadGSNSearch(options = {}) {
-  if (!state.token || state.baseTab !== "gsn" || !state.gsnSupplement || !state.gsnSearch) {
+  if (!state.me || state.baseTab !== "gsn" || !state.gsnSupplement || !state.gsnSearch) {
     return;
   }
   if (state.gsnLoaded && !options.force) {
@@ -1776,10 +1843,9 @@ function renderGSNSearchNode(entry) {
   const encodedNode = encodeNodeAction(node);
 
   if (!node.hasChildren && !isPdf) {
-    const canAddToEstimate = Boolean(getAddLineTargetEstimate());
     const originalCode = gsnLeafOriginalCode(node);
     return `
-      <article class="tree-node gsn-node gsn-node-leaf">
+      <article class="tree-node gsn-node gsn-node-leaf" data-gsn-node="${encodedNode}">
         <header>
           <div class="tree-title">
             ${toggle}
@@ -1787,10 +1853,7 @@ function renderGSNSearchNode(entry) {
               <div class="gsn-leaf-cell gsn-leaf-code" title="${escapeHTML(originalCode)}">${escapeHTML(originalCode || "-")}</div>
               <div class="gsn-leaf-cell gsn-leaf-name" title="${escapeHTML(node.name || "")}">${escapeHTML(node.name || "")}</div>
               <div class="gsn-leaf-cell gsn-leaf-unit" title="${escapeHTML(node.unit || "")}">${escapeHTML(node.unit || "-")}</div>
-              <div class="gsn-leaf-cell gsn-leaf-actions">
-                <button class="micro-button secondary" data-gsn-buffer="${encodedNode}" type="button">В буфер</button>
-                ${canAddToEstimate ? `<button class="micro-button" data-gsn-estimate="${encodedNode}" type="button">В смету</button>` : ""}
-              </div>
+              <div class="gsn-leaf-cell gsn-leaf-actions">${renderGSNLeafPrimitives(node)}</div>
             </div>
           </div>
         </header>
@@ -1828,7 +1891,7 @@ function renderGSNSearchNode(entry) {
 }
 
 async function loadGSNRoot(options = {}) {
-  if (!state.token || state.baseTab !== "gsn" || !state.gsnSupplement) {
+  if (!state.me || state.baseTab !== "gsn" || !state.gsnSupplement) {
     return;
   }
   if (state.gsnSearch) {
@@ -1876,10 +1939,9 @@ function renderGSNNode(node) {
     : `<span class="tree-toggle-placeholder"></span>`;
   const encodedNode = encodeNodeAction(node);
   if (!node.hasChildren && !isPdf) {
-    const canAddToEstimate = Boolean(getAddLineTargetEstimate());
     const originalCode = gsnLeafOriginalCode(node);
     return `
-      <article class="tree-node gsn-node gsn-node-leaf">
+      <article class="tree-node gsn-node gsn-node-leaf" data-gsn-node="${encodedNode}">
         <header>
           <div class="tree-title">
             ${toggle}
@@ -1887,10 +1949,7 @@ function renderGSNNode(node) {
               <div class="gsn-leaf-cell gsn-leaf-code" title="${escapeHTML(originalCode)}">${escapeHTML(originalCode || "-")}</div>
               <div class="gsn-leaf-cell gsn-leaf-name" title="${escapeHTML(node.name || "")}">${escapeHTML(node.name || "")}</div>
               <div class="gsn-leaf-cell gsn-leaf-unit" title="${escapeHTML(node.unit || "")}">${escapeHTML(node.unit || "-")}</div>
-              <div class="gsn-leaf-cell gsn-leaf-actions">
-                <button class="micro-button secondary" data-gsn-buffer="${encodedNode}" type="button">В буфер</button>
-                ${canAddToEstimate ? `<button class="micro-button" data-gsn-estimate="${encodedNode}" type="button">В смету</button>` : ""}
-              </div>
+              <div class="gsn-leaf-cell gsn-leaf-actions">${renderGSNLeafPrimitives(node)}</div>
             </div>
           </div>
         </header>
@@ -2247,7 +2306,7 @@ function renderFGISPricesPanelContent() {
 }
 
 async function loadFGISRows(options = {}) {
-  if (!state.token || !state.fgisSetId) {
+  if (!state.me || !state.fgisSetId) {
     state.fgisRows = [];
     state.fgisStats = null;
     state.fgisFilteredTotal = 0;
@@ -2294,7 +2353,7 @@ async function loadFGISRows(options = {}) {
 }
 
 async function loadFGISPricesPanel(force = false) {
-  if (!state.token) {
+  if (!state.me) {
     els.fgisPricesPanel.innerHTML = `<p class="muted">Войдите в систему для просмотра сметных цен и индексов.</p>`;
     return;
   }
@@ -2577,9 +2636,16 @@ function applyRecordDetailToEstimateItem(item, record) {
   }
   if (record.code) {
     item.recordCode = record.code;
+    item.code = record.code;
   }
   if (record.originalCode) {
     item.originalCode = record.originalCode;
+  }
+  if (record.name) {
+    item.name = record.name;
+  }
+  if (record.unit) {
+    item.unit = record.unit;
   }
   item.isWork = record.isWork !== false;
   if (!item.isWork) {
@@ -3549,6 +3615,7 @@ async function addBufferToEstimate(estimateId) {
         name: bufferItem.name || "",
         unit: bufferItem.unit || "",
       };
+      const quantity = Number(bufferItem.quantity || 1);
       const records = await fetchGSNHierarchyRecords(
         node.code,
         estimate.fgisSetId || "",
@@ -3564,10 +3631,19 @@ async function addBufferToEstimate(estimateId) {
             code: node.code || "",
             name: node.name || "",
             unit: node.unit || "",
-            quantity: 1,
+            quantity,
             unitPrice: 0,
             total: 0,
           };
+
+      if (record) {
+        item.quantity = quantity;
+        item.total = quantity * Number(item.unitPrice || 0);
+      }
+      if (bufferItem.source === "gsn") {
+        item.source = "gsn";
+        item.sourceId = node.code;
+      }
 
       estimate.items.push(item);
       if (item.isWork !== false && item.children?.length) {
@@ -3611,6 +3687,7 @@ function buildEditorEstimateFromSource(sourceEstimate) {
     items: (sourceEstimate.items || []).map((item) => ({
       id: item.id,
       type: item.type || "position",
+      source: item.source || "",
       code: item.code || "",
       recordCode: item.code || "",
       originalCode: item.originalCode || "",
@@ -3644,11 +3721,171 @@ function createEditorEstimate() {
   showMessage("Новая смета открыта в редакторе", "ok");
 }
 
-function addNodeToBuffer(node) {
-  state.buffer.push(editorItemFromNode(node));
+function editorItemFromGSNNode(node, quantity) {
+  return {
+    code: node.code,
+    originalCode: node.originalCode || "",
+    name: node.name || "",
+    unit: node.unit || "",
+    quantity: Number(quantity || 1),
+    source: "gsn",
+    sourceId: node.code,
+  };
+}
+
+function upsertGSNInBuffer(node, quantity, options = {}) {
+  const item = editorItemFromGSNNode(node, quantity);
+  const existingIndex = state.buffer.findIndex(
+    (bufferItem) => bufferItem.source === "gsn" && bufferItem.sourceId === node.code,
+  );
+  const isNew = existingIndex < 0;
+
+  if (existingIndex >= 0) {
+    state.buffer[existingIndex] = item;
+  } else {
+    state.buffer.push(item);
+  }
+
   saveEditorState();
-  renderEditor();
-  showMessage("Позиция добавлена в буфер", "ok");
+  if (state.section === "editor" && state.editorTab === "buffer") {
+    renderEditor();
+  }
+
+  if (isNew && options.notify !== false) {
+    showMessage("Позиция добавлена в буфер", "ok");
+  }
+}
+
+function removeGSNFromBuffer(nodeCode) {
+  let existingIndex = -1;
+  for (let index = state.buffer.length - 1; index >= 0; index -= 1) {
+    const bufferItem = state.buffer[index];
+    if (bufferItem.source === "gsn" && bufferItem.sourceId === nodeCode) {
+      existingIndex = index;
+      break;
+    }
+  }
+
+  if (existingIndex < 0) {
+    return;
+  }
+
+  state.buffer.splice(existingIndex, 1);
+  saveEditorState();
+  if (state.section === "editor" && state.editorTab === "buffer") {
+    renderEditor();
+  }
+}
+
+async function upsertGSNInEstimate(node, quantity, options = {}) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate) {
+    return;
+  }
+
+  if (!estimate.items) {
+    estimate.items = [];
+  }
+
+  const existingIndex = estimate.items.findIndex(
+    (item) => item.source === "gsn" && item.sourceId === node.code,
+  );
+
+  if (existingIndex >= 0) {
+    const item = estimate.items[existingIndex];
+    const qty = Number(quantity || 1);
+    item.quantity = qty;
+    item.total = qty * Number(item.unitPrice || 0);
+    saveEditorState();
+    await persistOpenEstimate(estimate.id);
+    if (state.section === "editor" && state.editorTab === estimate.id) {
+      renderEditor();
+    }
+    return;
+  }
+
+  if (options.deactivated) {
+    return;
+  }
+
+  try {
+    const records = await fetchGSNHierarchyRecords(node.code, estimate.fgisSetId || "", estimate.district || "");
+    const record = records[0];
+    const lineId = `line_${Date.now()}`;
+    const item = record
+      ? estimateLineFromGSNRecord(record, node, lineId)
+      : {
+          id: lineId,
+          type: "position",
+          code: node.code || "",
+          name: node.name || "",
+          unit: node.unit || "",
+          quantity: 1,
+          unitPrice: 0,
+          total: 0,
+        };
+
+    const qty = Number(quantity || 1);
+    item.quantity = qty;
+    item.total = qty * Number(item.unitPrice || 0);
+    item.source = "gsn";
+    item.sourceId = node.code;
+
+    estimate.items.push(item);
+    if (item.isWork !== false && item.children?.length) {
+      getExpandedLineIds(estimate.id).add(item.id);
+      state.estimateLinesExpanded[estimate.id] = [...getExpandedLineIds(estimate.id)];
+      saveEstimateLinesExpanded();
+    }
+
+    saveEditorState();
+    await persistOpenEstimate(estimate.id);
+    if (state.section === "editor" && state.editorTab === estimate.id) {
+      renderEditor();
+    }
+    if (options.notify !== false) {
+      showMessage("Позиция добавлена в смету", "ok");
+    }
+  } catch (error) {
+    showMessage(error.message || "Не удалось добавить позицию", "error");
+  }
+}
+
+async function removeGSNFromEstimate(nodeCode) {
+  const estimate = getAddLineTargetEstimate();
+  if (!estimate?.items?.length) {
+    return;
+  }
+
+  let existingIndex = -1;
+  for (let index = estimate.items.length - 1; index >= 0; index -= 1) {
+    const item = estimate.items[index];
+    if (item.source === "gsn" && item.sourceId === nodeCode) {
+      existingIndex = index;
+      break;
+    }
+  }
+
+  if (existingIndex < 0) {
+    return;
+  }
+
+  const [line] = estimate.items.splice(existingIndex, 1);
+  const expanded = getExpandedLineIds(estimate.id);
+  if (expanded.delete(line.id)) {
+    state.estimateLinesExpanded[estimate.id] = [...expanded];
+    saveEstimateLinesExpanded();
+  }
+
+  saveEditorState();
+  await persistOpenEstimate(estimate.id);
+  if (state.section === "editor" && state.editorTab === estimate.id) {
+    renderEditor();
+  }
+}
+
+function addNodeToBuffer(node) {
+  upsertGSNInBuffer(node, addPrimitiveInitialQuantity, { notify: true });
 }
 
 function editorItemFromUserPosition(position, quantity) {
@@ -3825,6 +4062,32 @@ function parseUserPositionEstimateKey(key) {
 }
 
 function onAddPrimitiveQuantityChange(key, quantity, options = {}) {
+  if (key.startsWith("buffer:gsn:")) {
+    const node = getAddPrimitiveGSNNode(key);
+    if (!node) {
+      return;
+    }
+    if (options.deactivated) {
+      removeGSNFromBuffer(node.code);
+      return;
+    }
+    upsertGSNInBuffer(node, quantity, options);
+    return;
+  }
+
+  if (key.includes(":gsn:")) {
+    const node = getAddPrimitiveGSNNode(key);
+    if (!node) {
+      return;
+    }
+    if (options.deactivated) {
+      void removeGSNFromEstimate(node.code);
+      return;
+    }
+    void upsertGSNInEstimate(node, quantity, options);
+    return;
+  }
+
   if (key.startsWith("buffer:user-position:")) {
     const positionId = key.slice("buffer:user-position:".length);
     if (options.deactivated) {
@@ -3846,47 +4109,7 @@ function onAddPrimitiveQuantityChange(key, quantity, options = {}) {
 }
 
 function addNodeToOnlyEstimate(node) {
-  const estimate = getAddLineTargetEstimate();
-  if (!estimate) {
-    return;
-  }
-  if (!estimate.items) {
-    estimate.items = [];
-  }
-
-  void (async () => {
-    try {
-      const records = await fetchGSNHierarchyRecords(node.code, estimate.fgisSetId || "", estimate.district || "");
-      const record = records[0];
-      const lineId = `line_${Date.now()}`;
-      const item = record
-        ? estimateLineFromGSNRecord(record, node, lineId)
-        : {
-            id: lineId,
-            type: "position",
-            code: node.code || "",
-            name: node.name || "",
-            unit: node.unit || "",
-            quantity: 1,
-            unitPrice: 0,
-            total: 0,
-          };
-
-      estimate.items.push(item);
-      if (item.isWork !== false && item.children?.length) {
-        getExpandedLineIds(estimate.id).add(item.id);
-        state.estimateLinesExpanded[estimate.id] = [...getExpandedLineIds(estimate.id)];
-        saveEstimateLinesExpanded();
-      }
-
-      saveEditorState();
-      await persistOpenEstimate(estimate.id);
-      renderEditor();
-      showMessage("Позиция добавлена в смету", "ok");
-    } catch (error) {
-      showMessage(error.message || "Не удалось добавить позицию", "error");
-    }
-  })();
+  void upsertGSNInEstimate(node, addPrimitiveInitialQuantity, { notify: true });
 }
 
 function editorItemFromNode(node) {
@@ -3903,6 +4126,7 @@ function saveEditorState() {
   sessionStorage.setItem("nav_editor_estimates", JSON.stringify(state.openEstimates));
   sessionStorage.setItem("nav_editor_tab", state.editorTab);
   refreshUserPositionsPanelIfVisible();
+  refreshGSNLeafActionsInDOM();
 }
 
 function isPersistedEstimateId(estimateId) {
@@ -3917,21 +4141,34 @@ function isPersistedEstimateId(estimateId) {
 }
 
 function estimateItemsForApi(items) {
-  return (items || []).map((item) => ({
-    id: item.id || "",
-    type: item.type || "position",
-    code: estimateRecordFetchCode(item) || item.code || "",
-    originalCode: String(item.originalCode || "").trim(),
-    name: item.name || "",
-    quantity: Number(item.quantity || 0),
-    unit: item.unit || "",
-    unitPrice: Number(item.unitPrice || 0),
-    total: Number(item.total ?? Number(item.quantity || 0) * Number(item.unitPrice || 0)),
-  }));
+  return (items || []).map((item) => {
+    if (item.source === "gsn") {
+      return {
+        id: item.id || "",
+        type: item.type || "position",
+        source: "gsn",
+        code: estimateRecordFetchCode(item) || item.code || "",
+        quantity: Number(item.quantity || 0),
+      };
+    }
+
+    return {
+      id: item.id || "",
+      type: item.type || "position",
+      source: item.source || "",
+      code: estimateRecordFetchCode(item) || item.code || "",
+      originalCode: String(item.originalCode || "").trim(),
+      name: item.name || "",
+      quantity: Number(item.quantity || 0),
+      unit: item.unit || "",
+      unitPrice: Number(item.unitPrice || 0),
+      total: Number(item.total ?? Number(item.quantity || 0) * Number(item.unitPrice || 0)),
+    };
+  });
 }
 
 async function persistOpenEstimate(estimateId) {
-  if (!state.token || !isPersistedEstimateId(estimateId)) {
+  if (!state.me || !isPersistedEstimateId(estimateId)) {
     return;
   }
 
@@ -3965,6 +4202,7 @@ async function persistOpenEstimate(estimateId) {
           district: editorEstimate.district ?? sourceEstimate?.district ?? "",
           fgisSetId: editorEstimate.fgisSetId ?? sourceEstimate?.fgisSetId ?? "",
           status: editorEstimate.status || sourceEstimate?.status || "draft",
+          total: estimateGrandTotal(editorEstimate.items),
           items: estimateItemsForApi(editorEstimate.items),
         },
       });
@@ -4564,9 +4802,7 @@ async function openGSNPdf(code, title = "") {
 
   try {
     const response = await fetch(`/api/gsn/document?${params.toString()}`, {
-      headers: {
-        Authorization: `Bearer ${state.token}`,
-      },
+      credentials: "include",
     });
 
     if (!response.ok) {
@@ -4905,13 +5141,10 @@ async function api(path, options = {}) {
     ...(options.headers || {}),
   };
 
-  if (!options.skipAuth && state.token) {
-    headers.Authorization = `Bearer ${state.token}`;
-  }
-
   const response = await fetch(path, {
     method: options.method || "GET",
     headers,
+    credentials: "include",
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 

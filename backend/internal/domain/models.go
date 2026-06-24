@@ -106,6 +106,7 @@ const (
 type EstimateItem struct {
 	ID           string  `json:"id"`
 	Type         string  `json:"type"`
+	Source       string  `json:"source,omitempty"`
 	Code         string  `json:"code"`
 	OriginalCode string  `json:"originalCode,omitempty"`
 	Name         string  `json:"name"`

@@ -14,7 +14,6 @@
       return {
         companyName: String(parsed.companyName || ""),
         name: String(parsed.name || ""),
-        password: String(parsed.password || ""),
       };
     } catch {
       return null;
@@ -31,7 +30,6 @@
       JSON.stringify({
         companyName: String(data.companyName || ""),
         name: String(data.name || ""),
-        password: String(data.password || ""),
       }),
     );
   }
@@ -44,15 +42,11 @@
     }
     const companyInput = target.querySelector('[name="companyName"]');
     const nameInput = target.querySelector('[name="name"]');
-    const passwordInput = target.querySelector('[name="password"]');
     if (companyInput) {
       companyInput.value = draft.companyName;
     }
     if (nameInput) {
       nameInput.value = draft.name;
-    }
-    if (passwordInput) {
-      passwordInput.value = draft.password;
     }
   }
 
@@ -70,7 +64,10 @@
 
     form.addEventListener("input", scheduleSave);
     form.addEventListener("change", scheduleSave);
-    form.addEventListener("submit", () => saveDraft(form), true);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveDraft(form);
+    }, true);
     applyDraft(form);
     window.requestAnimationFrame(() => applyDraft(form));
   }

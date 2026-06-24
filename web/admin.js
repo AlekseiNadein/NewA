@@ -11,10 +11,9 @@ import {
   setupLoginDraftAutosave,
 } from "./shared.js";
 
-const TOKEN_KEY = "nav_admin_token";
+const api = createApi();
 
 const state = {
-  token: localStorage.getItem(TOKEN_KEY) || "",
   me: null,
   companies: [],
   adminUsers: [],
@@ -24,7 +23,6 @@ const state = {
   adminLicensesCompanyId: "",
 };
 
-const api = createApi(() => state.token);
 const showMessage = bindMessage(document.querySelector("#message"));
 
 const els = {
@@ -70,16 +68,16 @@ els.loginForm?.addEventListener("submit", async (event) => {
     const result = await api("/api/auth/login", {
       method: "POST",
       body: credentials,
-      skipAuth: true,
     });
 
     if (!result.access?.admin) {
+      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
       throw new Error("У этой учётной записи нет прав администратора");
     }
 
-    state.token = result.token;
     state.me = result.user;
-    localStorage.setItem(TOKEN_KEY, state.token);
+    localStorage.removeItem("nav_admin_token");
+    localStorage.removeItem("nav_token");
     await loadAdmin();
     showMessage("Вход выполнен", "ok");
   } catch (error) {
@@ -92,10 +90,15 @@ setupLoginDraftAutosave(els.loginForm, ADMIN_LOGIN_DRAFT_KEY);
 applyLoginDraft(els.loginForm, ADMIN_LOGIN_DRAFT_KEY);
 void loadAdmin();
 
-els.logoutButton?.addEventListener("click", () => {
-  state.token = "";
+els.logoutButton?.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {
+    // ignore logout errors
+  }
   state.me = null;
-  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem("nav_admin_token");
+  localStorage.removeItem("nav_token");
   renderShell();
   applyLoginDraft(els.loginForm, ADMIN_LOGIN_DRAFT_KEY);
 });
@@ -201,11 +204,6 @@ els.adminUserForm.addEventListener("submit", async (event) => {
 });
 
 async function loadAdmin() {
-  if (!state.token) {
-    renderShell();
-    return;
-  }
-
   try {
     const me = await api("/api/me");
     state.me = me.user;
@@ -216,12 +214,19 @@ async function loadAdmin() {
     state.companies = await api("/api/companies");
     await refreshAdminUsers();
     renderShell();
-  } catch {
-    state.token = "";
+  } catch (error) {
+    const message = error?.message || "";
+    const hadSession = Boolean(state.me);
     state.me = null;
-    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem("nav_admin_token");
+    localStorage.removeItem("nav_token");
     renderShell();
-    showMessage("Сессия истекла или нет прав, войдите снова", "error");
+    applyLoginDraft(els.loginForm, ADMIN_LOGIN_DRAFT_KEY);
+    if (hadSession) {
+      showMessage("Сессия истекла или нет прав, войдите снова", "error");
+    } else if (/Нет прав администратора/i.test(message)) {
+      showMessage(message, "error");
+    }
   }
 }
 
@@ -334,7 +339,7 @@ function renderAdminNav() {
 }
 
 function renderShell() {
-  const loggedIn = Boolean(state.token && state.me);
+  const loggedIn = Boolean(state.me);
   els.loginView.classList.toggle("hidden", loggedIn);
   els.adminView.classList.toggle("hidden", !loggedIn);
   els.logoutButton.classList.toggle("hidden", !loggedIn);

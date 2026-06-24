@@ -6,6 +6,24 @@
     <title>Администрирование — ABC-RU WEB</title>
     <link rel="icon" href="/Admin_Icon.ico" type="image/x-icon" />
     <link rel="stylesheet" href="/styles.css" />
+    <script>
+      (function () {
+        try {
+          var url = new URL(window.location.href);
+          var dirty = false;
+          ["password", "passwordConfirm", "companyName", "name", "email"].forEach(function (key) {
+            if (url.searchParams.has(key)) {
+              url.searchParams.delete(key);
+              dirty = true;
+            }
+          });
+          if (dirty) {
+            var query = url.searchParams.toString();
+            history.replaceState(null, "", url.pathname + (query ? "?" + query : "") + url.hash);
+          }
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body>
     <main class="shell">
@@ -26,7 +44,7 @@
       <section id="loginView" class="card login-card">
         <h2>Вход администратора</h2>
         <p class="muted">Компания, ФИО и пароль учётной записи с правами администратора.</p>
-        <form id="loginForm" class="grid-form">
+        <form id="loginForm" class="grid-form" method="post" action="#" onsubmit="return false">
           <label>
             Компания
             <input name="companyName" type="text" autocomplete="organization" required />
@@ -185,7 +203,7 @@
       <div id="message" class="message hidden"></div>
     </main>
 
-    <script src="/admin-login-draft.js?v=20260622c"></script>
-    <script type="module" src="/admin.js?v=20260622c"></script>
+    <script src="/admin-login-draft.js?v=20260622h"></script>
+    <script type="module" src="/admin.js?v=20260622h"></script>
   </body>
 </html>

@@ -891,7 +891,7 @@ p {
   min-width: 0;
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(9rem, 1.35fr) minmax(14rem, 3fr) minmax(4.5rem, 0.8fr) auto;
+  grid-template-columns: minmax(9rem, 1.35fr) minmax(14rem, 3fr) minmax(4.5rem, 0.8fr) minmax(7rem, auto);
   gap: 0.45rem;
   align-items: center;
 }
@@ -921,15 +921,42 @@ p {
 }
 
 .gsn-leaf-actions {
-  display: flex;
-  gap: 0.3rem;
-  justify-content: flex-end;
-  white-space: nowrap;
+  min-width: 0;
 }
 
-.gsn-node-leaf .micro-button {
+.gsn-leaf-primitives {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.25rem;
+}
+
+.gsn-leaf-primitives-row {
+  display: flex;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+.gsn-leaf-actions .add-primitive {
   font-size: 0.72rem;
-  padding: 0.22rem 0.45rem;
+  padding: 0.28rem 0.38rem;
+}
+
+.gsn-leaf-actions .add-primitive-stepper {
+  gap: 0.15rem;
+}
+
+.gsn-leaf-actions .add-primitive-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  font-size: 0.88rem;
+}
+
+.gsn-leaf-actions .add-primitive-qty {
+  width: 2.75rem;
+  height: 1.5rem;
+  padding: 0 0.2rem;
+  font-size: 0.76rem;
 }
 
 .gsn-supplement-bar {

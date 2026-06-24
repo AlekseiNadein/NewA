@@ -47,6 +47,7 @@ func NewServer(store *store.FileStore, authService *auth.Service, gsnService *gs
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/auth/login", s.handleLogin)
+	mux.HandleFunc("/api/auth/logout", s.handleLogout)
 	mux.HandleFunc("/api/auth/register", s.handleRegister)
 	mux.Handle("/api/me", s.withAuth(http.HandlerFunc(s.handleMe)))
 	mux.Handle("/api/companies", s.withAuth(http.HandlerFunc(s.handleCompanies)))
@@ -111,14 +112,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auth.SetSessionCookie(w, r, token)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token": token,
-		"user":  user,
+		"user": user,
 		"access": map[string]bool{
 			"app":   user.CanAccessApp(),
 			"admin": user.CanAccessAdmin(),
 		},
 	})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	auth.ClearSessionCookie(w, r)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -1140,9 +1156,9 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		token, err := auth.BearerToken(r.Header.Get("Authorization"))
+		token, err := auth.TokenFromRequest(r)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "missing bearer token")
+			writeError(w, http.StatusUnauthorized, "missing session")
 			return
 		}
 

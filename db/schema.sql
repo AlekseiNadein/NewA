@@ -129,6 +129,7 @@ CREATE TABLE app_estimate_lines (
     id TEXT PRIMARY KEY,
     estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
     line_type TEXT NOT NULL CHECK (line_type IN ('section', 'subsection', 'position')),
+    source TEXT NOT NULL DEFAULT '',
     code TEXT NOT NULL DEFAULT '',
     original_code TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,

@@ -1,18 +1,14 @@
-export function createApi(getToken) {
+export function createApi() {
   return async function api(path, options = {}) {
     const headers = {
       "Content-Type": "application/json",
       ...(options.headers || {}),
     };
 
-    const token = getToken();
-    if (!options.skipAuth && token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
     const response = await fetch(path, {
       method: options.method || "GET",
       headers,
+      credentials: "include",
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
 
@@ -45,7 +41,6 @@ export function readLoginDraft(storageKey) {
     return {
       companyName: String(parsed.companyName || ""),
       name: String(parsed.name || ""),
-      password: String(parsed.password || ""),
     };
   } catch {
     return null;
@@ -58,7 +53,6 @@ export function saveLoginDraft(storageKey, data) {
     JSON.stringify({
       companyName: String(data.companyName || ""),
       name: String(data.name || ""),
-      password: String(data.password || ""),
     }),
   );
 }
@@ -71,15 +65,11 @@ export function applyLoginDraft(form, storageKey) {
 
   const companyInput = form.querySelector('[name="companyName"]');
   const nameInput = form.querySelector('[name="name"]');
-  const passwordInput = form.querySelector('[name="password"]');
   if (companyInput) {
     companyInput.value = draft.companyName;
   }
   if (nameInput) {
     nameInput.value = draft.name;
-  }
-  if (passwordInput) {
-    passwordInput.value = draft.password;
   }
 }
 

@@ -109,6 +109,7 @@ type EstimateInput struct {
 	District    string                `json:"district"`
 	FgisSetID   string                `json:"fgisSetId"`
 	Status      domain.EstimateStatus `json:"status"`
+	Total       *float64              `json:"total,omitempty"`
 	Items       []domain.EstimateItem `json:"items"`
 }
 
@@ -1290,25 +1291,19 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 	}
 
 	items := make([]domain.EstimateItem, 0, len(input.Items))
-	var total float64
+	var computedTotal float64
 	for _, item := range input.Items {
-		item.Type = estimateLineType(item.Type)
-		item.Code = strings.TrimSpace(item.Code)
-		item.OriginalCode = strings.TrimSpace(item.OriginalCode)
-		item.Name = strings.TrimSpace(item.Name)
-		item.Unit = strings.TrimSpace(item.Unit)
-		if !validEstimateLineType(item.Type) {
-			return domain.Estimate{}, ErrConflict
+		normalized, itemTotal, err := normalizeEstimateItem(item)
+		if err != nil {
+			return domain.Estimate{}, err
 		}
-		if item.Name == "" {
-			return domain.Estimate{}, ErrConflict
-		}
-		if item.ID == "" {
-			item.ID = newID("itm")
-		}
-		item.Total = item.Quantity * item.UnitPrice
-		total += item.Total
-		items = append(items, item)
+		computedTotal += itemTotal
+		items = append(items, normalized)
+	}
+
+	total := computedTotal
+	if input.Total != nil {
+		total = *input.Total
 	}
 
 	return domain.Estimate{
@@ -1470,12 +1465,15 @@ ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS fgis_set_id TEXT NOT NULL DEF
 
 ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS code TEXT NOT NULL DEFAULT '';
 ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS original_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS app_estimate_lines (
     id TEXT PRIMARY KEY,
     estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
     line_type TEXT NOT NULL CHECK (line_type IN ('section', 'subsection', 'position')),
+    source TEXT NOT NULL DEFAULT '',
     code TEXT NOT NULL DEFAULT '',
+    original_code TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL,
     quantity NUMERIC(14, 3) NOT NULL DEFAULT 0,
     unit TEXT NOT NULL DEFAULT '',
@@ -1538,9 +1536,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO N
 			return err
 		}
 		for order, line := range item.Items {
-			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, original_code, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (id) DO NOTHING`,
-				line.ID, item.ID, estimateLineType(line.Type), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
+			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING`,
+				line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
 			if err != nil {
 				return err
 			}
@@ -1742,7 +1740,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 		return items, nil
 	}
 
-	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, code, original_code, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
+	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1751,7 +1749,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 	for lineRows.Next() {
 		var line domain.EstimateItem
 		var estimateID string
-		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Code, &line.OriginalCode, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
+		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Source, &line.Code, &line.OriginalCode, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
 			return nil, err
 		}
 		lineMap[estimateID] = append(lineMap[estimateID], line)
@@ -1867,9 +1865,9 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 		return err
 	}
 	for i, line := range item.Items {
-		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, code, original_code, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-			line.ID, item.ID, estimateLineType(line.Type), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
+		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+			line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
 		if err != nil {
 			return err
 		}
@@ -1901,6 +1899,47 @@ func estimateLineType(v string) string {
 		return string(domain.EstimateLinePosition)
 	}
 	return value
+}
+
+func estimateItemSource(v string) string {
+	return strings.TrimSpace(strings.ToLower(v))
+}
+
+func isGSNEstimateSource(source string) bool {
+	return estimateItemSource(source) == "gsn"
+}
+
+func normalizeEstimateItem(item domain.EstimateItem) (domain.EstimateItem, float64, error) {
+	item.Type = estimateLineType(item.Type)
+	item.Source = estimateItemSource(item.Source)
+	item.Code = strings.TrimSpace(item.Code)
+	item.OriginalCode = strings.TrimSpace(item.OriginalCode)
+	item.Name = strings.TrimSpace(item.Name)
+	item.Unit = strings.TrimSpace(item.Unit)
+	if !validEstimateLineType(item.Type) {
+		return domain.EstimateItem{}, 0, ErrConflict
+	}
+	if item.ID == "" {
+		item.ID = newID("itm")
+	}
+
+	if isGSNEstimateSource(item.Source) {
+		if item.Code == "" {
+			return domain.EstimateItem{}, 0, ErrConflict
+		}
+		item.OriginalCode = ""
+		item.Name = ""
+		item.Unit = ""
+		item.UnitPrice = 0
+		item.Total = 0
+		return item, 0, nil
+	}
+
+	if item.Name == "" {
+		return domain.EstimateItem{}, 0, ErrConflict
+	}
+	item.Total = item.Quantity * item.UnitPrice
+	return item, item.Total, nil
 }
 
 func newID(prefix string) string {

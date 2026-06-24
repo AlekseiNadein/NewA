@@ -6,6 +6,24 @@
     <title>ABC-RU WEB</title>
     <link rel="icon" href="/Abc_Icon.ico" type="image/x-icon" />
     <link rel="stylesheet" href="/styles.css" />
+    <script>
+      (function () {
+        try {
+          var url = new URL(window.location.href);
+          var dirty = false;
+          ["password", "passwordConfirm", "companyName", "name", "email"].forEach(function (key) {
+            if (url.searchParams.has(key)) {
+              url.searchParams.delete(key);
+              dirty = true;
+            }
+          });
+          if (dirty) {
+            var query = url.searchParams.toString();
+            history.replaceState(null, "", url.pathname + (query ? "?" + query : "") + url.hash);
+          }
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body>
     <main class="shell">
@@ -23,7 +41,7 @@
       <section id="loginView" class="card login-card">
         <h2>Вход</h2>
         <p class="muted">Укажите ФИО или e-mail и пароль. Компания нужна при входе по ФИО; при входе по e-mail её можно не заполнять.</p>
-        <form id="loginForm" class="grid-form">
+        <form id="loginForm" class="grid-form" method="post" action="#" onsubmit="return false">
           <label>
             Компания
             <input name="companyName" type="text" autocomplete="organization" />
@@ -47,7 +65,7 @@
       <section id="registerView" class="card login-card hidden">
         <h2>Регистрация</h2>
         <p class="muted">После регистрации администратор проверит заявку и откроет доступ к системе.</p>
-        <form id="registerForm" class="stack-form register-form">
+        <form id="registerForm" class="stack-form register-form" method="post" action="#" onsubmit="return false">
           <label>
             Компания
             <input name="companyName" type="text" autocomplete="organization" required />
@@ -304,7 +322,7 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-    <script src="/login-draft.js?v=20260622g"></script>
-    <script src="/app.js?v=20260622g"></script>
+    <script src="/login-draft.js?v=20260622h"></script>
+    <script src="/app.js?v=20260622h"></script>
   </body>
 </html>
