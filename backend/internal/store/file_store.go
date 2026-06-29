@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +37,7 @@ type FileStore struct {
 	objects       map[string]domain.ConstructionObject
 	estimates     map[string]domain.Estimate
 	licenses      map[string]map[string]int
+	settings      domain.AppSettings
 }
 
 type snapshot struct {
@@ -45,6 +47,7 @@ type snapshot struct {
 	Objects       []domain.ConstructionObject `json:"objects"`
 	Estimates     []domain.Estimate           `json:"estimates"`
 	Licenses      []storedCompanyLicenses     `json:"licenses,omitempty"`
+	Settings      domain.AppSettings          `json:"settings,omitempty"`
 }
 
 type storedCompanyLicenses struct {
@@ -138,6 +141,7 @@ func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 		objects:       map[string]domain.ConstructionObject{},
 		estimates:     map[string]domain.Estimate{},
 		licenses:      map[string]map[string]int{},
+		settings:      defaultAppSettings(),
 	}
 
 	if err := store.load(); err != nil {
@@ -767,6 +771,37 @@ func (s *FileStore) UpdateConstruction(id string, companyID string, includeAll b
 	return current, s.saveLocked()
 }
 
+func (s *FileStore) DeleteConstruction(id string, companyID string, includeAll bool) error {
+	if s.treeDB != nil {
+		return s.deleteConstructionDB(context.Background(), id, companyID, includeAll)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.constructions[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if !includeAll && current.CompanyID != companyID {
+		return ErrForbidden
+	}
+
+	for objectID, object := range s.objects {
+		if object.ConstructionID != id {
+			continue
+		}
+		for estimateID, estimate := range s.estimates {
+			if estimate.ObjectID == objectID {
+				delete(s.estimates, estimateID)
+			}
+		}
+		delete(s.objects, objectID)
+	}
+	delete(s.constructions, id)
+	return s.saveLocked()
+}
+
 func (s *FileStore) ListObjects(companyID string, includeAll bool) []domain.ConstructionObject {
 	if s.treeDB != nil {
 		items, err := s.listObjectsDB(context.Background(), companyID, includeAll)
@@ -856,6 +891,31 @@ func (s *FileStore) UpdateObject(id string, companyID string, includeAll bool, i
 	current.UpdatedAt = time.Now().UTC()
 	s.objects[id] = current
 	return current, s.saveLocked()
+}
+
+func (s *FileStore) DeleteObject(id string, companyID string, includeAll bool) error {
+	if s.treeDB != nil {
+		return s.deleteObjectDB(context.Background(), id, companyID, includeAll)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.objects[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if !includeAll && current.CompanyID != companyID {
+		return ErrForbidden
+	}
+
+	for estimateID, estimate := range s.estimates {
+		if estimate.ObjectID == id {
+			delete(s.estimates, estimateID)
+		}
+	}
+	delete(s.objects, id)
+	return s.saveLocked()
 }
 
 func (s *FileStore) ListEstimates(companyID string, includeAll bool) []domain.Estimate {
@@ -1031,6 +1091,7 @@ func (s *FileStore) load() error {
 		}
 		s.licenses[entry.CompanyID] = normalizeLicenseItems(entry.Items)
 	}
+	s.settings = normalizeAppSettings(snap.Settings)
 
 	return nil
 }
@@ -1047,6 +1108,7 @@ func (s *FileStore) saveLocked() error {
 		Objects:       make([]domain.ConstructionObject, 0, len(s.objects)),
 		Estimates:     make([]domain.Estimate, 0, len(s.estimates)),
 		Licenses:      make([]storedCompanyLicenses, 0, len(s.licenses)),
+		Settings:      normalizeAppSettings(s.settings),
 	}
 
 	for _, company := range s.companies {
@@ -1463,10 +1525,6 @@ CREATE INDEX IF NOT EXISTS idx_app_estimates_object_id ON app_estimates(object_i
 ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS district TEXT NOT NULL DEFAULT '';
 ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS fgis_set_id TEXT NOT NULL DEFAULT '';
 
-ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS code TEXT NOT NULL DEFAULT '';
-ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS original_code TEXT NOT NULL DEFAULT '';
-ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
-
 CREATE TABLE IF NOT EXISTS app_estimate_lines (
     id TEXT PRIMARY KEY,
     estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
@@ -1481,7 +1539,51 @@ CREATE TABLE IF NOT EXISTS app_estimate_lines (
     total NUMERIC(14, 2) NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0
 );
+
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS code TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS original_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS raw_text TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS parsed_json JSONB;
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS calc_json JSONB;
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS calc_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS calc_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE app_estimate_lines ADD COLUMN IF NOT EXISTS calculated_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_app_estimate_lines_estimate_id ON app_estimate_lines(estimate_id, sort_order, id);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS estimate_calc_jobs (
+    id TEXT PRIMARY KEY,
+    company_id TEXT NOT NULL,
+    estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
+    line_id TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    job_type TEXT NOT NULL DEFAULT 'estimate_line',
+    status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'done', 'failed', 'dead')),
+    priority INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    run_after TIMESTAMPTZ NOT NULL DEFAULT now(),
+    leased_until TIMESTAMPTZ,
+    locked_by TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (estimate_id, line_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_estimate_calc_jobs_ready
+    ON estimate_calc_jobs(priority DESC, run_after, created_at)
+    WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_estimate_calc_jobs_estimate
+    ON estimate_calc_jobs(estimate_id, line_id, revision);
 `
 
 	_, err := s.treeDB.Exec(ctx, sql)
@@ -1535,10 +1637,31 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO N
 		if err != nil {
 			return err
 		}
-		for order, line := range item.Items {
-			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (id) DO NOTHING`,
-				line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, order)
+		lines := ensureUniqueEstimateLineIDs(item.Items)
+		for order, line := range lines {
+			line.Revision = estimateLineRevision(item, line)
+			_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text, parsed_json, calc_json, calc_status, calc_error, revision, calculated_at, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+ON CONFLICT (id) DO UPDATE SET
+    estimate_id = EXCLUDED.estimate_id,
+    line_type = EXCLUDED.line_type,
+    source = EXCLUDED.source,
+    code = EXCLUDED.code,
+    original_code = EXCLUDED.original_code,
+    name = EXCLUDED.name,
+    quantity = EXCLUDED.quantity,
+    unit = EXCLUDED.unit,
+    unit_price = EXCLUDED.unit_price,
+    total = EXCLUDED.total,
+    raw_text = EXCLUDED.raw_text,
+    parsed_json = EXCLUDED.parsed_json,
+    calc_json = EXCLUDED.calc_json,
+    calc_status = EXCLUDED.calc_status,
+    calc_error = EXCLUDED.calc_error,
+    revision = EXCLUDED.revision,
+    calculated_at = EXCLUDED.calculated_at,
+    sort_order = EXCLUDED.sort_order`,
+				line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, line.RawText, nullableJSON(line.ParsedJSON), nullableJSON(line.CalcJSON), line.CalcStatus, line.CalcError, line.Revision, line.CalculatedAt, order)
 			if err != nil {
 				return err
 			}
@@ -1621,6 +1744,23 @@ func (s *FileStore) updateConstructionDB(ctx context.Context, id, companyID stri
 		return domain.Construction{}, err
 	}
 	return item, nil
+}
+
+func (s *FileStore) deleteConstructionDB(ctx context.Context, id, companyID string, includeAll bool) error {
+	query := `DELETE FROM app_constructions WHERE id = $1`
+	args := []any{id}
+	if !includeAll {
+		query += ` AND company_id = $2`
+		args = append(args, companyID)
+	}
+	tag, err := s.treeDB.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *FileStore) listObjectsDB(ctx context.Context, companyID string, includeAll bool) ([]domain.ConstructionObject, error) {
@@ -1709,6 +1849,23 @@ func (s *FileStore) updateObjectDB(ctx context.Context, id, companyID string, in
 	return item, nil
 }
 
+func (s *FileStore) deleteObjectDB(ctx context.Context, id, companyID string, includeAll bool) error {
+	query := `DELETE FROM app_construction_objects WHERE id = $1`
+	args := []any{id}
+	if !includeAll {
+		query += ` AND company_id = $2`
+		args = append(args, companyID)
+	}
+	tag, err := s.treeDB.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, includeAll bool) ([]domain.Estimate, error) {
 	query := `SELECT id, company_id, object_id, code, title, description, district, fgis_set_id, status, total, created_at, updated_at FROM app_estimates`
 	args := []any{}
@@ -1740,7 +1897,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 		return items, nil
 	}
 
-	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
+	lineRows, err := s.treeDB.Query(ctx, `SELECT id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text, parsed_json, calc_json, calc_status, calc_error, revision, calculated_at FROM app_estimate_lines ORDER BY estimate_id, sort_order, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1749,7 +1906,7 @@ func (s *FileStore) listEstimatesDB(ctx context.Context, companyID string, inclu
 	for lineRows.Next() {
 		var line domain.EstimateItem
 		var estimateID string
-		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Source, &line.Code, &line.OriginalCode, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total); err != nil {
+		if err := lineRows.Scan(&line.ID, &estimateID, &line.Type, &line.Source, &line.Code, &line.OriginalCode, &line.Name, &line.Quantity, &line.Unit, &line.UnitPrice, &line.Total, &line.RawText, &line.ParsedJSON, &line.CalcJSON, &line.CalcStatus, &line.CalcError, &line.Revision, &line.CalculatedAt); err != nil {
 			return nil, err
 		}
 		lineMap[estimateID] = append(lineMap[estimateID], line)
@@ -1864,12 +2021,22 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 	if _, err := tx.Exec(ctx, `DELETE FROM app_estimate_lines WHERE estimate_id = $1`, item.ID); err != nil {
 		return err
 	}
-	for i, line := range item.Items {
-		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, sort_order)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-			line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, i)
+	lines := ensureUniqueEstimateLineIDs(item.Items)
+	for i, line := range lines {
+		line.Revision = estimateLineRevision(item, line)
+		if line.CalcStatus == "" && shouldEnqueueEstimateLineCalc(line) {
+			line.CalcStatus = "queued"
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text, parsed_json, calc_json, calc_status, calc_error, revision, calculated_at, sort_order)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+			line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, line.RawText, nullableJSON(line.ParsedJSON), nullableJSON(line.CalcJSON), line.CalcStatus, line.CalcError, line.Revision, line.CalculatedAt, i)
 		if err != nil {
 			return err
+		}
+		if shouldEnqueueEstimateLineCalc(line) {
+			if err := enqueueEstimateLineCalcJobTx(ctx, tx, item, line); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1891,6 +2058,407 @@ func (s *FileStore) deleteEstimateDB(ctx context.Context, id, companyID string, 
 		return ErrNotFound
 	}
 	return nil
+}
+
+type UpdateAppSettingsInput struct {
+	CalcWorkerCount int `json:"calcWorkerCount"`
+}
+
+func defaultAppSettings() domain.AppSettings {
+	return domain.AppSettings{
+		CalcWorkerCount: 2,
+	}
+}
+
+func NormalizeCalcWorkerCount(value int) int {
+	if value < 1 {
+		return 1
+	}
+	if value > 16 {
+		return 16
+	}
+	return value
+}
+
+func normalizeAppSettings(settings domain.AppSettings) domain.AppSettings {
+	if settings.CalcWorkerCount == 0 {
+		settings.CalcWorkerCount = defaultAppSettings().CalcWorkerCount
+	}
+	settings.CalcWorkerCount = NormalizeCalcWorkerCount(settings.CalcWorkerCount)
+	return settings
+}
+
+func (s *FileStore) GetAppSettings() (domain.AppSettings, error) {
+	if s.treeDB != nil {
+		return s.getAppSettingsDB(context.Background())
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return normalizeAppSettings(s.settings), nil
+}
+
+func (s *FileStore) UpdateAppSettings(input UpdateAppSettingsInput) (domain.AppSettings, error) {
+	settings := domain.AppSettings{
+		CalcWorkerCount: NormalizeCalcWorkerCount(input.CalcWorkerCount),
+	}
+	if s.treeDB != nil {
+		return s.updateAppSettingsDB(context.Background(), settings)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings = settings
+	return settings, s.saveLocked()
+}
+
+func (s *FileStore) getAppSettingsDB(ctx context.Context) (domain.AppSettings, error) {
+	settings := defaultAppSettings()
+	rows, err := s.treeDB.Query(ctx, `SELECT key, value FROM app_settings WHERE key = 'calc_worker_count'`)
+	if err != nil {
+		return domain.AppSettings{}, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return domain.AppSettings{}, err
+		}
+		if key == "calc_worker_count" {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				settings.CalcWorkerCount = parsed
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.AppSettings{}, err
+	}
+	return normalizeAppSettings(settings), nil
+}
+
+func (s *FileStore) updateAppSettingsDB(ctx context.Context, settings domain.AppSettings) (domain.AppSettings, error) {
+	settings = normalizeAppSettings(settings)
+	_, err := s.treeDB.Exec(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ('calc_worker_count', $1, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`, strconv.Itoa(settings.CalcWorkerCount))
+	if err != nil {
+		return domain.AppSettings{}, err
+	}
+	return settings, nil
+}
+
+type EstimateCalcJob struct {
+	ID          string
+	CompanyID   string
+	EstimateID  string
+	LineID      string
+	Revision    int64
+	Code        string
+	FgisSetID   string
+	District    string
+	Attempts    int
+	MaxAttempts int
+}
+
+type EstimateLineCalcResult struct {
+	Code         string
+	OriginalCode string
+	Name         string
+	Unit         string
+	CalcJSON     json.RawMessage
+}
+
+type EstimateCalcStatus struct {
+	LineID       string          `json:"lineId"`
+	Revision     int64           `json:"revision"`
+	Status       string          `json:"status"`
+	Error        string          `json:"error,omitempty"`
+	CalcJSON     json.RawMessage `json:"calcJson,omitempty"`
+	CalculatedAt *time.Time      `json:"calculatedAt,omitempty"`
+}
+
+func (s *FileStore) ClaimEstimateCalcJob(ctx context.Context, workerID string, lease time.Duration) (EstimateCalcJob, bool, error) {
+	if s.treeDB == nil {
+		return EstimateCalcJob{}, false, nil
+	}
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+
+	var job EstimateCalcJob
+	err := s.treeDB.QueryRow(ctx, `
+UPDATE estimate_calc_jobs
+SET status = 'leased',
+    attempts = attempts + 1,
+    leased_until = $1,
+    locked_by = $2,
+    updated_at = now()
+WHERE id = (
+    SELECT id
+    FROM estimate_calc_jobs
+    WHERE (status = 'queued' AND run_after <= now())
+        OR (status = 'leased' AND leased_until IS NOT NULL AND leased_until < now())
+    ORDER BY priority DESC, run_after, created_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT 1
+)
+RETURNING id, company_id, estimate_id, line_id, revision, payload->>'code', payload->>'fgisSetId', payload->>'district', attempts, max_attempts
+`, time.Now().UTC().Add(lease), workerID).Scan(
+		&job.ID,
+		&job.CompanyID,
+		&job.EstimateID,
+		&job.LineID,
+		&job.Revision,
+		&job.Code,
+		&job.FgisSetID,
+		&job.District,
+		&job.Attempts,
+		&job.MaxAttempts,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return EstimateCalcJob{}, false, nil
+		}
+		return EstimateCalcJob{}, false, err
+	}
+	_, _ = s.treeDB.Exec(ctx, `
+UPDATE app_estimate_lines
+SET calc_status = 'leased',
+    calc_error = ''
+WHERE estimate_id = $1 AND id = $2 AND revision = $3
+`, job.EstimateID, job.LineID, job.Revision)
+	return job, true, nil
+}
+
+func (s *FileStore) CompleteEstimateCalcJob(ctx context.Context, job EstimateCalcJob, result EstimateLineCalcResult) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	tx, err := s.treeDB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx, `
+UPDATE app_estimate_lines
+SET code = CASE WHEN $4 <> '' THEN $4 ELSE code END,
+    original_code = CASE WHEN $5 <> '' THEN $5 ELSE original_code END,
+    name = CASE WHEN $6 <> '' THEN $6 ELSE name END,
+    unit = CASE WHEN $7 <> '' THEN $7 ELSE unit END,
+    calc_json = $8,
+    calc_status = 'done',
+    calc_error = '',
+    calculated_at = now()
+WHERE estimate_id = $1 AND id = $2 AND revision = $3
+`, job.EstimateID, job.LineID, job.Revision, result.Code, result.OriginalCode, result.Name, result.Unit, nullableJSON(result.CalcJSON))
+	if err != nil {
+		return err
+	}
+
+	status := "done"
+	lastError := ""
+	if tag.RowsAffected() == 0 {
+		status = "failed"
+		lastError = "stale line revision"
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE estimate_calc_jobs
+SET status = $2,
+    last_error = $3,
+    leased_until = NULL,
+    locked_by = '',
+    updated_at = now()
+WHERE id = $1
+`, job.ID, status, lastError); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *FileStore) FailEstimateCalcJob(ctx context.Context, job EstimateCalcJob, cause error) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	message := ""
+	if cause != nil {
+		message = cause.Error()
+	}
+	nextStatus := "queued"
+	if job.Attempts >= job.MaxAttempts {
+		nextStatus = "dead"
+	}
+	backoff := time.Duration(job.Attempts*job.Attempts) * time.Second
+	if backoff < 2*time.Second {
+		backoff = 2 * time.Second
+	}
+	if backoff > time.Minute {
+		backoff = time.Minute
+	}
+
+	tx, err := s.treeDB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+UPDATE estimate_calc_jobs
+SET status = $2,
+    run_after = $3,
+    leased_until = NULL,
+    locked_by = '',
+    last_error = $4,
+    updated_at = now()
+WHERE id = $1
+`, job.ID, nextStatus, time.Now().UTC().Add(backoff), message); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE app_estimate_lines
+SET calc_status = $4,
+    calc_error = $5
+WHERE estimate_id = $1 AND id = $2 AND revision = $3
+`, job.EstimateID, job.LineID, job.Revision, nextStatus, message); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *FileStore) ListEstimateCalcStatuses(ctx context.Context, companyID, estimateID string, includeAll bool) ([]EstimateCalcStatus, error) {
+	if s.treeDB == nil {
+		return []EstimateCalcStatus{}, nil
+	}
+	query := `
+SELECT l.id, l.revision, l.calc_status, l.calc_error, l.calc_json, l.calculated_at
+FROM app_estimate_lines l
+JOIN app_estimates e ON e.id = l.estimate_id
+WHERE l.estimate_id = $1`
+	args := []any{estimateID}
+	if !includeAll {
+		query += ` AND e.company_id = $2`
+		args = append(args, companyID)
+	}
+	query += ` ORDER BY l.sort_order, l.id`
+
+	rows, err := s.treeDB.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := []EstimateCalcStatus{}
+	for rows.Next() {
+		var item EstimateCalcStatus
+		if err := rows.Scan(&item.LineID, &item.Revision, &item.Status, &item.Error, &item.CalcJSON, &item.CalculatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func enqueueEstimateLineCalcJobTx(ctx context.Context, tx pgx.Tx, estimate domain.Estimate, line domain.EstimateItem) error {
+	payload, err := json.Marshal(map[string]any{
+		"code":      estimateRecordCode(line),
+		"fgisSetId": estimate.FgisSetID,
+		"district":  estimate.District,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO estimate_calc_jobs (id, company_id, estimate_id, line_id, revision, status, priority, payload)
+VALUES ($1, $2, $3, $4, $5, 'queued', 10, $6)
+ON CONFLICT (estimate_id, line_id, revision) DO UPDATE
+SET status = CASE
+        WHEN estimate_calc_jobs.status = 'leased' THEN estimate_calc_jobs.status
+        ELSE 'queued'
+    END,
+    payload = EXCLUDED.payload,
+    run_after = now(),
+    last_error = '',
+    updated_at = now()
+`, newID("calcjob"), estimate.CompanyID, estimate.ID, line.ID, line.Revision, payload)
+	return err
+}
+
+func shouldEnqueueEstimateLineCalc(line domain.EstimateItem) bool {
+	return estimateLineType(line.Type) == string(domain.EstimateLinePosition) &&
+		estimateItemSource(line.Source) == "gsn" &&
+		estimateRecordCode(line) != ""
+}
+
+func estimateRecordCode(line domain.EstimateItem) string {
+	if strings.TrimSpace(line.Code) != "" {
+		return extractSourceDataPositionCipher(line.Code)
+	}
+	return extractSourceDataPositionCipher(line.OriginalCode)
+}
+
+func extractSourceDataPositionCipher(firstField string) string {
+	raw := strings.TrimSpace(firstField)
+	if raw == "" {
+		return ""
+	}
+	cutAt := len(raw)
+	for _, sep := range []string{"(", " ", "#"} {
+		if i := strings.Index(raw, sep); i >= 0 && i < cutAt {
+			cutAt = i
+		}
+	}
+	return strings.TrimSpace(raw[:cutAt])
+}
+
+func ensureUniqueEstimateLineIDs(items []domain.EstimateItem) []domain.EstimateItem {
+	if len(items) == 0 {
+		return items
+	}
+	seen := map[string]struct{}{}
+	out := make([]domain.EstimateItem, len(items))
+	for i, item := range items {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			id = newID("itm")
+		}
+		if _, exists := seen[id]; exists {
+			id = newID("itm")
+		}
+		seen[id] = struct{}{}
+		item.ID = id
+		out[i] = item
+	}
+	return out
+}
+
+func estimateLineRevision(estimate domain.Estimate, line domain.EstimateItem) int64 {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(estimate.ID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(line.ID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(estimateRecordCode(line)))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(strconv.FormatFloat(line.Quantity, 'f', -1, 64)))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(estimate.FgisSetID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(estimate.District))
+	value := int64(hash.Sum64() & 0x7fffffffffffffff)
+	if value == 0 {
+		return 1
+	}
+	return value
+}
+
+func nullableJSON(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return raw
 }
 
 func estimateLineType(v string) string {
@@ -1924,8 +2492,16 @@ func normalizeEstimateItem(item domain.EstimateItem) (domain.EstimateItem, float
 	}
 
 	if isGSNEstimateSource(item.Source) {
+		item.Code = extractSourceDataPositionCipher(item.Code)
 		if item.Code == "" {
 			return domain.EstimateItem{}, 0, ErrConflict
+		}
+		if quantityRaw := quantityRawFromSourceDataLine(item.RawText); quantityRaw != "" {
+			quantity, err := ParseSourceDataQuantity(quantityRaw)
+			if err != nil {
+				return domain.EstimateItem{}, 0, err
+			}
+			item.Quantity = quantity
 		}
 		item.OriginalCode = ""
 		item.Name = ""
@@ -1933,6 +2509,16 @@ func normalizeEstimateItem(item domain.EstimateItem) (domain.EstimateItem, float
 		item.UnitPrice = 0
 		item.Total = 0
 		return item, 0, nil
+	}
+
+	if strings.TrimSpace(item.RawText) != "" && item.Type == string(domain.EstimateLinePosition) {
+		if quantityRaw := quantityRawFromSourceDataLine(item.RawText); quantityRaw != "" {
+			quantity, err := ParseSourceDataQuantity(quantityRaw)
+			if err != nil {
+				return domain.EstimateItem{}, 0, err
+			}
+			item.Quantity = quantity
+		}
 	}
 
 	if item.Name == "" {

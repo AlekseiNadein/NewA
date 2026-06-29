@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 )
@@ -104,16 +105,23 @@ const (
 )
 
 type EstimateItem struct {
-	ID           string  `json:"id"`
-	Type         string  `json:"type"`
-	Source       string  `json:"source,omitempty"`
-	Code         string  `json:"code"`
-	OriginalCode string  `json:"originalCode,omitempty"`
-	Name         string  `json:"name"`
-	Quantity     float64 `json:"quantity"`
-	Unit         string  `json:"unit"`
-	UnitPrice    float64 `json:"unitPrice"`
-	Total        float64 `json:"total"`
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	Source       string          `json:"source,omitempty"`
+	Code         string          `json:"code"`
+	OriginalCode string          `json:"originalCode,omitempty"`
+	Name         string          `json:"name"`
+	Quantity     float64         `json:"quantity"`
+	Unit         string          `json:"unit"`
+	UnitPrice    float64         `json:"unitPrice"`
+	Total        float64         `json:"total"`
+	RawText      string          `json:"rawText,omitempty"`
+	ParsedJSON   json.RawMessage `json:"parsedJson,omitempty"`
+	CalcJSON     json.RawMessage `json:"calcJson,omitempty"`
+	CalcStatus   string          `json:"calcStatus,omitempty"`
+	CalcError    string          `json:"calcError,omitempty"`
+	Revision     int64           `json:"revision,omitempty"`
+	CalculatedAt *time.Time      `json:"calculatedAt,omitempty"`
 }
 
 type Claims struct {
@@ -216,4 +224,9 @@ type CompanyLicensesView struct {
 	CompanyName string           `json:"companyName"`
 	Editable    bool             `json:"editable"`
 	Items       []CompanyLicense `json:"items"`
+}
+
+type AppSettings struct {
+	CalcWorkerCount int  `json:"calcWorkerCount"`
+	Editable        bool `json:"editable"`
 }

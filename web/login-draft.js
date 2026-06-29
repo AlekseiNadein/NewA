@@ -64,8 +64,7 @@
 
     form.addEventListener("input", scheduleSave);
     form.addEventListener("change", scheduleSave);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
+    form.addEventListener("submit", () => {
       saveDraft(form);
     }, true);
     applyDraft(form);

@@ -76,6 +76,68 @@ function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+function readSessionJSONArray(key, fallback = []) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function readSessionJSONObject(key, fallback = {}) {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return fallback;
+    }
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function hydrateOpenEstimatesFromSession() {
+  return readSessionJSONArray("nav_editor_estimates", []).map((estimate) => {
+    normalizeEstimateSourceDataFields(estimate);
+    (estimate.items || []).forEach(hydrateEstimateItemFromSourceDataRawText);
+    return estimate;
+  });
+}
+
+function repairEditorSessionStorage() {
+  const entries = [
+    ["nav_editor_estimates", []],
+    ["nav_editor_buffer", []],
+    ["nav_editor_expanded", {}],
+  ];
+  for (const [key, fallback] of entries) {
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) {
+        continue;
+      }
+      const parsed = JSON.parse(raw);
+      const valid = Array.isArray(fallback)
+        ? Array.isArray(parsed)
+        : parsed && typeof parsed === "object" && !Array.isArray(parsed);
+      if (!valid) {
+        sessionStorage.setItem(key, JSON.stringify(fallback));
+      }
+    } catch {
+      sessionStorage.setItem(key, JSON.stringify(fallback));
+    }
+  }
+}
+
 const state = {
   me: null,
   authScreen: "login",
@@ -111,9 +173,12 @@ const state = {
   districtPickerRegionCode: "",
   showHierarchyCode: localStorage.getItem("nav_show_hierarchy_code") === "true",
   editorTab: sessionStorage.getItem("nav_editor_tab") || "buffer",
-  buffer: readSessionJSON("nav_editor_buffer", []),
-  openEstimates: readSessionJSON("nav_editor_estimates", []),
-  estimateLinesExpanded: readSessionJSON("nav_editor_expanded", {}),
+  estimateViewMode: "text",
+  estimateTextDrafts: {},
+  editorRenderToken: null,
+  buffer: readSessionJSONArray("nav_editor_buffer", []),
+  openEstimates: hydrateOpenEstimatesFromSession(),
+  estimateLinesExpanded: readSessionJSONObject("nav_editor_expanded", {}),
   constructionExpanded: {},
   objectExpanded: {},
   estimateLocks: {},
@@ -123,6 +188,8 @@ const state = {
   addLineTargetEstimateId: null,
   licenseBlocked: [],
   licenseHeld: [],
+  appSettings: null,
+  appSettingsLoaded: false,
 };
 
 let userPositionDialogEditId = "";
@@ -131,9 +198,15 @@ const persistEstimateInflight = new Map();
 const ESTIMATE_LOCK_POLL_MS = 5000;
 const ESTIMATE_LOCK_HEARTBEAT_MS = 30000;
 const LICENSE_SESSION_HEARTBEAT_MS = 30000;
+const ESTIMATE_CALC_STATUS_POLL_MS = 1500;
 let estimateLockPollTimer = 0;
 let estimateLockHeartbeatTimer = 0;
 let licenseSessionHeartbeatTimer = 0;
+let estimateCalcStatusPollTimer = 0;
+let estimateCalcStatusPollInflight = null;
+let pendingEditorRemountEstimateId = null;
+let loadAppRequestId = 0;
+let loadAppSuppressMissingSession = true;
 let licenseGateVersion = 0;
 
 const money = new Intl.NumberFormat("ru-RU", {
@@ -171,6 +244,7 @@ const els = {
   settingsSection: document.querySelector("#settingsSection"),
   editorSubitems: document.querySelector("#editorSubitems"),
   editorEyebrow: document.querySelector("#editorEyebrow"),
+  editorEstimateViewModes: document.querySelector("#editorEstimateViewModes"),
   editorTitle: document.querySelector("#editorTitle"),
   editorDescription: document.querySelector("#editorDescription"),
   editorLicenseBlock: document.querySelector("#editorLicenseBlock"),
@@ -203,6 +277,10 @@ const els = {
   userPositionDialogForm: document.querySelector("#userPositionDialogForm"),
   userPositionDialogTitle: document.querySelector("#userPositionDialogTitle"),
   showHierarchyCodeToggle: document.querySelector("#showHierarchyCodeToggle"),
+  appSettingsForm: document.querySelector("#appSettingsForm"),
+  calcWorkerCountInput: document.querySelector("#calcWorkerCountInput"),
+  saveAppSettingsButton: document.querySelector("#saveAppSettingsButton"),
+  appSettingsHint: document.querySelector("#appSettingsHint"),
   constructionTree: document.querySelector("#constructionTree"),
   constructionDialog: document.querySelector("#constructionDialog"),
   constructionDialogForm: document.querySelector("#constructionDialogForm"),
@@ -229,13 +307,21 @@ els.loginForm?.addEventListener("submit", async (event) => {
     localStorage.removeItem("nav_token");
     localStorage.removeItem("nav_admin_token");
     await loadApp();
+    if (!state.me) {
+      state.me = result.user;
+    }
+    renderShell();
     showMessage("Вход выполнен", "ok");
   } catch (error) {
     applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
     showMessage(error.message, "error");
+    if (state.me) {
+      renderShell();
+    }
   }
 });
 
+repairEditorSessionStorage();
 bootstrapLoginForm();
 void loadApp();
 
@@ -276,6 +362,8 @@ els.logoutButton?.addEventListener("click", async () => {
   }
   state.me = null;
   state.estimateLocks = {};
+  state.appSettings = null;
+  state.appSettingsLoaded = false;
   localStorage.removeItem("nav_token");
   localStorage.removeItem("nav_admin_token");
   renderShell();
@@ -369,6 +457,12 @@ els.constructionTree.addEventListener("click", (event) => {
     return;
   }
 
+  const deleteButton = event.target.closest("[data-delete]");
+  if (deleteButton) {
+    void deleteConstructionEntity(deleteButton.dataset.delete, deleteButton.dataset.deleteId);
+    return;
+  }
+
   const constructionToggle = event.target.closest("[data-toggle-construction]");
   if (constructionToggle) {
     const id = constructionToggle.dataset.toggleConstruction;
@@ -415,6 +509,28 @@ els.showHierarchyCodeToggle.addEventListener("change", () => {
     loadGSNRoot({ force: true });
   }
   renderEditor();
+});
+
+els.appSettingsForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!state.appSettings?.editable) {
+    return;
+  }
+  const calcWorkerCount = Number(els.calcWorkerCountInput?.value || 0);
+  try {
+    const settings = await api("/api/settings", {
+      method: "PUT",
+      body: {
+        calcWorkerCount,
+      },
+    });
+    state.appSettings = settings;
+    state.appSettingsLoaded = true;
+    renderSettings();
+    showMessage("Настройки сохранены", "ok");
+  } catch (error) {
+    showMessage(error.message || "Не удалось сохранить настройки", "error");
+  }
 });
 
 els.gsnSearchForm.addEventListener("submit", (event) => {
@@ -520,7 +636,7 @@ els.gsnTree.addEventListener("keydown", (event) => {
 
 els.editorSubitems.addEventListener("click", (event) => {
   if (event.target.closest("[data-editor-create-estimate]")) {
-    createEditorEstimate();
+    void createEditorEstimate();
     return;
   }
 
@@ -529,10 +645,30 @@ els.editorSubitems.addEventListener("click", (event) => {
     return;
   }
 
-  state.editorTab = button.dataset.editorTab;
+  const nextTab = button.dataset.editorTab;
+  if (nextTab === state.editorTab) {
+    return;
+  }
+
+  flushEstimateEditorFields(state.editorTab);
+  saveEditorState();
+  invalidateEstimateTextDraft(state.editorTab);
+
+  state.editorTab = nextTab;
+  if (state.editorTab !== "buffer") {
+    state.estimateViewMode = "text";
+  }
   sessionStorage.setItem("nav_editor_tab", state.editorTab);
   state.section = "editor";
   renderSections();
+});
+
+els.editorEstimateViewModes?.addEventListener("click", (event) => {
+  const viewModeButton = event.target.closest("[data-editor-view-mode]");
+  if (!viewModeButton) {
+    return;
+  }
+  void setEstimateViewMode(viewModeButton.dataset.editorViewEstimate, viewModeButton.dataset.editorViewMode);
 });
 
 els.editorContent.addEventListener("click", (event) => {
@@ -557,6 +693,12 @@ els.editorContent.addEventListener("click", (event) => {
   const closeButton = event.target.closest("[data-editor-close-estimate]");
   if (closeButton) {
     closeEstimateFromEditor(closeButton.dataset.editorCloseEstimate);
+    return;
+  }
+
+  const deleteEstimateButton = event.target.closest("[data-editor-delete-estimate]");
+  if (deleteEstimateButton) {
+    void deleteEstimateFromEditor(deleteEstimateButton.dataset.editorDeleteEstimate);
     return;
   }
 
@@ -596,6 +738,13 @@ els.editorContent.addEventListener("click", (event) => {
   }
 });
 
+els.editorContent.addEventListener("input", (event) => {
+  const textarea = event.target.closest("[data-editor-estimate-text]");
+  if (textarea) {
+    state.estimateTextDrafts[textarea.dataset.editorEstimateText] = textarea.value;
+  }
+});
+
 els.editorContent.addEventListener("change", (event) => {
   const codeInput = event.target.closest("[data-editor-estimate-code]");
   if (codeInput) {
@@ -613,6 +762,15 @@ els.editorContent.addEventListener("change", (event) => {
   if (fgisSetSelect) {
     void updateEstimateFgisSet(fgisSetSelect.dataset.editorFgisSet, fgisSetSelect.value);
   }
+});
+
+els.editorContent.addEventListener("focusout", (event) => {
+  if (!event.target.closest(".editor-estimate-header")) {
+    return;
+  }
+  window.setTimeout(() => {
+    flushPendingEditorRemount();
+  }, 0);
 });
 
 els.estimateLineDialogForm.addEventListener("submit", async (event) => {
@@ -740,21 +898,36 @@ els.userPositionDialogForm.querySelector("[data-dialog-cancel]").addEventListene
 });
 
 async function loadApp() {
+  const requestId = ++loadAppRequestId;
+  const suppressMissingSession = loadAppSuppressMissingSession;
+  loadAppSuppressMissingSession = false;
   try {
     const me = await api("/api/me");
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
     state.me = me.user;
     if (!me.access?.app && !me.user?.authorized) {
       throw new Error("Нет доступа к системе. Ожидайте подтверждения администратора");
     }
 
     await Promise.all([refreshCompanies(), refreshConstructionData()]);
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
     await restoreOpenEstimateLocks();
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
     startEstimateLockSync();
     void loadGSNRegions().catch(() => {});
     void loadFGISSets().catch(() => {});
     loadUserPositions();
     renderShell();
   } catch (error) {
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
     stopEstimateLockSync();
     const message = error?.message || "Не удалось загрузить приложение";
     const unauthorized = /HTTP 401|HTTP 403|Нет доступа/i.test(message);
@@ -762,6 +935,8 @@ async function loadApp() {
     if (unauthorized) {
       state.me = null;
       state.estimateLocks = {};
+      state.appSettings = null;
+      state.appSettingsLoaded = false;
       localStorage.removeItem("nav_token");
       localStorage.removeItem("nav_admin_token");
     }
@@ -770,7 +945,10 @@ async function loadApp() {
     if (unauthorized && hadSession) {
       showMessage("Сессия истекла, войдите снова", "error");
     } else if (!unauthorized) {
-      showMessage(message, "error");
+      const hideMissingSession = suppressMissingSession && /missing session/i.test(message);
+      if (!hideMissingSession) {
+        showMessage(message, "error");
+      }
     }
   }
 }
@@ -1076,6 +1254,44 @@ function renderSectionContent() {
 
   if (state.section === "editor") {
     renderEditor();
+  } else if (state.section === "settings") {
+    renderSettings();
+    void loadAppSettings();
+  }
+}
+
+async function loadAppSettings({ force = false } = {}) {
+  if (!state.me || (state.appSettingsLoaded && !force)) {
+    return;
+  }
+  try {
+    const settings = await api("/api/settings");
+    state.appSettings = settings;
+    state.appSettingsLoaded = true;
+    renderSettings();
+  } catch (error) {
+    if (els.appSettingsHint) {
+      els.appSettingsHint.textContent = error.message || "Не удалось загрузить настройки";
+    }
+  }
+}
+
+function renderSettings() {
+  const settings = state.appSettings || { calcWorkerCount: 2, editable: false };
+  if (els.showHierarchyCodeToggle) {
+    els.showHierarchyCodeToggle.checked = state.showHierarchyCode;
+  }
+  if (els.calcWorkerCountInput) {
+    els.calcWorkerCountInput.value = String(settings.calcWorkerCount || 2);
+    els.calcWorkerCountInput.disabled = !settings.editable;
+  }
+  if (els.saveAppSettingsButton) {
+    els.saveAppSettingsButton.disabled = !settings.editable;
+  }
+  if (els.appSettingsHint) {
+    els.appSettingsHint.textContent = settings.editable
+      ? "Изменение применится сервисом расчета автоматически в течение нескольких секунд."
+      : "Изменять количество worker-ов может только администратор.";
   }
 }
 
@@ -1990,11 +2206,13 @@ function renderEditor() {
 
   renderEditorSubitems();
   if (state.editorTab === "buffer") {
+    syncEstimateCalcStatusPolling();
     els.editorEyebrow.textContent = "Редактор";
+    renderEditorEstimateViewModes(null);
     els.editorTitle.classList.remove("hidden");
     els.editorTitle.textContent = "Буфер";
-    els.editorDescription.textContent = "Сессионный буфер для элементов, добавленных из базы ГСН-2022.";
-    els.editorDescription.classList.remove("hidden");
+    els.editorDescription.textContent = "";
+    els.editorDescription.classList.add("hidden");
     els.editorContent.innerHTML = state.buffer.length
       ? renderEditorItems(state.buffer, "Буфер пока пуст.")
       : `<p class="muted">Буфер пока пуст.</p>`;
@@ -2003,7 +2221,9 @@ function renderEditor() {
 
   const estimate = state.openEstimates.find((item) => item.id === state.editorTab);
   if (!estimate) {
+    syncEstimateCalcStatusPolling();
     els.editorEyebrow.textContent = "Редактор";
+    renderEditorEstimateViewModes(null);
     els.editorTitle.classList.remove("hidden");
     els.editorTitle.textContent = "Редактор";
     els.editorDescription.textContent = "";
@@ -2014,14 +2234,32 @@ function renderEditor() {
   els.editorEyebrow.textContent = "Редактор сметы";
   els.editorTitle.classList.add("hidden");
   els.editorDescription.classList.add("hidden");
-  void loadFGISSets()
-    .then(() => {
-      if (state.editorTab === estimate.id) {
-        els.editorContent.innerHTML = renderEstimateEditor(estimate);
-      }
-    })
-    .catch(() => {});
-  els.editorContent.innerHTML = renderEstimateEditor(estimate);
+  renderEditorEstimateViewModes(estimate);
+  const renderToken = Symbol("editorRender");
+  state.editorRenderToken = renderToken;
+  mountEditorContent(estimate);
+  if (!state.fgisSetsLoaded) {
+    void loadFGISSets()
+      .then(() => {
+        if (
+          state.editorRenderToken !== renderToken ||
+          state.editorTab !== estimate.id ||
+          state.estimateViewMode !== "table"
+        ) {
+          return;
+        }
+        const currentEstimate = state.openEstimates.find((item) => item.id === state.editorTab);
+        if (!currentEstimate) {
+          return;
+        }
+        if (refreshEditorFgisSetSelect(currentEstimate)) {
+          return;
+        }
+        mountEditorContent(currentEstimate);
+      })
+      .catch(() => {});
+  }
+  syncEstimateCalcStatusPolling();
 }
 
 function renderEditorItems(items) {
@@ -2498,6 +2736,7 @@ function applyDistrictToEstimate(estimateID, options = {}) {
   }
 
   estimate.district = formatDistrictValue(state.districtPickerRegionCode, els.districtZoneSelect.value);
+  invalidateEstimateTextDraft(estimateID);
   saveEditorState();
   renderEditor();
   if (options.persist !== false) {
@@ -2524,18 +2763,15 @@ async function applyDistrictDialog() {
   els.districtDialog.close();
 
   if (estimate.district !== previousDistrict) {
-    try {
-      await recalculateEstimatePricing(estimate);
-      showMessage("Сметный район обновлён, стоимости пересчитаны", "ok");
-    } catch (error) {
-      showMessage(error.message || "Не удалось пересчитать стоимости", "error");
-    }
+    (estimate.items || []).forEach(clearGsnLineCalcEnrichment);
+    showMessage("Сметный район обновлён, позиции поставлены в очередь на пересчёт", "ok");
   }
 
   saveEditorState();
   renderEditor();
   try {
     await persistOpenEstimate(estimateID);
+    void pollEstimateCalcStatus(estimateID);
   } catch {
     return;
   }
@@ -2610,6 +2846,60 @@ function estimateGrandTotal(items) {
   return (items || []).reduce((sum, item) => sum + estimateLineTotal(item), 0);
 }
 
+function estimateLineNeedsGsnCalc(item) {
+  if (item?.type !== "position" || !estimateLineIsGsn(item) || estimateLineIsStructural(item)) {
+    return false;
+  }
+  return Boolean(estimateRecordLookupCode(item));
+}
+
+function estimateLineCountsTowardGrandTotal(item) {
+  if (estimateLineIsStructural(item)) {
+    return false;
+  }
+  if (estimateLineNeedsGsnCalc(item)) {
+    return estimateLineCalcDone(item);
+  }
+  return true;
+}
+
+function estimateGrandTotalForDisplay(items) {
+  return (items || []).reduce((sum, item) => {
+    if (!estimateLineCountsTowardGrandTotal(item)) {
+      return sum;
+    }
+    return sum + estimateLineTotal(item);
+  }, 0);
+}
+
+function estimateCalcProgress(items) {
+  const calcItems = (items || []).filter(estimateLineNeedsGsnCalc);
+  let processed = 0;
+  let errors = 0;
+  calcItems.forEach((item) => {
+    const status = String(item.calcStatus || "").trim();
+    if (status === "done" || status === "failed" || status === "dead") {
+      processed += 1;
+    }
+    if (status === "failed" || status === "dead") {
+      errors += 1;
+    }
+  });
+  return { total: calcItems.length, processed, errors };
+}
+
+function formatEstimateCalcProgressText(items) {
+  const { total, processed, errors } = estimateCalcProgress(items);
+  if (!total) {
+    return "";
+  }
+  let text = `Обработано позиций: ${processed}/${total}`;
+  if (errors > 0) {
+    text += `, ошибок: ${errors}`;
+  }
+  return text;
+}
+
 function formatEstimateMoney(value) {
   const number = Number(value || 0);
   if (!Number.isFinite(number) || number === 0) {
@@ -2618,12 +2908,212 @@ function formatEstimateMoney(value) {
   return estimateCostDetailed.format(number);
 }
 
+const SOURCE_DATA_POSITION_CIPHER_SEPARATORS = ["(", " ", "#"];
+
+function extractSourceDataPositionCipher(firstField) {
+  const raw = String(firstField || "").trim();
+  if (!raw) {
+    return "";
+  }
+  let cutAt = raw.length;
+  for (const separator of SOURCE_DATA_POSITION_CIPHER_SEPARATORS) {
+    const index = raw.indexOf(separator);
+    if (index >= 0 && index < cutAt) {
+      cutAt = index;
+    }
+  }
+  return raw.slice(0, cutAt).trim();
+}
+
+function extractSourceDataPositionOriginalCode(cipherField) {
+  const raw = String(cipherField || "").trim();
+  const open = raw.indexOf("(");
+  if (open < 0) {
+    return "";
+  }
+  const close = raw.indexOf(")", open + 1);
+  if (close < 0) {
+    return "";
+  }
+  return raw.slice(open + 1, close).trim();
+}
+
+function parseSourceDataPositionLineFields(fields) {
+  const cipherRaw = String(fields[0] || "").trim();
+  const quantityRaw = fields.length > 1 ? String(fields[1] ?? "").trim() : "";
+  const totalRaw = fields.length > 2 ? String(fields[2] ?? "").trim() : "";
+  const nameRaw = fields.length > 3 ? String(fields[3] ?? "").trim() : "";
+  const unitRaw = fields.length > 4 ? String(fields[4] ?? "").trim() : "";
+  const sourceCode = extractSourceDataPositionCipher(cipherRaw);
+  const originalCode = extractSourceDataPositionOriginalCode(cipherRaw);
+  const hasTotal = totalRaw !== "";
+  const total = hasTotal ? parseEstimateTextNumber(totalRaw) : 0;
+  const hasName = nameRaw !== "";
+  const hasUnit = unitRaw !== "";
+
+  return {
+    cipherRaw,
+    sourceCode,
+    originalCode,
+    hasOriginalCode: originalCode !== "",
+    quantity: 0,
+    hasQuantity: quantityRaw !== "",
+    hasTotal,
+    total,
+    hasName,
+    name: nameRaw,
+    hasUnit,
+    unit: unitRaw,
+    unitPrice: 0,
+  };
+}
+
+function parseSourceDataPositionLineFieldsFromRawText(rawText) {
+  const line = String(rawText || "").trim();
+  if (!line || line.startsWith("Р") || line.startsWith("ПР")) {
+    return null;
+  }
+  const fields = splitEstimateTextLine(line).map(unescapeEstimateTextField);
+  if (fields.length < 2) {
+    return null;
+  }
+  try {
+    return parseSourceDataPositionLineFields(fields);
+  } catch {
+    return null;
+  }
+}
+
+function buildGsnPositionItemFromSourceDataLine({ existing, fields, rawText }) {
+  const parsed = parseSourceDataPositionLineFields(fields);
+  const rawTextUnchanged = existing && String(existing.rawText || "") === String(rawText || "");
+  const calcDone = rawTextUnchanged && estimateLineCalcDone(existing);
+
+  const name = parsed.hasName ? parsed.name : calcDone ? existing.name || "" : "";
+  const unit = parsed.hasUnit ? parsed.unit : calcDone ? existing.unit || "" : "";
+  const originalCode = parsed.hasOriginalCode
+    ? parsed.originalCode
+    : calcDone
+      ? existing.originalCode || ""
+      : "";
+  const total = parsed.hasTotal ? parsed.total : calcDone ? Number(existing.total || 0) : 0;
+  const unitPrice = calcDone ? Number(existing.unitPrice || 0) : 0;
+
+  return {
+    id: existing?.id || `line_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    type: "position",
+    source: "gsn",
+    sourceId: parsed.sourceCode,
+    sourceCode: parsed.cipherRaw || parsed.sourceCode,
+    code: parsed.sourceCode,
+    recordCode: parsed.sourceCode,
+    originalCode,
+    name,
+    unit,
+    quantity: rawTextUnchanged ? Number(existing?.quantity || 0) : 0,
+    unitPrice,
+    total,
+    hasResources: calcDone ? Boolean(existing.hasResources) : false,
+    children: calcDone ? existing.children : undefined,
+    calcStatus: rawTextUnchanged ? existing?.calcStatus || "" : "",
+    calcError: rawTextUnchanged ? existing?.calcError || "" : "",
+    calcJson: rawTextUnchanged ? existing?.calcJson || null : null,
+    rawText,
+  };
+}
+
+function hydrateEstimateItemFromSourceDataRawText(item) {
+  if (!item?.rawText || estimateLineIsStructural(item)) {
+    return item;
+  }
+  const parsed = parseSourceDataPositionLineFieldsFromRawText(item.rawText);
+  if (!parsed) {
+    return item;
+  }
+  item.sourceCode = parsed.cipherRaw || parsed.sourceCode;
+  item.code = parsed.sourceCode;
+  item.recordCode = parsed.sourceCode;
+  if (parsed.hasOriginalCode) {
+    item.originalCode = parsed.originalCode;
+  }
+  if (parsed.hasName) {
+    item.name = parsed.name;
+  }
+  if (parsed.hasUnit) {
+    item.unit = parsed.unit;
+  }
+  if (parsed.hasTotal) {
+    item.total = parsed.total;
+  }
+  if (!String(item.source || "").trim() && item.type === "position") {
+    item.source = "gsn";
+  }
+  return item;
+}
+
+function estimateLineSourceCode(item) {
+  return String(item?.sourceCode || item?.recordCode || item?.code || "").trim();
+}
+
+function estimateLineNormalizedSourceCode(item) {
+  return extractSourceDataPositionCipher(estimateLineSourceCode(item));
+}
+
+function estimateLineSourceCodeFromRawText(rawText) {
+  const line = String(rawText || "").trim();
+  if (!line || line.startsWith("Р") || line.startsWith("ПР")) {
+    return "";
+  }
+  const fields = splitEstimateTextLine(line).map(unescapeEstimateTextField);
+  return String(fields[0] || "").trim();
+}
+
+function estimateSourceDataPositionCipherRaw(item) {
+  const rawText = String(item?.rawText || "").trim();
+  if (rawText && !rawText.startsWith("Р") && !rawText.startsWith("ПР")) {
+    const fields = splitEstimateTextLine(rawText).map(unescapeEstimateTextField);
+    if (fields[0]) {
+      return String(fields[0]).trim();
+    }
+  }
+  return estimateSourceDataPositionCode(item);
+}
+
+function estimateSourceDataQuantityRaw(item) {
+  const rawText = String(item?.rawText || "").trim();
+  if (rawText && !rawText.startsWith("Р") && !rawText.startsWith("ПР")) {
+    const fields = splitEstimateTextLine(rawText).map(unescapeEstimateTextField);
+    if (fields[1] != null && String(fields[1]).trim() !== "") {
+      return String(fields[1]).trim();
+    }
+  }
+  return String(item?.quantity ?? 0);
+}
+
+function estimateLineGsnOriginalCode(item) {
+  const fromCalc = String(item?.calcJson?.record?.originalCode || "").trim();
+  if (fromCalc) {
+    return fromCalc;
+  }
+  const fromItem = String(item?.originalCode || "").trim();
+  if (fromItem) {
+    return fromItem;
+  }
+  return String(item?.code || "").trim();
+}
+
 function estimateLineDisplayCode(item) {
+  if (estimateLineShowsGsnPartial(item)) {
+    return estimateLineSourceCode(item);
+  }
+  if (estimateLineIsGsn(item) && estimateLineCalcDone(item)) {
+    return estimateLineGsnOriginalCode(item);
+  }
   return String(item?.originalCode || item?.code || "").trim();
 }
 
 function estimateRecordFetchCode(item) {
-  return String(item?.recordCode || item?.code || "").trim();
+  return String(item?.recordCode || item?.sourceCode || item?.code || "").trim();
 }
 
 function estimateRecordLookupCode(item) {
@@ -2634,17 +3124,24 @@ function applyRecordDetailToEstimateItem(item, record) {
   if (!item || !record) {
     return;
   }
+  const sourceCode = estimateLineSourceCode(item);
+  const sourceFields = parseSourceDataPositionLineFieldsFromRawText(item.rawText);
   if (record.code) {
     item.recordCode = record.code;
     item.code = record.code;
   }
-  if (record.originalCode) {
-    item.originalCode = record.originalCode;
+  const gsnOriginalCode =
+    String(record.originalCode || "").trim() || String(record.code || "").trim();
+  if (gsnOriginalCode && !sourceFields?.hasOriginalCode) {
+    item.originalCode = gsnOriginalCode;
   }
-  if (record.name) {
+  if (sourceCode) {
+    item.sourceCode = sourceCode;
+  }
+  if (record.name && !sourceFields?.hasName) {
     item.name = record.name;
   }
-  if (record.unit) {
+  if (record.unit && !sourceFields?.hasUnit) {
     item.unit = record.unit;
   }
   item.isWork = record.isWork !== false;
@@ -2675,6 +3172,9 @@ function estimateLineHasResources(item) {
 }
 
 function estimateLineCanExpand(item) {
+  if (estimateLineShowsGsnPartial(item)) {
+    return false;
+  }
   if (estimateLineIsResourcePosition(item)) {
     return false;
   }
@@ -2836,6 +3336,7 @@ function estimateLineNeedsDistrictPricing(item) {
   return (
     item?.type === "position" &&
     item?.source !== "user_position" &&
+    !estimateLineShowsGsnPartial(item) &&
     Boolean(estimateRecordLookupCode(item))
   );
 }
@@ -2891,6 +3392,100 @@ async function recalculateEstimatePricing(estimate) {
     });
 
   await Promise.all(tasks);
+}
+
+function applyEstimateCalcRecord(item, calcJson) {
+  const record = calcJson?.record;
+  if (!record) {
+    return false;
+  }
+  applyRecordDetailToEstimateItem(item, record);
+  if (record.isWork !== false && record.resources?.length) {
+    refreshEstimateItemChildrenPricing(item, record.resources);
+  }
+  return true;
+}
+
+function applyEstimateCalcStatuses(estimate, statuses) {
+  const itemsById = new Map((estimate?.items || []).map((item) => [item.id, item]));
+  let changed = false;
+
+  (statuses || []).forEach((status) => {
+    const item = itemsById.get(status.lineId);
+    if (!item) {
+      return;
+    }
+    const nextStatus = status.status || "";
+    const nextError = status.error || "";
+    const nextCalcKey = JSON.stringify(status.calcJson || null);
+    if (item.calcStatus !== nextStatus || item.calcError !== nextError || item.calcJsonKey !== nextCalcKey) {
+      item.calcStatus = nextStatus;
+      item.calcError = nextError;
+      item.calcJson = status.calcJson || null;
+      item.calcJsonKey = nextCalcKey;
+      changed = true;
+    }
+    if (nextStatus === "done" && status.calcJson && applyEstimateCalcRecord(item, status.calcJson)) {
+      changed = true;
+    }
+  });
+
+  return changed;
+}
+
+async function pollEstimateCalcStatus(estimateId) {
+  if (!state.me || !isPersistedEstimateId(estimateId) || estimateCalcStatusPollInflight === estimateId) {
+    return;
+  }
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+
+  estimateCalcStatusPollInflight = estimateId;
+  try {
+    const response = await api(`/api/estimates/${estimateId}/calc-status`);
+    if (applyEstimateCalcStatuses(estimate, response.items || [])) {
+      saveEditorState();
+      if (state.section === "editor" && state.editorTab === estimateId && state.estimateViewMode === "table") {
+        if (isEditorHeaderFieldActive()) {
+          pendingEditorRemountEstimateId = estimateId;
+          updateEditorTableContent(estimate);
+        } else {
+          mountEditorContent(estimate);
+        }
+      }
+    }
+  } catch {
+    return;
+  } finally {
+    if (estimateCalcStatusPollInflight === estimateId) {
+      estimateCalcStatusPollInflight = null;
+    }
+  }
+}
+
+function stopEstimateCalcStatusPolling() {
+  if (estimateCalcStatusPollTimer) {
+    window.clearInterval(estimateCalcStatusPollTimer);
+    estimateCalcStatusPollTimer = 0;
+  }
+}
+
+function syncEstimateCalcStatusPolling() {
+  stopEstimateCalcStatusPolling();
+  const estimateId = state.section === "editor" && state.estimateViewMode === "table" ? state.editorTab : "";
+  if (!estimateId || estimateId === "buffer" || !isPersistedEstimateId(estimateId)) {
+    return;
+  }
+  void pollEstimateCalcStatus(estimateId);
+  estimateCalcStatusPollTimer = window.setInterval(() => {
+    if (state.section !== "editor" || state.estimateViewMode !== "table" || state.editorTab !== estimateId) {
+      stopEstimateCalcStatusPolling();
+      return;
+    }
+    void pollEstimateCalcStatus(estimateId);
+  }, ESTIMATE_CALC_STATUS_POLL_MS);
 }
 
 function estimateLineFromGSNRecord(record, node, lineId = `line_${Date.now()}`) {
@@ -3035,22 +3630,40 @@ function estimateTableRowClass(item, rowKind) {
   return classes.join(" ");
 }
 
+function renderEstimateCalcStatusBadge(item) {
+  const status = String(item?.calcStatus || "").trim();
+  if (!status || estimateLineIsStructural(item)) {
+    return "";
+  }
+  const labels = {
+    queued: "В очереди",
+    leased: "Считается",
+    done: "Рассчитано",
+    failed: "Повтор",
+    dead: "Ошибка",
+  };
+  const label = labels[status] || status;
+  const title = item?.calcError ? ` title="${escapeHTML(item.calcError)}"` : "";
+  return `<span class="editor-estimate-calc-status editor-estimate-calc-status-${escapeHTML(status)}"${title}>${escapeHTML(label)}</span>`;
+}
+
 function renderEstimateTableRow(options) {
   const { estimateId, item, indexLabel, rowKind, hasResources, isExpanded, lineIndex, lineCount, parentItem } =
     options;
   const isChild = rowKind === "child";
   const isStructural = estimateLineIsStructural(item);
+  const isPartialGsn = estimateLineShowsGsnPartial(item);
   const lineTotal = estimateLineTotal(item, parentItem);
   const quantityCell = isStructural ? "" : formatNumber(item.quantity);
   return `
     <tr class="${estimateTableRowClass(item, rowKind)}">
       <td class="editor-estimate-index-cell">${escapeHTML(indexLabel)}</td>
       ${renderEstimateCodeCell(estimateId, item, { rowKind, hasResources, isExpanded })}
-      <td class="editor-estimate-name-cell${isChild ? " editor-estimate-name-cell-child" : ""}">${escapeHTML(item.name || "")}</td>
-      <td class="editor-estimate-unit-cell">${escapeHTML(item.unit || "")}</td>
+      <td class="editor-estimate-name-cell${isChild ? " editor-estimate-name-cell-child" : ""}">${isPartialGsn ? renderEstimateCalcStatusBadge(item) : `${escapeHTML(item.name || "")}${renderEstimateCalcStatusBadge(item)}`}</td>
+      <td class="editor-estimate-unit-cell">${isPartialGsn ? "" : escapeHTML(item.unit || "")}</td>
       <td class="editor-estimate-quantity-cell">${quantityCell}</td>
-      <td class="editor-estimate-price-cell">${formatEstimateUnitPrice(item)}</td>
-      <td class="editor-estimate-total-cell">${formatEstimateMoney(lineTotal)}</td>
+      <td class="editor-estimate-price-cell">${isPartialGsn ? "" : formatEstimateUnitPrice(item)}</td>
+      <td class="editor-estimate-total-cell">${isPartialGsn ? "" : formatEstimateMoney(lineTotal)}</td>
       ${renderEstimateLineActions(estimateId, item, lineIndex, lineCount, {
         rowKind,
         hasResources,
@@ -3165,10 +3778,41 @@ async function toggleEstimateLineExpand(estimateId, lineId) {
   renderEditor();
 }
 
-function renderEstimateEditor(estimate) {
-  const items = estimate.items || [];
-  const rows = buildEstimateTableRows(estimate);
+function renderEditorEstimateViewModes(estimate) {
+  if (!estimate || !els.editorEstimateViewModes) {
+    els.editorEstimateViewModes?.classList.add("hidden");
+    if (els.editorEstimateViewModes) {
+      els.editorEstimateViewModes.innerHTML = "";
+    }
+    return;
+  }
 
+  els.editorEstimateViewModes.classList.remove("hidden");
+  els.editorEstimateViewModes.innerHTML = renderEstimateViewModeTabs(estimate);
+}
+
+function renderEstimateViewModeTabs(estimate) {
+  const textActive = state.estimateViewMode === "text" ? " active" : "";
+  const tableActive = state.estimateViewMode === "table" ? " active" : "";
+  return `
+    <button
+      class="editor-view-mode-tab${textActive}"
+      data-editor-view-mode="text"
+      data-editor-view-estimate="${escapeHTML(estimate.id)}"
+      type="button"
+    >Текстовый</button>
+    <button
+      class="editor-view-mode-tab${tableActive}"
+      data-editor-view-mode="table"
+      data-editor-view-estimate="${escapeHTML(estimate.id)}"
+      type="button"
+    >Табличный</button>
+  `;
+}
+
+function renderEstimateEditorHeader(estimate) {
+  const items = estimate.items || [];
+  const calcProgressText = formatEstimateCalcProgressText(items);
   return `
     <div class="editor-estimate-header">
       <label class="editor-estimate-header-field">
@@ -3203,7 +3847,12 @@ function renderEstimateEditor(estimate) {
       </label>
       <div class="editor-estimate-header-field editor-estimate-header-field-total">
         <span class="muted">Сметная стоимость</span>
-        <output class="editor-estimate-total-value">${money.format(estimateGrandTotal(items))}</output>
+        <output class="editor-estimate-total-value">${money.format(estimateGrandTotalForDisplay(items))}</output>
+        ${
+          calcProgressText
+            ? `<span class="editor-estimate-calc-progress muted">${escapeHTML(calcProgressText)}</span>`
+            : ""
+        }
       </div>
     </div>
     <div class="editor-estimate-meta">
@@ -3216,6 +3865,159 @@ function renderEstimateEditor(estimate) {
         <strong>${escapeHTML(estimate.objectLabel || "-")}</strong>
       </span>
     </div>
+  `;
+}
+
+function renderEstimateEditorActions(estimate, options = {}) {
+  const { tableMode = false } = options;
+  return `
+    <div class="editor-estimate-actions">
+      ${
+        tableMode
+          ? `
+      <button
+        class="secondary construction-add-btn"
+        data-editor-add-line="${escapeHTML(estimate.id)}"
+        type="button"
+      >+ Добавить строку сметы</button>
+      <button
+        class="secondary construction-add-btn"
+        data-editor-paste-buffer="${escapeHTML(estimate.id)}"
+        type="button"
+        ${state.buffer.length ? "" : "disabled"}
+      >Добавить позиции из буфера</button>
+      <button
+        class="secondary construction-add-btn"
+        data-editor-export-excel="${escapeHTML(estimate.id)}"
+        type="button"
+      >Вывести в Excel</button>
+      `
+          : ""
+      }
+      <button
+        class="secondary construction-add-btn"
+        data-editor-close-estimate="${escapeHTML(estimate.id)}"
+        type="button"
+      >Закрыть смету</button>
+      <button
+        class="icon-button secondary icon-button-danger"
+        data-editor-delete-estimate="${escapeHTML(estimate.id)}"
+        type="button"
+        title="Удалить смету"
+        aria-label="Удалить смету"
+      >${iconTrash()}</button>
+    </div>
+  `;
+}
+
+function renderEstimateTextEditor(estimate) {
+  return `
+    <textarea
+      class="editor-estimate-text"
+      data-editor-estimate-text="${escapeHTML(estimate.id)}"
+      spellcheck="false"
+      rows="24"
+    ></textarea>
+    ${renderEstimateEditorActions(estimate)}
+  `;
+}
+
+function isEditorHeaderFieldActive() {
+  const active = document.activeElement;
+  if (!active || !els.editorContent?.contains(active)) {
+    return false;
+  }
+  const header = active.closest(".editor-estimate-header");
+  if (!header || header.offsetParent === null) {
+    return false;
+  }
+  return true;
+}
+
+function isEditorContentMountedForEstimate(estimateId) {
+  if (!estimateId || !els.editorContent) {
+    return false;
+  }
+  return Boolean(
+    els.editorContent.querySelector(
+      `[data-editor-fgis-set="${estimateId}"], [data-editor-estimate-text="${estimateId}"]`,
+    ),
+  );
+}
+
+function refreshEditorFgisSetSelect(estimate) {
+  const select = els.editorContent?.querySelector(`[data-editor-fgis-set="${estimate.id}"]`);
+  if (!select) {
+    return false;
+  }
+  const preservedValue = select.value || estimate.fgisSetId || "";
+  select.innerHTML = renderFgisSetSelectOptions(estimate.fgisSetId);
+  if (preservedValue) {
+    select.value = preservedValue;
+  }
+  return true;
+}
+
+function updateEditorTableContent(estimate) {
+  if (state.estimateViewMode !== "table") {
+    return;
+  }
+  const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
+  if (!tbody) {
+    return;
+  }
+  const rows = buildEstimateTableRows(estimate);
+  tbody.innerHTML = rows.length
+    ? rows.join("")
+    : `<tr><td colspan="8" class="muted">Строки сметы отсутствуют</td></tr>`;
+  const items = estimate.items || [];
+  const totalOutput = els.editorContent?.querySelector(".editor-estimate-total-value");
+  if (totalOutput) {
+    totalOutput.textContent = money.format(estimateGrandTotalForDisplay(items));
+  }
+  const progressOutput = els.editorContent?.querySelector(".editor-estimate-calc-progress");
+  if (progressOutput) {
+    const progressText = formatEstimateCalcProgressText(items);
+    progressOutput.textContent = progressText;
+    progressOutput.hidden = !progressText;
+  }
+}
+
+function flushPendingEditorRemount() {
+  if (!pendingEditorRemountEstimateId || isEditorHeaderFieldActive()) {
+    return;
+  }
+  const estimateId = pendingEditorRemountEstimateId;
+  pendingEditorRemountEstimateId = null;
+  if (state.section !== "editor" || state.editorTab !== estimateId) {
+    return;
+  }
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+  mountEditorContent(estimate, { force: true });
+}
+
+function mountEditorContent(estimate, { force = false } = {}) {
+  const editorMounted = isEditorContentMountedForEstimate(estimate.id);
+  if (!force && editorMounted && isEditorHeaderFieldActive()) {
+    pendingEditorRemountEstimateId = estimate.id;
+    return;
+  }
+  pendingEditorRemountEstimateId = null;
+  els.editorContent.innerHTML = renderEstimateEditor(estimate);
+  if (state.estimateViewMode === "text") {
+    const textarea = els.editorContent.querySelector(`[data-editor-estimate-text="${estimate.id}"]`);
+    if (textarea) {
+      textarea.value = getEstimateTextDraft(estimate);
+    }
+  }
+}
+
+function renderEstimateTableEditor(estimate) {
+  const rows = buildEstimateTableRows(estimate);
+  return `
     <div class="table-wrap">
       <table class="editor-estimate-table">
         <thead>
@@ -3235,29 +4037,18 @@ function renderEstimateEditor(estimate) {
         </tbody>
       </table>
     </div>
-    <div class="editor-estimate-actions">
-      <button
-        class="secondary construction-add-btn"
-        data-editor-add-line="${escapeHTML(estimate.id)}"
-        type="button"
-      >+ Добавить строку сметы</button>
-      <button
-        class="secondary construction-add-btn"
-        data-editor-paste-buffer="${escapeHTML(estimate.id)}"
-        type="button"
-        ${state.buffer.length ? "" : "disabled"}
-      >Добавить позиции из буфера</button>
-      <button
-        class="secondary construction-add-btn"
-        data-editor-export-excel="${escapeHTML(estimate.id)}"
-        type="button"
-      >Вывести в Excel</button>
-      <button
-        class="secondary construction-add-btn"
-        data-editor-close-estimate="${escapeHTML(estimate.id)}"
-        type="button"
-      >Закрыть смету</button>
-    </div>
+    ${renderEstimateEditorActions(estimate, { tableMode: true })}
+  `;
+}
+
+function renderEstimateEditor(estimate) {
+  if (state.estimateViewMode === "text") {
+    return renderEstimateTextEditor(estimate);
+  }
+
+  return `
+    ${renderEstimateEditorHeader(estimate)}
+    ${renderEstimateTableEditor(estimate)}
   `;
 }
 
@@ -3287,6 +4078,869 @@ function formatEstimateUnitPricePlain(item) {
 function estimateLineCodeExportText(item) {
   const structuralLabel = estimateLineStructuralLabel(item);
   return structuralLabel || estimateLineDisplayCode(item);
+}
+
+const ESTIMATE_TEXT_DELIMITER = "'";
+
+function escapeEstimateTextField(value) {
+  return String(value ?? "")
+    .replace(/\\/g, "\\\\")
+    .replace(/\r\n/g, "\\n")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\n")
+    .replace(/'/g, "''");
+}
+
+function unescapeEstimateTextField(value) {
+  return String(value ?? "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\\\/g, "\\");
+}
+
+function estimateLineIsGsn(item) {
+  return String(item?.source || "").toLowerCase() === "gsn";
+}
+
+function estimateLineCalcDone(item) {
+  return String(item?.calcStatus || "").trim() === "done";
+}
+
+function estimateLineShowsGsnPartial(item) {
+  if (!estimateLineIsGsn(item) || estimateLineIsStructural(item)) {
+    return false;
+  }
+  if (estimateLineCalcDone(item)) {
+    return false;
+  }
+  const status = String(item?.calcStatus || "").trim();
+  if (status) {
+    return status !== "done";
+  }
+  if (String(item?.name || "").trim() || String(item?.unit || "").trim()) {
+    return false;
+  }
+  if (Number(item?.total || 0) || Number(item?.unitPrice || 0)) {
+    return false;
+  }
+  return !item.children?.length;
+}
+
+function clearGsnLineCalcEnrichment(item) {
+  if (!estimateLineIsGsn(item) || estimateLineIsStructural(item)) {
+    return;
+  }
+  const sourceFields = parseSourceDataPositionLineFieldsFromRawText(item.rawText);
+  item.calcStatus = "";
+  item.calcError = "";
+  item.calcJson = null;
+  item.calcJsonKey = JSON.stringify(null);
+  item.hasResources = false;
+  item.children = undefined;
+  delete item.isWork;
+  if (sourceFields?.hasOriginalCode) {
+    item.originalCode = sourceFields.originalCode;
+  } else {
+    item.originalCode = "";
+  }
+  if (sourceFields?.hasName) {
+    item.name = sourceFields.name;
+  } else {
+    item.name = "";
+  }
+  if (sourceFields?.hasUnit) {
+    item.unit = sourceFields.unit;
+  } else {
+    item.unit = "";
+  }
+  if (sourceFields?.hasTotal) {
+    item.total = sourceFields.total;
+    item.unitPrice = sourceFields.unitPrice;
+  } else {
+    item.unitPrice = 0;
+    item.unitPriceText = "";
+    item.unitPriceIndex = "";
+    item.total = 0;
+  }
+}
+
+function enrichEditorEstimateItems(items) {
+  (items || []).forEach((item) => {
+    if (estimateLineCalcDone(item) && item.calcJson) {
+      applyEstimateCalcRecord(item, item.calcJson);
+    }
+  });
+}
+
+function estimateLineShouldSerializeAsGsn(item) {
+  if (estimateLineIsStructural(item)) {
+    return false;
+  }
+  if (String(item?.source || "").toLowerCase() === "user_position") {
+    return false;
+  }
+  if (estimateLineIsGsn(item)) {
+    return true;
+  }
+  if (item?.type !== "position") {
+    return false;
+  }
+  return estimateLineIsWorkPosition(item) || estimateLineIsResourcePosition(item);
+}
+
+function normalizeEstimateItemTextFields(fields) {
+  if (fields.length === 10) {
+    return fields.slice(1);
+  }
+  if (fields.length === 9) {
+    return fields;
+  }
+  if (fields.length === 8) {
+    return [...fields, "0"];
+  }
+  if (fields.length === 7) {
+    return [...fields, "0", "0"];
+  }
+  if (fields.length === 6) {
+    const [type, source, code, name, quantity, unit] = fields;
+    return [type, source, code, "", name, quantity, unit, "0", "0"];
+  }
+  return null;
+}
+
+function splitEstimateTextLine(line) {
+  return String(line || "").split(ESTIMATE_TEXT_DELIMITER);
+}
+
+function parseEstimateTextNumber(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .replace(/\s/g, "")
+    .replace(",", ".");
+  if (!normalized) {
+    return 0;
+  }
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : 0;
+}
+
+const SOURCE_DATA_HEADER_SEP_4 = "''''";
+const SOURCE_DATA_HEADER_SEP_5 = "'''''";
+const SOURCE_DATA_FORMAT_CODE = 49;
+
+function deriveEstimateSourceDataNumericId(estimate) {
+  if (estimate.sourceDataNumericId != null && Number.isFinite(Number(estimate.sourceDataNumericId))) {
+    return Number(estimate.sourceDataNumericId);
+  }
+  const sessionMatch = String(estimate.id || "").match(/^session_est_(\d+)$/);
+  if (sessionMatch) {
+    return Math.max(1, Math.floor(Number(sessionMatch[1]) / 1000));
+  }
+  const digits = String(estimate.id || "").replace(/\D/g, "");
+  if (digits) {
+    return Math.max(1, Number(digits.slice(-9)) || 1);
+  }
+  return 1;
+}
+
+function getEstimateConstructionObjectFields(estimate) {
+  if (
+    estimate.constructionName != null ||
+    estimate.constructionCode != null ||
+    estimate.objectName != null ||
+    estimate.objectCode != null
+  ) {
+    return {
+      constructionName: estimate.constructionName || "",
+      constructionCode: estimate.constructionCode || "",
+      objectName: estimate.objectName || "",
+      objectCode: estimate.objectCode || "",
+    };
+  }
+
+  const object = state.objects.find((item) => item.id === estimate.objectId);
+  const construction = object
+    ? state.constructions.find((item) => item.id === object.constructionId)
+    : null;
+
+  return {
+    constructionName: construction?.name || "",
+    constructionCode: construction?.code || "",
+    objectName: object?.name || "",
+    objectCode: object?.code || "",
+  };
+}
+
+function estimateSourceDataPositionCode(item) {
+  return String(item?.code || item?.recordCode || "").trim();
+}
+
+function readEstimateHeaderFieldsFromDom(estimateId) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+  const codeInput = els.editorContent?.querySelector(`[data-editor-estimate-code="${estimateId}"]`);
+  const titleInput = els.editorContent?.querySelector(`[data-editor-estimate-title="${estimateId}"]`);
+  if (codeInput) {
+    estimate.code = String(codeInput.value || "").trim();
+  }
+  if (titleInput) {
+    estimate.title = String(titleInput.value || "").trim();
+  }
+}
+
+function flushEstimateEditorFields(estimateId) {
+  if (!estimateId || estimateId === "buffer") {
+    return;
+  }
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+  if (state.estimateViewMode === "text" && state.editorTab === estimateId) {
+    const draft = readEstimateTextDraft(estimateId);
+    if (draft != null) {
+      try {
+        applyEstimateTextToEstimate(estimate, draft);
+      } catch {
+        // Не блокируем переключение вкладки при ошибке разбора черновика.
+      }
+    }
+    return;
+  }
+  if (state.estimateViewMode === "table" && state.editorTab === estimateId) {
+    readEstimateHeaderFieldsFromDom(estimateId);
+  }
+}
+
+function normalizeEstimateSourceDataFields(estimate) {
+  if (!estimate) {
+    return;
+  }
+  if (estimate.sourceDataDocumentSet == null && estimate.sourceDataHeaderCode1 != null) {
+    estimate.sourceDataDocumentSet = estimate.sourceDataHeaderCode1;
+  }
+  if (estimate.sourceDataCalculationFlags == null && estimate.sourceDataHeaderCode2 != null) {
+    estimate.sourceDataCalculationFlags = estimate.sourceDataHeaderCode2;
+  }
+  if (estimate.sourceDataSummaryChapterNo == null && estimate.sourceDataOrdinal != null) {
+    estimate.sourceDataSummaryChapterNo = estimate.sourceDataOrdinal;
+  }
+}
+
+function serializeSourceDataEstimateHeaderLine(estimate) {
+  normalizeEstimateSourceDataFields(estimate);
+  const numericId = deriveEstimateSourceDataNumericId(estimate);
+  const fields = [
+    String(numericId * 10),
+    estimate.sourceDataDocumentSet || "",
+    estimate.sourceDataCalculationFlags || "",
+    "",
+    estimate.district || "",
+    "",
+    "",
+    "",
+    "",
+  ];
+  return `Э${fields.join(ESTIMATE_TEXT_DELIMITER)}*`;
+}
+
+function serializeSourceDataConstructionLine(estimate) {
+  const { constructionName, constructionCode, objectName, objectCode } =
+    getEstimateConstructionObjectFields(estimate);
+  const fields = [
+    "",
+    "",
+    constructionName || "",
+    constructionCode || "",
+    objectCode || "",
+    objectName || "",
+    "",
+    estimate.sourceDataSummaryChapterNo || "",
+    estimate.code || "",
+    estimate.title || "",
+    "",
+    "",
+    "",
+  ];
+  return `Ю${fields.join(ESTIMATE_TEXT_DELIMITER)}*`;
+}
+
+function serializeSourceDataConfigLine(estimate) {
+  if (estimate.sourceDataBimConfig) {
+    return `К${ESTIMATE_TEXT_DELIMITER}${estimate.sourceDataBimConfig}*`;
+  }
+  if (estimate.fgisSetId) {
+    return `F(${SOURCE_DATA_FORMAT_CODE})${ESTIMATE_TEXT_DELIMITER}наборФГИС=${escapeEstimateTextField(estimate.fgisSetId)}*`;
+  }
+  return `К*`;
+}
+
+function estimateSourceDataPositionSerializedFields(item) {
+  const parsed = parseSourceDataPositionLineFieldsFromRawText(item.rawText);
+  const name = String(item.name || "").trim() || (parsed?.hasName ? parsed.name : "");
+  const unit = String(item.unit || "").trim() || (parsed?.hasUnit ? parsed.unit : "");
+  let total = Number(item.total || 0);
+  if (!total && parsed?.hasTotal) {
+    total = parsed.total;
+  }
+  return { name, unit, total };
+}
+
+function serializeSourceDataPositionLine(item) {
+  const code = estimateSourceDataPositionCipherRaw(item);
+  const quantity = estimateSourceDataQuantityRaw(item);
+  const { name, unit, total } = estimateSourceDataPositionSerializedFields(item);
+  const hasExtraFields = Boolean(name || unit || total);
+
+  if (!hasExtraFields) {
+    return `${escapeEstimateTextField(code)}${ESTIMATE_TEXT_DELIMITER}${escapeEstimateTextField(quantity)}*`;
+  }
+
+  const totalText = total ? String(total) : "";
+  return `${escapeEstimateTextField(code)}${ESTIMATE_TEXT_DELIMITER}${escapeEstimateTextField(quantity)}${ESTIMATE_TEXT_DELIMITER}${escapeEstimateTextField(totalText)}${ESTIMATE_TEXT_DELIMITER}${escapeEstimateTextField(name)}${ESTIMATE_TEXT_DELIMITER}${escapeEstimateTextField(unit)}*`;
+}
+
+function serializeSourceDataItemLine(item) {
+  if (item?.type === "section") {
+    return `Р${escapeEstimateTextField(item.name || "")}*`;
+  }
+  if (item?.type === "subsection") {
+    return `ПР${escapeEstimateTextField(item.name || "")}*`;
+  }
+  return serializeSourceDataPositionLine(item);
+}
+
+function serializedSourceDataLineBody(line) {
+  return line.endsWith("*") ? line.slice(0, -1) : line;
+}
+
+function serializeEstimateToText(estimate) {
+  const lines = [
+    serializeSourceDataEstimateHeaderLine(estimate),
+    serializeSourceDataConstructionLine(estimate),
+    serializeSourceDataConfigLine(estimate),
+  ];
+  const items = estimate.items || [];
+  for (const item of items) {
+    const line = serializeSourceDataItemLine(item);
+    lines.push(line);
+    if (item && (item.type === "position" || item.type === "section" || item.type === "subsection")) {
+      item.rawText = serializedSourceDataLineBody(line);
+    }
+  }
+  if (items.length > 0) {
+    lines.push("К*");
+  }
+  return lines.join("\n");
+}
+
+function parseSourceDataParamMap(fields) {
+  const params = {};
+  for (const field of fields) {
+    if (!field) {
+      continue;
+    }
+    const eqIndex = field.indexOf("=");
+    if (eqIndex < 0) {
+      continue;
+    }
+    const key = field.slice(0, eqIndex).trim();
+    const value = unescapeEstimateTextField(field.slice(eqIndex + 1));
+    if (key) {
+      params[key] = value;
+    }
+  }
+  return params;
+}
+
+function parseSourceDataEstimateHeaderLine(line) {
+  if (!line.startsWith("Э")) {
+    throw new Error("Первая строка должна начинаться с Э");
+  }
+  const body = line.slice(1);
+  const legacyHeaderMatch = body.match(/^(\d+)''''(.*)'''''$/);
+  if (legacyHeaderMatch) {
+    const idTimes10 = legacyHeaderMatch[1].trim();
+    const district = legacyHeaderMatch[2];
+    const numericId = Math.floor(parseEstimateTextNumber(idTimes10) / 10);
+    return {
+      sourceDataNumericId: Number.isFinite(numericId) && numericId > 0 ? numericId : 1,
+      sourceDataDocumentSet: "",
+      sourceDataCalculationFlags: "",
+      district,
+    };
+  }
+
+  const fields = splitSourceDataStrictFields(body);
+  const idTimes10 = fields[0] || "";
+  const numericId = Math.floor(parseEstimateTextNumber(idTimes10) / 10);
+  return {
+    sourceDataNumericId: Number.isFinite(numericId) && numericId > 0 ? numericId : 1,
+    sourceDataDocumentSet: fields[1] || "",
+    sourceDataCalculationFlags: fields[2] || "",
+    district: fields[4] || "",
+  };
+}
+
+function splitSourceDataStrictFields(line) {
+  return String(line || "").split(ESTIMATE_TEXT_DELIMITER);
+}
+
+function parseSourceDataConstructionLine(line) {
+  if (!line.startsWith("Ю")) {
+    throw new Error("Вторая строка должна начинаться с Ю");
+  }
+  const fields = splitSourceDataStrictFields(line.slice(1));
+  return {
+    constructionName: fields[2] || "",
+    constructionCode: fields[3] || "",
+    objectCode: fields[4] || "",
+    objectName: fields[5] || "",
+    sourceDataSummaryChapterNo: fields[7] || "",
+    code: fields[8] || "",
+    title: fields[9] || "",
+  };
+}
+
+function parseSourceDataConfigLine(line) {
+  if (line.startsWith("F(")) {
+    const match = line.match(/^F\((\d+)\)(.*)$/);
+    if (!match) {
+      throw new Error("Строка F: неверный формат");
+    }
+    const fields = splitEstimateTextLine(match[2] || "").map(unescapeEstimateTextField);
+    const params = parseSourceDataParamMap(fields);
+    return {
+      fgisSetId: params.наборФГИС || params.fgisSetId || "",
+      sourceDataBimConfig: "",
+    };
+  }
+  if (!line.startsWith("К")) {
+    throw new Error("Третья строка должна начинаться с К или F(49)");
+  }
+  if (line === "К") {
+    return { sourceDataBimConfig: "" };
+  }
+  const fields = splitSourceDataStrictFields(line.slice(1));
+  const sourceDataBimConfig = fields[1] || fields[0] || "";
+  return { sourceDataBimConfig };
+}
+
+function isSourceDataSkippedLine(line) {
+  if (line === "К") {
+    return true;
+  }
+  if (line.startsWith("К'")) {
+    return true;
+  }
+  return line.startsWith("F(");
+}
+
+function isSourceDataTextFormat(lines) {
+  const firstLine = String(lines[0] || "").trim();
+  return firstLine.startsWith("Э");
+}
+
+function applyLegacyEstimateTextToEstimate(estimate, lines) {
+  const headerFields = splitEstimateTextLine(lines[0]).map(unescapeEstimateTextField);
+  if (headerFields.length < 2) {
+    throw new Error("Первая строка должна содержать титульные данные сметы");
+  }
+
+  const [code, title, description = "", district = "", fgisSetId = ""] = headerFields;
+  const previousDistrict = estimate.district || "";
+  const previousFgisSetId = estimate.fgisSetId || "";
+  estimate.code = code;
+  estimate.title = title;
+  estimate.description = description;
+  estimate.district = headerFields.length > 3 ? district : previousDistrict;
+  estimate.fgisSetId = headerFields.length > 4 ? fgisSetId : previousFgisSetId;
+
+  const existingItems = estimate.items || [];
+  const existingById = new Map(existingItems.map((item) => [item.id, item]));
+  const newItems = [];
+
+  for (let lineIndex = 1; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    const fields = splitEstimateTextLine(line).map(unescapeEstimateTextField);
+    if (fields.length === 2) {
+      const [first, second] = fields;
+      const lineType = String(first || "").toLowerCase();
+      if (lineType === "section" || lineType === "subsection") {
+        const existing = [...existingById.values()].find(
+          (item) => item.type === lineType && String(item.name || "") === second,
+        );
+        newItems.push({
+          id: existing?.id || `line_${Date.now()}_${newItems.length}`,
+          type: lineType,
+          code: "",
+          name: second,
+          unit: "",
+          quantity: 0,
+          unitPrice: 0,
+          total: 0,
+          rawText: line,
+        });
+        continue;
+      }
+
+      const gsnCode = extractSourceDataPositionCipher(first);
+      const quantityValue = 0;
+      const existing =
+        findExistingGsnItemByCode(existingItems, gsnCode) ||
+        existingItems.find((item) => {
+          const itemCode = estimateLineNormalizedSourceCode(item) || estimateRecordFetchCode(item);
+          return String(itemCode).trim() === gsnCode;
+        }) ||
+        null;
+      newItems.push({
+        id: existing?.id || `line_${Date.now()}_${newItems.length}`,
+        type: "position",
+        source: "gsn",
+        sourceId: gsnCode,
+        sourceCode: String(first || "").trim() || gsnCode,
+        code: gsnCode,
+        recordCode: gsnCode,
+        originalCode: extractSourceDataPositionOriginalCode(first),
+        name: "",
+        unit: "",
+        quantity: quantityValue,
+        unitPrice: 0,
+        total: 0,
+        hasResources: false,
+        children: undefined,
+        calcStatus: "",
+        calcError: "",
+        calcJson: null,
+        rawText: line,
+      });
+      continue;
+    }
+
+    const normalizedFields = normalizeEstimateItemTextFields(fields);
+    if (!normalizedFields) {
+      throw new Error(`Строка ${lineIndex + 1}: неверный формат (${fields.length} полей)`);
+    }
+
+    const [type, source, itemCode, originalCode, name, quantity, unit, unitPrice, total] = normalizedFields;
+    const normalizedSource = String(source || "").toLowerCase();
+    const existing =
+      [...existingById.values()].find(
+        (item) =>
+          String(item.source || "").toLowerCase() === normalizedSource &&
+          String(item.code || "") === String(itemCode || "") &&
+          String(item.name || "") === String(name || ""),
+      ) || null;
+    const quantityValue = parseEstimateTextNumber(quantity);
+    const unitPriceValue = parseEstimateTextNumber(unitPrice);
+    let totalValue = parseEstimateTextNumber(total);
+    if (!totalValue && quantityValue && unitPriceValue) {
+      totalValue = quantityValue * unitPriceValue;
+    }
+
+    const item = {
+      id: existing?.id || `line_${Date.now()}_${newItems.length}`,
+      type: type || "position",
+      source: normalizedSource,
+      code: itemCode || "",
+      recordCode: itemCode || existing?.recordCode || "",
+      originalCode: originalCode || "",
+      name: name || "",
+      unit: unit || "",
+      quantity: quantityValue,
+      unitPrice: unitPriceValue,
+      total: totalValue,
+      hasResources: existing?.hasResources || false,
+      children: existing?.children,
+      rawText: line,
+    };
+    if (normalizedSource === "user_position" && existing?.sourceId) {
+      item.sourceId = existing.sourceId;
+    }
+    newItems.push(item);
+  }
+
+  estimate.items = newItems;
+}
+
+function trimSourceDataRecordLine(line, lineNumber) {
+  const trimmed = String(line || "").trimEnd();
+  if (!trimmed.endsWith("*")) {
+    throw new Error(`Строка ${lineNumber}: должна заканчиваться на *`);
+  }
+  return trimmed.slice(0, -1);
+}
+
+function applySourceDataTextToEstimate(estimate, lines) {
+  if (lines.length < 3) {
+    throw new Error("Формат «Исходные данные»: ожидается минимум 3 строки (Э, Ю, К)");
+  }
+
+  const header = parseSourceDataEstimateHeaderLine(trimSourceDataRecordLine(lines[0], 1));
+  const construction = parseSourceDataConstructionLine(trimSourceDataRecordLine(lines[1], 2));
+  const config = parseSourceDataConfigLine(trimSourceDataRecordLine(lines[2], 3));
+
+  const previousDistrict = estimate.district || "";
+  const previousFgisSetId = estimate.fgisSetId || "";
+  estimate.sourceDataNumericId = header.sourceDataNumericId;
+  estimate.sourceDataDocumentSet = header.sourceDataDocumentSet || "";
+  estimate.sourceDataCalculationFlags = header.sourceDataCalculationFlags || "";
+  estimate.district = header.district || previousDistrict;
+  estimate.constructionName = construction.constructionName;
+  estimate.constructionCode = construction.constructionCode;
+  estimate.objectName = construction.objectName;
+  estimate.objectCode = construction.objectCode;
+  estimate.sourceDataSummaryChapterNo = construction.sourceDataSummaryChapterNo || "";
+  estimate.code = construction.code;
+  estimate.title = construction.title;
+  estimate.constructionLabel =
+    `${construction.constructionCode || ""} ${construction.constructionName || ""}`.trim();
+  estimate.objectLabel = `${construction.objectCode || ""} ${construction.objectName || ""}`.trim();
+  estimate.sourceDataBimConfig = config.sourceDataBimConfig || "";
+
+  if (config.fgisSetId) {
+    estimate.fgisSetId = config.fgisSetId;
+  } else if (!estimate.fgisSetId) {
+    estimate.fgisSetId = previousFgisSetId;
+  }
+  const existingItems = estimate.items || [];
+  const existingById = new Map(existingItems.map((item) => [item.id, item]));
+  const newItems = [];
+
+  for (let lineIndex = 3; lineIndex < lines.length; lineIndex += 1) {
+    const rawLine = lines[lineIndex].trimEnd();
+    if (!rawLine) {
+      continue;
+    }
+    const line = trimSourceDataRecordLine(rawLine, lineIndex + 1);
+    if (isSourceDataSkippedLine(line)) {
+      continue;
+    }
+
+    if (line.startsWith("ПР")) {
+      const name = unescapeEstimateTextField(line.slice(2));
+      const existing = [...existingById.values()].find(
+        (item) => item.type === "subsection" && String(item.name || "") === name,
+      );
+      newItems.push({
+        id: existing?.id || `line_${Date.now()}_${newItems.length}`,
+        type: "subsection",
+        code: "",
+        name,
+        unit: "",
+        quantity: 0,
+        unitPrice: 0,
+        total: 0,
+        rawText: line,
+      });
+      continue;
+    }
+
+    if (line.startsWith("Р")) {
+      const name = unescapeEstimateTextField(line.slice(1));
+      const existing = [...existingById.values()].find(
+        (item) => item.type === "section" && String(item.name || "") === name,
+      );
+      newItems.push({
+        id: existing?.id || `line_${Date.now()}_${newItems.length}`,
+        type: "section",
+        code: "",
+        name,
+        unit: "",
+        quantity: 0,
+        unitPrice: 0,
+        total: 0,
+        rawText: line,
+      });
+      continue;
+    }
+
+    const fields = splitEstimateTextLine(line).map(unescapeEstimateTextField);
+    if (fields.length < 2) {
+      throw new Error(`Строка ${lineIndex + 1}: позиция должна содержать минимум шифр и объём`);
+    }
+
+    const parsedFields = parseSourceDataPositionLineFields(fields);
+
+    const normalizedCode = parsedFields.sourceCode;
+    const existing =
+      findExistingGsnItemByCode(existingItems, normalizedCode) ||
+      [...existingById.values()].find((item) => {
+        const code = estimateLineNormalizedSourceCode(item) || estimateSourceDataPositionCode(item);
+        if (String(code).trim() !== normalizedCode) {
+          return false;
+        }
+        if (!parsedFields.hasName) {
+          return true;
+        }
+        return String(item.name || "") === String(parsedFields.name || "");
+      }) ||
+      null;
+
+    const normalizedSource = String(existing?.source || "").toLowerCase();
+    const isUserPosition = normalizedSource === "user_position" && existing?.sourceId;
+    if (isUserPosition) {
+      let totalValue = parsedFields.hasTotal ? parsedFields.total : Number(existing?.total || 0);
+      let unitPriceValue = parsedFields.hasTotal
+        ? parsedFields.unitPrice
+        : Number(existing?.unitPrice || 0);
+      if (!parsedFields.hasTotal && totalValue && parsedFields.quantity && !unitPriceValue) {
+        unitPriceValue = totalValue / parsedFields.quantity;
+      }
+      if (!totalValue && parsedFields.quantity && unitPriceValue) {
+        totalValue = parsedFields.quantity * unitPriceValue;
+      }
+      newItems.push({
+        id: existing?.id || `line_${Date.now()}_${newItems.length}`,
+        type: "position",
+        source: "user_position",
+        sourceId: existing.sourceId,
+        sourceCode: "",
+        code: normalizedCode || existing?.code || "",
+        recordCode: normalizedCode || existing?.recordCode || "",
+        originalCode: parsedFields.hasOriginalCode ? parsedFields.originalCode : existing?.originalCode || "",
+        name: parsedFields.hasName ? parsedFields.name : existing?.name || "",
+        unit: parsedFields.hasUnit ? parsedFields.unit : existing?.unit || "",
+        quantity: parsedFields.hasQuantity ? Number(existing?.quantity || 0) : Number(existing?.quantity || 0),
+        unitPrice: unitPriceValue,
+        total: totalValue,
+        hasResources: existing?.hasResources || false,
+        children: existing?.children,
+        calcStatus: "",
+        calcError: "",
+        calcJson: null,
+        rawText: line,
+      });
+      continue;
+    }
+
+    newItems.push(
+      buildGsnPositionItemFromSourceDataLine({
+        existing,
+        fields,
+        rawText: line,
+      }),
+    );
+  }
+
+  estimate.items = newItems;
+}
+
+function findExistingGsnItemByCode(items, code) {
+  const normalizedCode = String(code || "").trim();
+  if (!normalizedCode) {
+    return null;
+  }
+  return (
+    (items || []).find((item) => {
+      if (!estimateLineIsGsn(item)) {
+        return false;
+      }
+      const itemCode = estimateLineNormalizedSourceCode(item) || estimateRecordFetchCode(item);
+      return String(itemCode).trim() === normalizedCode;
+    }) || null
+  );
+}
+
+function invalidateEstimateTextDraft(estimateId) {
+  delete state.estimateTextDrafts[estimateId];
+}
+
+function readEstimateTextDraft(estimateId) {
+  const textarea = els.editorContent?.querySelector(`[data-editor-estimate-text="${estimateId}"]`);
+  if (textarea) {
+    state.estimateTextDrafts[estimateId] = textarea.value;
+  }
+  return state.estimateTextDrafts[estimateId];
+}
+
+function applyEstimateTextToEstimate(estimate, text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+  if (!lines.length) {
+    throw new Error("Текст сметы пуст");
+  }
+
+  if (isSourceDataTextFormat(lines)) {
+    applySourceDataTextToEstimate(estimate, lines);
+    return;
+  }
+
+  applyLegacyEstimateTextToEstimate(estimate, lines);
+}
+
+function getEstimateTextDraft(estimate) {
+  if (state.estimateTextDrafts[estimate.id] === undefined) {
+    state.estimateTextDrafts[estimate.id] = serializeEstimateToText(estimate);
+  }
+  return state.estimateTextDrafts[estimate.id];
+}
+
+async function setEstimateViewMode(estimateId, mode) {
+  if (mode !== "text" && mode !== "table") {
+    return;
+  }
+  if (state.estimateViewMode === mode) {
+    return;
+  }
+
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+
+  if (state.estimateViewMode === "text" && mode === "table") {
+    const previousDistrict = estimate.district || "";
+    const previousFgisSetId = estimate.fgisSetId || "";
+    const draft = readEstimateTextDraft(estimateId);
+    try {
+      applyEstimateTextToEstimate(estimate, draft ?? serializeEstimateToText(estimate));
+      enrichEditorEstimateItems(estimate.items);
+      if (!estimate.district && previousDistrict) {
+        estimate.district = previousDistrict;
+      }
+      if (!estimate.fgisSetId && previousFgisSetId) {
+        estimate.fgisSetId = previousFgisSetId;
+      }
+      invalidateEstimateTextDraft(estimateId);
+      state.estimateViewMode = "table";
+      renderEditor();
+      saveEditorState();
+      void persistOpenEstimate(estimateId)
+        .then(() => pollEstimateCalcStatus(estimateId))
+        .catch(() => {});
+    } catch (error) {
+      showMessage(error.message || "Не удалось разобрать текст сметы", "error");
+      return;
+    }
+    return;
+  }
+
+  if (mode === "text") {
+    readEstimateHeaderFieldsFromDom(estimateId);
+    state.estimateTextDrafts[estimateId] = serializeEstimateToText(estimate);
+    saveEditorState();
+  }
+
+  state.estimateViewMode = mode;
+  renderEditor();
+}
+
+async function syncEstimateTextDraftIfNeeded(estimateId) {
+  if (state.estimateViewMode !== "text") {
+    return;
+  }
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+  const draft = readEstimateTextDraft(estimateId) ?? serializeEstimateToText(estimate);
+  applyEstimateTextToEstimate(estimate, draft);
+  invalidateEstimateTextDraft(estimateId);
+  saveEditorState();
 }
 
 const EXCEL_COLOR_BORDER = "DCE3EF";
@@ -3557,6 +5211,13 @@ async function exportEstimateToExcel(estimateId) {
     return;
   }
 
+  try {
+    await syncEstimateTextDraftIfNeeded(estimateId);
+  } catch (error) {
+    showMessage(error.message || "Не удалось разобрать текст сметы", "error");
+    return;
+  }
+
   await loadFGISSets();
 
   const worksheet = buildEstimateExcelWorksheet(estimate);
@@ -3654,6 +5315,7 @@ async function addBufferToEstimate(estimateId) {
 
     state.buffer = [];
     saveEstimateLinesExpanded();
+    invalidateEstimateTextDraft(estimate.id);
     saveEditorState();
     await persistOpenEstimate(estimate.id);
     renderEditor();
@@ -3673,7 +5335,7 @@ function buildEditorEstimateFromSource(sourceEstimate) {
     ? state.constructions.find((item) => item.id === object.constructionId)
     : null;
 
-  return {
+  const editorEstimate = {
     id: sourceEstimate.id,
     objectId: sourceEstimate.objectId,
     code: sourceEstimate.code || "",
@@ -3682,43 +5344,207 @@ function buildEditorEstimateFromSource(sourceEstimate) {
     status: sourceEstimate.status || "draft",
     district: sourceEstimate.district || "",
     fgisSetId: sourceEstimate.fgisSetId || "",
+    sourceDataDocumentSet: sourceEstimate.sourceDataDocumentSet || "",
+    sourceDataCalculationFlags: sourceEstimate.sourceDataCalculationFlags || "",
+    sourceDataSummaryChapterNo: sourceEstimate.sourceDataSummaryChapterNo || "",
+    sourceDataBimConfig: sourceEstimate.sourceDataBimConfig || "",
+    constructionName: construction?.name || "",
+    constructionCode: construction?.code || "",
+    objectName: object?.name || "",
+    objectCode: object?.code || "",
     constructionLabel: construction ? `${construction.code || ""} ${construction.name || ""}`.trim() : "",
     objectLabel: object ? `${object.code || ""} ${object.name || ""}`.trim() : "",
-    items: (sourceEstimate.items || []).map((item) => ({
-      id: item.id,
-      type: item.type || "position",
-      source: item.source || "",
-      code: item.code || "",
-      recordCode: item.code || "",
-      originalCode: item.originalCode || "",
-      name: item.name || "",
-      unit: item.unit || "",
-      quantity: Number(item.quantity || 0),
-      unitPrice: Number(item.unitPrice || 0),
-      total: Number(item.total || Number(item.quantity || 0) * Number(item.unitPrice || 0)),
-      hasResources: Boolean(item.hasResources),
-    })),
+    items: (sourceEstimate.items || []).map((item) => {
+      const sourceCode =
+        estimateLineSourceCodeFromRawText(item.rawText) || String(item.code || "").trim();
+      const editorItem = {
+        id: item.id,
+        type: item.type || "position",
+        source: item.source || "",
+        sourceCode,
+        code: item.code || extractSourceDataPositionCipher(sourceCode) || "",
+        recordCode: item.code || extractSourceDataPositionCipher(sourceCode) || "",
+        originalCode: item.originalCode || "",
+        name: item.name || "",
+        unit: item.unit || "",
+        quantity: Number(item.quantity || 0),
+        unitPrice: Number(item.unitPrice || 0),
+        total: Number(item.total || Number(item.quantity || 0) * Number(item.unitPrice || 0)),
+        hasResources: Boolean(item.hasResources),
+        rawText: item.rawText || "",
+        calcStatus: item.calcStatus || "",
+        calcError: item.calcError || "",
+        calcJson: item.calcJson || null,
+        calcJsonKey: JSON.stringify(item.calcJson || null),
+      };
+      hydrateEstimateItemFromSourceDataRawText(editorItem);
+      return editorItem;
+    }),
+  };
+  enrichEditorEstimateItems(editorEstimate.items);
+  return editorEstimate;
+}
+
+function resolveEditorEstimateObjectId() {
+  if (state.editorTab && state.editorTab !== "buffer") {
+    const current = state.openEstimates.find((item) => item.id === state.editorTab);
+    if (current?.objectId) {
+      return current.objectId;
+    }
+  }
+
+  for (let index = state.openEstimates.length - 1; index >= 0; index -= 1) {
+    const estimate = state.openEstimates[index];
+    if (estimate?.objectId) {
+      return estimate.objectId;
+    }
+  }
+
+  const objects = [...state.objects].sort(compareByCode);
+  return objects[0]?.id || "";
+}
+
+function suggestNextObjectCode(constructionId) {
+  const construction = state.constructions.find((item) => item.id === constructionId);
+  const prefix = construction?.code || "00";
+  const objects = state.objects.filter((item) => item.constructionId === constructionId);
+  const nextNumber = objects.length + 1;
+  return `${prefix}-${String(nextNumber).padStart(2, "0")}`;
+}
+
+function nextEditorEstimateIdentity(objectId) {
+  const objectEstimates = state.estimates.filter((item) => item.objectId === objectId);
+  const nextNumber = objectEstimates.length + 1;
+  return {
+    code: `СМ-${String(nextNumber).padStart(3, "0")}`,
+    title: `Смета ${nextNumber}`,
   };
 }
 
-function createEditorEstimate() {
-  const estimate = {
-    id: `session_est_${Date.now()}`,
-    title: `Смета ${state.openEstimates.length + 1}`,
-    code: "",
-    district: "",
-    fgisSetId: "",
-    constructionLabel: "",
-    objectLabel: "",
-    items: [],
-  };
-  state.openEstimates.push(estimate);
-  state.editorTab = estimate.id;
-  state.gsnLoaded = false;
-  saveEditorState();
-  state.section = "editor";
-  renderSections();
-  showMessage("Новая смета открыта в редакторе", "ok");
+async function ensureEditorEstimateObject() {
+  const existingObjectId = resolveEditorEstimateObjectId();
+  if (existingObjectId) {
+    return existingObjectId;
+  }
+
+  let construction = [...state.constructions].sort(compareByCode)[0];
+  if (!construction) {
+    construction = await api("/api/constructions", {
+      method: "POST",
+      body: { code: "00", name: "Новая стройка" },
+    });
+    state.constructions.push(construction);
+  }
+
+  const object = await api("/api/objects", {
+    method: "POST",
+    body: {
+      constructionId: construction.id,
+      code: suggestNextObjectCode(construction.id),
+      name: "Новый объект",
+    },
+  });
+  state.objects.push(object);
+  return object.id;
+}
+
+async function syncEstimateToConstructionTree(estimate) {
+  const fields = getEstimateConstructionObjectFields(estimate);
+  const constructionCode = String(fields.constructionCode || "").trim();
+  const constructionName = String(fields.constructionName || "").trim();
+  const objectCode = String(fields.objectCode || "").trim();
+  const objectName = String(fields.objectName || "").trim();
+
+  if (!constructionCode || !objectCode) {
+    return estimate.objectId || "";
+  }
+
+  let construction = state.constructions.find((item) => item.code === constructionCode);
+  if (!construction) {
+    construction = await api("/api/constructions", {
+      method: "POST",
+      body: {
+        code: constructionCode,
+        name: constructionName || constructionCode,
+      },
+    });
+    state.constructions.push(construction);
+  }
+
+  let object = state.objects.find(
+    (item) => item.constructionId === construction.id && item.code === objectCode,
+  );
+  if (!object) {
+    object = await api("/api/objects", {
+      method: "POST",
+      body: {
+        constructionId: construction.id,
+        code: objectCode,
+        name: objectName || objectCode,
+      },
+    });
+    state.objects.push(object);
+  }
+
+  estimate.objectId = object.id;
+  estimate.constructionName = construction.name;
+  estimate.constructionCode = construction.code;
+  estimate.objectName = object.name;
+  estimate.objectCode = object.code;
+  estimate.constructionLabel = `${construction.code || ""} ${construction.name || ""}`.trim();
+  estimate.objectLabel = `${object.code || ""} ${object.name || ""}`.trim();
+  state.constructionExpanded[construction.id] = true;
+  state.objectExpanded[object.id] = true;
+  return object.id;
+}
+
+async function createEditorEstimate() {
+  if (!state.me) {
+    showMessage("Войдите в систему", "error");
+    return;
+  }
+
+  try {
+    await refreshConstructionData();
+    const objectId = await ensureEditorEstimateObject();
+    const { code, title } = nextEditorEstimateIdentity(objectId);
+    const created = await api("/api/estimates", {
+      method: "POST",
+      body: { objectId, code, title },
+    });
+
+    await refreshConstructionData();
+    const sourceEstimate = state.estimates.find((item) => item.id === created.id) || created;
+    const editorEstimate = buildEditorEstimateFromSource(sourceEstimate);
+    state.openEstimates.push(editorEstimate);
+    state.editorTab = created.id;
+    state.estimateViewMode = "text";
+    state.gsnLoaded = false;
+
+    const object = state.objects.find((item) => item.id === objectId);
+    if (object) {
+      state.constructionExpanded[object.constructionId] = true;
+      state.objectExpanded[objectId] = true;
+    }
+
+    try {
+      await acquireEstimateLock(created.id);
+    } catch (error) {
+      if (error.status === 409 && error.lock) {
+        state.estimateLocks[created.id] = error.lock;
+      } else {
+        throw error;
+      }
+    }
+
+    saveEditorState();
+    state.section = "editor";
+    renderConstructionTree();
+    renderSections();
+    showMessage("Новая смета создана в структуре «Стройки»", "ok");
+  } catch (error) {
+    showMessage(error.message || "Не удалось создать смету", "error");
+  }
 }
 
 function editorItemFromGSNNode(node, quantity) {
@@ -3796,6 +5622,7 @@ async function upsertGSNInEstimate(node, quantity, options = {}) {
     const qty = Number(quantity || 1);
     item.quantity = qty;
     item.total = qty * Number(item.unitPrice || 0);
+    invalidateEstimateTextDraft(estimate.id);
     saveEditorState();
     await persistOpenEstimate(estimate.id);
     if (state.section === "editor" && state.editorTab === estimate.id) {
@@ -3838,6 +5665,7 @@ async function upsertGSNInEstimate(node, quantity, options = {}) {
       saveEstimateLinesExpanded();
     }
 
+    invalidateEstimateTextDraft(estimate.id);
     saveEditorState();
     await persistOpenEstimate(estimate.id);
     if (state.section === "editor" && state.editorTab === estimate.id) {
@@ -4001,6 +5829,7 @@ function upsertUserPositionInEstimate(positionId, quantity, options = {}) {
     estimate.items.push(item);
   }
 
+  invalidateEstimateTextDraft(estimate.id);
   saveEditorState();
   if (state.section === "editor" && state.editorTab === estimate.id) {
     renderEditor();
@@ -4034,6 +5863,7 @@ function removeUserPositionFromEstimate(positionId) {
   }
 
   estimate.items.splice(existingIndex, 1);
+  invalidateEstimateTextDraft(estimate.id);
   saveEditorState();
   void persistOpenEstimate(estimate.id).then(() => {
     if (state.section === "editor" && state.editorTab === estimate.id) {
@@ -4147,8 +5977,9 @@ function estimateItemsForApi(items) {
         id: item.id || "",
         type: item.type || "position",
         source: "gsn",
-        code: estimateRecordFetchCode(item) || item.code || "",
+        code: estimateLineSourceCode(item) || estimateRecordFetchCode(item) || item.code || "",
         quantity: Number(item.quantity || 0),
+        rawText: item.rawText || "",
       };
     }
 
@@ -4163,6 +5994,7 @@ function estimateItemsForApi(items) {
       unit: item.unit || "",
       unitPrice: Number(item.unitPrice || 0),
       total: Number(item.total ?? Number(item.quantity || 0) * Number(item.unitPrice || 0)),
+      rawText: item.rawText || "",
     };
   });
 }
@@ -4180,6 +6012,19 @@ async function persistOpenEstimate(estimateId) {
   const editorEstimate = state.openEstimates.find((item) => item.id === estimateId);
   if (!editorEstimate) {
     return;
+  }
+
+  try {
+    await syncEstimateTextDraftIfNeeded(estimateId);
+  } catch {
+    return;
+  }
+
+  try {
+    await syncEstimateToConstructionTree(editorEstimate);
+  } catch (error) {
+    showMessage(error.message || "Не удалось обновить структуру «Стройки»", "error");
+    throw error;
   }
 
   const sourceEstimate = state.estimates.find((item) => item.id === estimateId);
@@ -4210,7 +6055,27 @@ async function persistOpenEstimate(estimateId) {
       const index = state.estimates.findIndex((item) => item.id === estimateId);
       if (index >= 0) {
         state.estimates[index] = updated;
+      } else {
+        state.estimates.push(updated);
       }
+      if (Array.isArray(updated.items)) {
+        const savedById = new Map(updated.items.map((item) => [item.id, item]));
+        editorEstimate.items = (editorEstimate.items || []).map((item) => {
+          const saved = savedById.get(item.id);
+          if (!saved) {
+            return item;
+          }
+          return {
+            ...item,
+            quantity: Number(saved.quantity || 0),
+            rawText: saved.rawText || item.rawText || "",
+          };
+        });
+        if (state.editorTab === estimateId) {
+          renderEditor();
+        }
+      }
+      renderConstructionTree();
     } catch (error) {
       showMessage(error.message || "Не удалось сохранить смету", "error");
       throw error;
@@ -4329,14 +6194,16 @@ async function updateEstimateFgisSet(estimateID, value) {
   }
 
   estimate.fgisSetId = nextFgisSetId;
+  invalidateEstimateTextDraft(estimateID);
+  (estimate.items || []).forEach(clearGsnLineCalcEnrichment);
 
   try {
-    await recalculateEstimatePricing(estimate);
     saveEditorState();
     renderEditor();
     void applyLicenseGate();
     await persistOpenEstimate(estimateID);
-    showMessage("Набор сметных цен обновлён, стоимости пересчитаны", "ok");
+    void pollEstimateCalcStatus(estimateID);
+    showMessage("Набор сметных цен обновлён, позиции поставлены в очередь на пересчёт", "ok");
   } catch (error) {
     showMessage(error.message || "Не удалось пересчитать стоимости", "error");
     saveEditorState();
@@ -4392,6 +6259,7 @@ async function updateEstimateLine(estimateID, lineID, fields) {
     line.unit = "";
   }
 
+  invalidateEstimateTextDraft(estimateID);
   saveEditorState();
   await persistOpenEstimate(estimateID);
   renderEditor();
@@ -4421,6 +6289,7 @@ async function deleteEstimateLine(estimateID, lineID) {
     state.estimateLinesExpanded[estimateID] = [...expanded];
     saveEstimateLinesExpanded();
   }
+  invalidateEstimateTextDraft(estimateID);
   saveEditorState();
   await persistOpenEstimate(estimateID);
   renderEditor();
@@ -4441,6 +6310,7 @@ async function moveEstimateLine(estimateID, lineID, direction) {
 
   const [line] = estimate.items.splice(index, 1);
   estimate.items.splice(targetIndex, 0, line);
+  invalidateEstimateTextDraft(estimateID);
   saveEditorState();
   await persistOpenEstimate(estimateID);
   renderEditor();
@@ -4473,6 +6343,7 @@ async function addEstimateLine(estimateID, lineType, name) {
     total: 0,
   });
 
+  invalidateEstimateTextDraft(estimateID);
   saveEditorState();
   await persistOpenEstimate(estimateID);
   renderEditor();
@@ -4485,9 +6356,17 @@ async function closeEstimateFromEditor(estimateID) {
     return;
   }
 
+  try {
+    await syncEstimateTextDraftIfNeeded(estimateID);
+  } catch (error) {
+    showMessage(error.message || "Не удалось разобрать текст сметы", "error");
+    return;
+  }
+
   await flushPersistOpenEstimate(estimateID);
 
   state.openEstimates.splice(index, 1);
+  invalidateEstimateTextDraft(estimateID);
   await releaseEstimateLock(estimateID);
   void refreshEstimateLocks();
 
@@ -4556,8 +6435,8 @@ async function openEstimateInEditor(estimateID) {
       }
       return {
         ...item,
+        sourceCode: previous.sourceCode || item.sourceCode || estimateLineSourceCode(item),
         recordCode: previous.recordCode || item.recordCode || item.code,
-        originalCode: previous.originalCode || item.originalCode,
         children: previous.children,
         hasResources: previous.hasResources ?? item.hasResources,
       };
@@ -4579,9 +6458,9 @@ async function openEstimateInEditor(estimateID) {
   }
 
   try {
-    await recalculateEstimatePricing(editorEstimate);
+    enrichEditorEstimateItems(editorEstimate.items);
   } catch (error) {
-    showMessage(error.message || "Не удалось загрузить данные ГСН для сметы", "error");
+    showMessage(error.message || "Не удалось загрузить данные расчёта для сметы", "error");
   }
 
   const existingIndex = state.openEstimates.findIndex((item) => item.id === estimateID);
@@ -4591,6 +6470,8 @@ async function openEstimateInEditor(estimateID) {
     state.openEstimates.push(editorEstimate);
   }
 
+  invalidateEstimateTextDraft(estimateID);
+  state.estimateViewMode = "text";
   state.editorTab = estimateID;
   state.section = "editor";
   saveEditorState();
@@ -4906,6 +6787,199 @@ function findConstructionEntity(kind, id) {
   return null;
 }
 
+function constructionEntityDeleteMessage(kind, entity) {
+  const label = kind === "estimate" ? entity.title : entity.name;
+  const kindLabels = {
+    construction: "стройку",
+    object: "объект",
+    estimate: "смету",
+  };
+  let message = `Удалить ${kindLabels[kind] || "элемент"} «${label}»?`;
+  if (kind === "construction") {
+    message += " Все объекты и сметы также будут удалены.";
+  } else if (kind === "object") {
+    message += " Все сметы также будут удалены.";
+  }
+  return message;
+}
+
+function renderConstructionEntityIconActions(kind, id) {
+  return `
+    <button
+      class="icon-button secondary"
+      data-edit="${escapeHTML(kind)}"
+      data-edit-id="${escapeHTML(id)}"
+      type="button"
+      title="Изменить"
+      aria-label="Изменить"
+    >${iconPencil()}</button>
+    <button
+      class="icon-button secondary icon-button-danger"
+      data-delete="${escapeHTML(kind)}"
+      data-delete-id="${escapeHTML(id)}"
+      type="button"
+      title="Удалить"
+      aria-label="Удалить"
+    >${iconTrash()}</button>
+  `;
+}
+
+function renderEstimateTreeActions(id) {
+  return `
+    <button
+      class="secondary construction-add-btn"
+      data-edit="estimate"
+      data-edit-id="${escapeHTML(id)}"
+      type="button"
+    >Редактировать</button>
+    <button
+      class="icon-button secondary icon-button-danger"
+      data-delete="estimate"
+      data-delete-id="${escapeHTML(id)}"
+      type="button"
+      title="Удалить"
+      aria-label="Удалить"
+    >${iconTrash()}</button>
+  `;
+}
+
+function cleanupConstructionTreeState(kind, id) {
+  if (kind === "construction") {
+    delete state.constructionExpanded[id];
+    state.objects
+      .filter((object) => object.constructionId === id)
+      .forEach((object) => {
+        delete state.objectExpanded[object.id];
+      });
+    return;
+  }
+  if (kind === "object") {
+    delete state.objectExpanded[id];
+  }
+}
+
+async function removeEstimatePermanently(estimateId) {
+  const isOpen = state.openEstimates.some((item) => item.id === estimateId);
+  if (isOpen) {
+    try {
+      await syncEstimateTextDraftIfNeeded(estimateId);
+    } catch (error) {
+      showMessage(error.message || "Не удалось разобрать текст сметы", "error");
+      throw error;
+    }
+    await flushPersistOpenEstimate(estimateId);
+  }
+
+  await api(`/api/estimates/${estimateId}`, { method: "DELETE" });
+
+  const index = state.openEstimates.findIndex((item) => item.id === estimateId);
+  if (index >= 0) {
+    state.openEstimates.splice(index, 1);
+    invalidateEstimateTextDraft(estimateId);
+    await releaseEstimateLock(estimateId);
+    if (state.editorTab === estimateId) {
+      state.editorTab =
+        state.openEstimates.length > 0
+          ? state.openEstimates[Math.min(index, state.openEstimates.length - 1)].id
+          : "buffer";
+    }
+    state.gsnLoaded = false;
+    saveEditorState();
+    renderEditor();
+  }
+
+  delete state.estimateLocks[estimateId];
+  await refreshConstructionData();
+}
+
+function pruneOpenEstimates() {
+  const validIds = new Set(state.estimates.map((item) => item.id));
+  let changed = false;
+  for (let index = state.openEstimates.length - 1; index >= 0; index -= 1) {
+    const estimate = state.openEstimates[index];
+    if (validIds.has(estimate.id)) {
+      continue;
+    }
+    state.openEstimates.splice(index, 1);
+    invalidateEstimateTextDraft(estimate.id);
+    delete state.estimateLocks[estimate.id];
+    if (state.editorTab === estimate.id) {
+      state.editorTab = "buffer";
+    }
+    changed = true;
+  }
+  if (!changed) {
+    return;
+  }
+  state.gsnLoaded = false;
+  saveEditorState();
+  renderEditor();
+}
+
+async function deleteConstructionEntity(kind, id) {
+  const entity = findConstructionEntity(kind, id);
+  if (!entity) {
+    showMessage("Элемент не найден", "error");
+    return;
+  }
+
+  if (kind === "estimate" && isEstimateLockedByOther(id)) {
+    const lock = getEstimateLockInfo(id);
+    showMessage(`Смета редактируется ${lock?.userName || "другим пользователем"}`, "error");
+    return;
+  }
+
+  if (!window.confirm(constructionEntityDeleteMessage(kind, entity))) {
+    return;
+  }
+
+  try {
+    if (kind === "estimate") {
+      await removeEstimatePermanently(id);
+      showMessage("Смета удалена", "ok");
+      return;
+    }
+
+    if (kind === "construction") {
+      await api(`/api/constructions/${id}`, { method: "DELETE" });
+    } else if (kind === "object") {
+      await api(`/api/objects/${id}`, { method: "DELETE" });
+    } else {
+      throw new Error("Неизвестный тип узла");
+    }
+
+    cleanupConstructionTreeState(kind, id);
+    await refreshConstructionData();
+    pruneOpenEstimates();
+    showMessage("Удалено", "ok");
+  } catch (error) {
+    showMessage(error.message, "error");
+  }
+}
+
+async function deleteEstimateFromEditor(estimateId) {
+  const estimate =
+    state.openEstimates.find((item) => item.id === estimateId) ||
+    state.estimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    showMessage("Смета не найдена", "error");
+    return;
+  }
+
+  if (!window.confirm(constructionEntityDeleteMessage("estimate", estimate))) {
+    return;
+  }
+
+  try {
+    await removeEstimatePermanently(estimateId);
+    showMessage("Смета удалена", "ok");
+  } catch (error) {
+    if (error.message) {
+      showMessage(error.message, "error");
+    }
+  }
+}
+
 async function saveConstructionDialog(data) {
   const code = data.code.trim();
   const name = data.name.trim();
@@ -5048,12 +7122,9 @@ function renderConstructionRow(construction, hasChildren, expanded) {
             data-parent-id="${escapeHTML(construction.id)}"
             type="button"
           >+ Добавить объект</button>
-          <button
-            class="secondary construction-add-btn"
-            data-edit="construction"
-            data-edit-id="${escapeHTML(construction.id)}"
-            type="button"
-          >Изменить</button>
+          <div class="construction-icon-actions">
+            ${renderConstructionEntityIconActions("construction", construction.id)}
+          </div>
         </div>
       </td>
     </tr>
@@ -5084,12 +7155,9 @@ function renderObjectRow(object, hasChildren, expanded, constructionOpen) {
             data-parent-id="${escapeHTML(object.id)}"
             type="button"
           >+ Добавить смету</button>
-          <button
-            class="secondary construction-add-btn"
-            data-edit="object"
-            data-edit-id="${escapeHTML(object.id)}"
-            type="button"
-          >Изменить</button>
+          <div class="construction-icon-actions">
+            ${renderConstructionEntityIconActions("object", object.id)}
+          </div>
         </div>
       </td>
     </tr>
@@ -5105,12 +7173,7 @@ function renderEstimateRow(estimate, visible) {
           title="${escapeHTML(lockHint)}"
           aria-label="${escapeHTML(lockHint)}"
         >${iconLock()}</span>`
-    : `<button
-          class="secondary construction-add-btn"
-          data-edit="estimate"
-          data-edit-id="${escapeHTML(estimate.id)}"
-          type="button"
-        >Изменить</button>`;
+    : `<div class="construction-actions construction-estimate-actions">${renderEstimateTreeActions(estimate.id)}</div>`;
 
   return `
     <tr class="construction-table-row ${visible ? "" : "hidden"}">
@@ -5127,6 +7190,12 @@ function renderEstimateRow(estimate, visible) {
 }
 
 function readSessionJSON(key, fallback) {
+  if (Array.isArray(fallback)) {
+    return readSessionJSONArray(key, fallback);
+  }
+  if (fallback && typeof fallback === "object") {
+    return readSessionJSONObject(key, fallback);
+  }
   try {
     const raw = sessionStorage.getItem(key);
     return raw ? JSON.parse(raw) : fallback;

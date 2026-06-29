@@ -18,15 +18,29 @@ type RecordResource struct {
 }
 
 type RecordDetail struct {
-	Code          string           `json:"code"`
-	OriginalCode  string           `json:"originalCode,omitempty"`
-	Name          string           `json:"name"`
-	Unit          string           `json:"unit"`
-	IsWork        bool             `json:"isWork"`
-	HasResources  bool             `json:"hasResources"`
-	UnitPriceText string           `json:"unitPriceText,omitempty"`
-	UnitPriceIndex string          `json:"unitPriceIndex,omitempty"`
-	Resources     []RecordResource `json:"resources,omitempty"`
+	Code           string           `json:"code"`
+	OriginalCode   string           `json:"originalCode"`
+	Name           string           `json:"name"`
+	Unit           string           `json:"unit"`
+	IsWork         bool             `json:"isWork"`
+	HasResources   bool             `json:"hasResources"`
+	UnitPriceText  string           `json:"unitPriceText,omitempty"`
+	UnitPriceIndex string           `json:"unitPriceIndex,omitempty"`
+	Resources      []RecordResource `json:"resources,omitempty"`
+}
+
+func ExtractPositionCipher(firstField string) string {
+	raw := strings.TrimSpace(firstField)
+	if raw == "" {
+		return ""
+	}
+	cutAt := len(raw)
+	for _, sep := range []string{"(", " ", "#"} {
+		if i := strings.Index(raw, sep); i >= 0 && i < cutAt {
+			cutAt = i
+		}
+	}
+	return strings.TrimSpace(raw[:cutAt])
 }
 
 func parseNormListRefs(normList string) []string {
@@ -89,12 +103,22 @@ func (s *Service) applyRecordSelfPricing(ctx context.Context, code, fgisSetID, d
 	return unitPriceText, unitPriceIndex, nil
 }
 
+func normalizeRecordDetailOriginalCode(detail *RecordDetail) {
+	if detail == nil {
+		return
+	}
+	detail.OriginalCode = strings.TrimSpace(detail.OriginalCode)
+	if detail.OriginalCode == "" {
+		detail.OriginalCode = strings.TrimSpace(detail.Code)
+	}
+}
+
 func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district string) (RecordDetail, error) {
 	if !s.Configured() {
 		return RecordDetail{}, ErrNotConfigured
 	}
 
-	code = strings.TrimSpace(code)
+	code = ExtractPositionCipher(code)
 	if code == "" {
 		return RecordDetail{}, fmt.Errorf("record code is required")
 	}
@@ -112,6 +136,7 @@ func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district
 		}
 		detail.Resources = resources
 		detail.HasResources = len(resources) > 0
+		normalizeRecordDetailOriginalCode(&detail)
 		return detail, nil
 	}
 
@@ -122,6 +147,7 @@ func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district
 	}
 	detail.UnitPriceText = unitPriceText
 	detail.UnitPriceIndex = unitPriceIndex
+	normalizeRecordDetailOriginalCode(&detail)
 	return detail, nil
 }
 

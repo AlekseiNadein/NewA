@@ -199,10 +199,11 @@
 
           <section id="editorSection" class="section-view card hidden">
             <p class="eyebrow" id="editorEyebrow">Редактор</p>
+            <div id="editorEstimateViewModes" class="editor-estimate-view-modes hidden"></div>
             <div id="editorLicenseBlock" class="license-block hidden"></div>
             <div id="editorSectionBody">
             <h2 id="editorTitle">Буфер</h2>
-            <p id="editorDescription" class="muted">Сессионный буфер для элементов, добавленных из базы ГСН-2022.</p>
+            <p id="editorDescription" class="muted hidden"></p>
             <div id="editorContent" class="editor-content"></div>
             </div>
           </section>
@@ -314,6 +315,20 @@
               <input id="showHierarchyCodeToggle" type="checkbox" />
               Отображать шифр иерархии
             </label>
+            <form id="appSettingsForm" class="settings-form">
+              <div>
+                <h3>Сервис расчета</h3>
+                <p class="muted">Количество параллельных worker-ов в отдельном сервисе расчета смет.</p>
+              </div>
+              <label>
+                Worker-ов расчета
+                <input id="calcWorkerCountInput" name="calcWorkerCount" type="number" min="1" max="16" step="1" />
+              </label>
+              <div class="dialog-actions">
+                <button id="saveAppSettingsButton" type="submit">Сохранить настройки</button>
+              </div>
+              <p id="appSettingsHint" class="muted"></p>
+            </form>
           </section>
         </section>
       </section>
@@ -322,7 +337,7 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-    <script src="/login-draft.js?v=20260622h"></script>
-    <script src="/app.js?v=20260622h"></script>
+    <script src="/login-draft.js?v=20260628c"></script>
+    <script src="/app.js?v=20260628c"></script>
   </body>
 </html>

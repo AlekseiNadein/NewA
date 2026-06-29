@@ -64,6 +64,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/estimates/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimateByID))))
 	mux.Handle("/api/license-sessions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleLicenseSessions))))
 	mux.Handle("/api/estimate-locks", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimateLocks))))
+	mux.Handle("/api/settings", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleSettings))))
 	mux.Handle("/api/gsn/supplements", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNSupplements))))
 	mux.Handle("/api/gsn/base-info", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNBaseInfo))))
 	mux.Handle("/api/gsn/hierarchy", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchy))))
@@ -370,6 +371,18 @@ func (s *Server) handleConstructionByID(w http.ResponseWriter, r *http.Request) 
 		}
 		writeJSON(w, http.StatusOK, construction)
 
+	case http.MethodDelete:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		if err := s.store.DeleteConstruction(id, claims.CompanyID, includeAll); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -436,6 +449,18 @@ func (s *Server) handleObjectByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, object)
 
+	case http.MethodDelete:
+		if !claims.Role.CanEditEstimates() {
+			writeError(w, http.StatusForbidden, "not enough permissions")
+			return
+		}
+
+		if err := s.store.DeleteObject(id, claims.CompanyID, includeAll); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -485,6 +510,10 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 		s.handleEstimateLock(w, r, strings.TrimSuffix(id, "/lock"))
 		return
 	}
+	if strings.HasSuffix(id, "/calc-status") {
+		s.handleEstimateCalcStatus(w, r, strings.TrimSuffix(id, "/calc-status"))
+		return
+	}
 
 	includeAll := claims.Role == domain.RoleSuperAdmin
 	switch r.Method {
@@ -522,6 +551,24 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handleEstimateCalcStatus(w http.ResponseWriter, r *http.Request, estimateID string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	statuses, err := s.store.ListEstimateCalcStatuses(r.Context(), claims.CompanyID, estimateID, includeAll)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": statuses,
+	})
 }
 
 func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {
@@ -577,6 +624,40 @@ func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {
 		s.licenseSessions.ReleaseAll(claims.UserID)
 		w.WriteHeader(http.StatusNoContent)
 
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	claims := mustClaims(r)
+
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.GetAppSettings()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read settings")
+			return
+		}
+		settings.Editable = claims.Role.CanManageUsers()
+		writeJSON(w, http.StatusOK, settings)
+	case http.MethodPut:
+		if !claims.Role.CanManageUsers() {
+			writeError(w, http.StatusForbidden, "редактировать настройки может только администратор")
+			return
+		}
+		var input store.UpdateAppSettingsInput
+		if err := readJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json")
+			return
+		}
+		settings, err := s.store.UpdateAppSettings(input)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update settings")
+			return
+		}
+		settings.Editable = true
+		writeJSON(w, http.StatusOK, settings)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
