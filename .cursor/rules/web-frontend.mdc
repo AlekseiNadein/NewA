@@ -1,0 +1,40 @@
+---
+description: Frontend (web): логин, sessionStorage, редактор сметы
+globs: web/**
+alwaysApply: false
+---
+
+# Frontend — логин и редактор
+
+## Старт `app.js`
+
+1. **`repairEditorSessionStorage()`** — только **до** `const state = {…}`.
+2. Читать редактор из sessionStorage через **`readSessionJSONArray` / `readSessionJSONObject`**, не через «голый» `JSON.parse` + `.map`.
+3. В **`hydrateOpenEstimatesFromSession`**: `items` только если `Array.isArray`; повреждённый снимок — `try/catch`, не падать на старте.
+4. Обработчик **`#loginForm` submit** должен регистрироваться даже при битых данных редактора (иначе «Войти» молчит).
+
+## Вход
+
+- После **`POST /api/auth/login`**: `state.me = result.user` → **`renderShell()` сразу** → **`bootstrapAppData(requestId)`** (компании, стройки, locks).
+- **Не** вызывать полный **`loadApp()`** после логина (повторный `/api/me` гоняется с начальным `void loadApp()` и может сбросить сессию).
+- Отменять устаревшие запросы через **`loadAppRequestId`**.
+- **`showMessage`**: снимать класс `hidden` у `#message`.
+
+## Кэш скриптов
+
+При правках `web/app.js` или `web/login-draft.js` — обновлять **`?v=`** в `web/index.html`.
+
+## Табличный редактор — шапка сметы
+
+- Полный **`mountEditorContent`** (через `innerHTML`) закрывает открытый `<select>` («Сметные цены и индексы»).
+- Пока фокус в **`.editor-estimate-header`** и редактор уже смонтирован — откладывать remount (`pendingEditorRemountEstimateId`, `flushPendingEditorRemount` на `focusout`).
+- После **`loadFGISSets`**: обновлять только опции селекта (`refreshEditorFgisSetSelect`), не пересоздавать весь редактор.
+- Опрос calc-status: **`updateEditorTableContent`**, не полный remount шапки.
+
+## Учётные данные
+
+Демо **`admin@example.com`** — из README/черновика; в рабочей `data/app.json` может **не быть**. Рабочий пример: **Система** / **nadein.av@yandex.ru** / **admin123**.
+
+## Отладка
+
+Не просить пользователя чистить `sessionStorage` вручную — приложение чинит ключи при загрузке. При «зависании» на логине: синтаксис `app.js`, версия `?v=`, красное сообщение `#message`, API `POST /api/auth/login`.

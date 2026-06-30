@@ -60,11 +60,26 @@ func NewService(databaseURL string) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(4)
-	db.SetConnMaxLifetime(30 * time.Minute)
+	s := &Service{db: db}
+	s.SetMaxOpenConns(16)
 
-	return &Service{db: db}, nil
+	return s, nil
+}
+
+func (s *Service) SetMaxOpenConns(n int) {
+	if !s.Configured() {
+		return
+	}
+	if n < 4 {
+		n = 4
+	}
+	s.db.SetMaxOpenConns(n)
+	if n < 8 {
+		s.db.SetMaxIdleConns(n)
+	} else {
+		s.db.SetMaxIdleConns(8)
+	}
+	s.db.SetConnMaxLifetime(30 * time.Minute)
 }
 
 func (s *Service) Configured() bool {

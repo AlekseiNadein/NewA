@@ -125,11 +125,17 @@ type EstimateItem struct {
 }
 
 type Claims struct {
-	UserID    string `json:"sub"`
-	CompanyID string `json:"companyId"`
-	Email     string `json:"email"`
-	Role      Role   `json:"role"`
-	ExpiresAt int64  `json:"exp"`
+	UserID     string `json:"sub"`
+	CompanyID  string `json:"companyId"`
+	Email      string `json:"email"`
+	Name       string `json:"name"`
+	Role       Role   `json:"role"`
+	Authorized bool   `json:"authorized"`
+	ExpiresAt  int64  `json:"exp"`
+}
+
+func (c Claims) CanAccessApp() bool {
+	return c.Authorized
 }
 
 func (r Role) CanManageCompanies() bool {

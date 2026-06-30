@@ -31,6 +31,10 @@ type Service struct {
 	jwtSecret []byte
 }
 
+func NewVerifier(jwtSecret string) *Service {
+	return &Service{jwtSecret: []byte(jwtSecret)}
+}
+
 func NewService(users UserReader, jwtSecret string) *Service {
 	return &Service{
 		users:     users,
@@ -72,11 +76,13 @@ func (s *Service) Login(companyName, userName, password string) (string, domain.
 	}
 
 	token, err := s.Sign(domain.Claims{
-		UserID:    user.ID,
-		CompanyID: user.CompanyID,
-		Email:     user.Email,
-		Role:      user.Role(),
-		ExpiresAt: time.Now().Add(12 * time.Hour).Unix(),
+		UserID:     user.ID,
+		CompanyID:  user.CompanyID,
+		Email:      user.Email,
+		Name:       user.Name,
+		Role:       user.Role(),
+		Authorized: user.CanAccessApp(),
+		ExpiresAt:  time.Now().Add(12 * time.Hour).Unix(),
 	})
 	if err != nil {
 		return "", domain.User{}, err

@@ -76,6 +76,16 @@ function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+function normalizeEstimateId(value) {
+  return String(value || "").trim();
+}
+
+function sameEstimateId(left, right) {
+  const a = normalizeEstimateId(left);
+  const b = normalizeEstimateId(right);
+  return Boolean(a) && a === b;
+}
+
 function readSessionJSONArray(key, fallback = []) {
   try {
     const raw = sessionStorage.getItem(key);
@@ -106,11 +116,19 @@ function readSessionJSONObject(key, fallback = {}) {
 }
 
 function hydrateOpenEstimatesFromSession() {
-  return readSessionJSONArray("nav_editor_estimates", []).map((estimate) => {
-    normalizeEstimateSourceDataFields(estimate);
-    (estimate.items || []).forEach(hydrateEstimateItemFromSourceDataRawText);
-    return estimate;
-  });
+  return readSessionJSONArray("nav_editor_estimates", [])
+    .filter((estimate) => estimate && typeof estimate === "object" && !Array.isArray(estimate))
+    .map((estimate) => {
+      try {
+        normalizeEstimateSourceDataFields(estimate);
+        hydrateEstimateSourceDataFgisSet(estimate);
+        const items = Array.isArray(estimate.items) ? estimate.items : [];
+        items.forEach(hydrateEstimateItemFromSourceDataRawText);
+      } catch {
+        // Повреждённый снимок сметы в sessionStorage не должен ломать старт приложения.
+      }
+      return estimate;
+    });
 }
 
 function repairEditorSessionStorage() {
@@ -125,6 +143,10 @@ function repairEditorSessionStorage() {
       if (!raw) {
         continue;
       }
+      if (raw.length > 4_000_000) {
+        sessionStorage.setItem(key, JSON.stringify(fallback));
+        continue;
+      }
       const parsed = JSON.parse(raw);
       const valid = Array.isArray(fallback)
         ? Array.isArray(parsed)
@@ -137,6 +159,8 @@ function repairEditorSessionStorage() {
     }
   }
 }
+
+repairEditorSessionStorage();
 
 const state = {
   me: null,
@@ -198,13 +222,24 @@ const persistEstimateInflight = new Map();
 const ESTIMATE_LOCK_POLL_MS = 5000;
 const ESTIMATE_LOCK_HEARTBEAT_MS = 30000;
 const LICENSE_SESSION_HEARTBEAT_MS = 30000;
-const ESTIMATE_CALC_STATUS_POLL_MS = 1500;
+const ESTIMATE_CALC_STATUS_POLL_MS = 800;
+const ESTIMATE_CALC_APPLY_CHUNK = 80;
 let estimateLockPollTimer = 0;
 let estimateLockHeartbeatTimer = 0;
 let licenseSessionHeartbeatTimer = 0;
 let estimateCalcStatusPollTimer = 0;
 let estimateCalcStatusPollInflight = null;
 let pendingEditorRemountEstimateId = null;
+let editorOpeningEstimateId = null;
+let estimateCalcAwaitingServer = new Set();
+const estimateCalcProgressTargets = new Map();
+let estimateCalcApplyToken = 0;
+let estimateCalcProgressAnimFrame = 0;
+let editorTableInteractionEnabled = false;
+let editorTableBodyReady = false;
+let editorTableBodyRenderToken = 0;
+const EDITOR_TABLE_IMMEDIATE_ROWS = 60;
+const EDITOR_TABLE_CHUNK_ROWS = 50;
 let loadAppRequestId = 0;
 let loadAppSuppressMissingSession = true;
 let licenseGateVersion = 0;
@@ -303,25 +338,20 @@ els.loginForm?.addEventListener("submit", async (event) => {
       throw new Error("Доступ к системе не открыт. Ожидайте подтверждения администратора");
     }
 
+    loadAppRequestId += 1;
+    const requestId = loadAppRequestId;
     state.me = result.user;
     localStorage.removeItem("nav_token");
     localStorage.removeItem("nav_admin_token");
-    await loadApp();
-    if (!state.me) {
-      state.me = result.user;
-    }
     renderShell();
     showMessage("Вход выполнен", "ok");
+    await bootstrapAppData(requestId);
   } catch (error) {
     applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
     showMessage(error.message, "error");
-    if (state.me) {
-      renderShell();
-    }
   }
 });
 
-repairEditorSessionStorage();
 bootstrapLoginForm();
 void loadApp();
 
@@ -450,7 +480,7 @@ els.constructionTree.addEventListener("click", (event) => {
   const editButton = event.target.closest("[data-edit]");
   if (editButton) {
     if (editButton.dataset.edit === "estimate") {
-      openEstimateInEditor(editButton.dataset.editId);
+      void openEstimateInEditor(editButton.dataset.editId);
       return;
     }
     openConstructionDialog(editButton.dataset.edit, "", editButton.dataset.editId);
@@ -773,6 +803,26 @@ els.editorContent.addEventListener("focusout", (event) => {
   }, 0);
 });
 
+els.editorContent.addEventListener(
+  "wheel",
+  (event) => {
+    if (event.target.closest(".editor-estimate-table-body-scroll")) {
+      enableEditorTableInteraction();
+    }
+  },
+  { passive: true, capture: true },
+);
+
+els.editorContent.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (event.target.closest(".editor-estimate-table-body-scroll")) {
+      enableEditorTableInteraction();
+    }
+  },
+  { capture: true },
+);
+
 els.estimateLineDialogForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const data = formData(els.estimateLineDialogForm);
@@ -897,6 +947,31 @@ els.userPositionDialogForm.querySelector("[data-dialog-cancel]").addEventListene
   els.userPositionDialogForm.reset();
 });
 
+async function bootstrapAppData(existingRequestId) {
+  const requestId = existingRequestId ?? ++loadAppRequestId;
+  try {
+    await Promise.all([refreshCompanies(), refreshConstructionData()]);
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
+    await restoreOpenEstimateLocks();
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
+    startEstimateLockSync();
+    void loadGSNRegions().catch(() => {});
+    void loadFGISSets().catch(() => {});
+    loadUserPositions();
+    renderShell();
+  } catch (error) {
+    if (requestId !== loadAppRequestId) {
+      return;
+    }
+    showMessage(error?.message || "Не удалось загрузить данные приложения", "error");
+    renderShell();
+  }
+}
+
 async function loadApp() {
   const requestId = ++loadAppRequestId;
   const suppressMissingSession = loadAppSuppressMissingSession;
@@ -911,19 +986,7 @@ async function loadApp() {
       throw new Error("Нет доступа к системе. Ожидайте подтверждения администратора");
     }
 
-    await Promise.all([refreshCompanies(), refreshConstructionData()]);
-    if (requestId !== loadAppRequestId) {
-      return;
-    }
-    await restoreOpenEstimateLocks();
-    if (requestId !== loadAppRequestId) {
-      return;
-    }
-    startEstimateLockSync();
-    void loadGSNRegions().catch(() => {});
-    void loadFGISSets().catch(() => {});
-    loadUserPositions();
-    renderShell();
+    await bootstrapAppData(requestId);
   } catch (error) {
     if (requestId !== loadAppRequestId) {
       return;
@@ -1073,6 +1136,34 @@ function subsectionIdForFGISSet(setId) {
   return null;
 }
 
+function getEditorTableLicenseSubsectionIdsForFgisSet(fgisSetId) {
+  const ids = ["gsn_supplement_18"];
+  const fgisSubsectionId = subsectionIdForFGISSet(fgisSetId || "");
+  if (fgisSubsectionId && !ids.includes(fgisSubsectionId)) {
+    ids.push(fgisSubsectionId);
+  }
+  return ids;
+}
+
+function getEditorTableLicenseSubsectionIds() {
+  const estimate = state.openEstimates.find((item) => item.id === state.editorTab);
+  return getEditorTableLicenseSubsectionIdsForFgisSet(estimate?.fgisSetId || "");
+}
+
+function cloneOpenEstimate(estimate) {
+  return JSON.parse(JSON.stringify(estimate));
+}
+
+function sectionNeedsLicense() {
+  if (state.section === "base") {
+    return state.baseTab === "gsn" || state.baseTab === "fgisPrices";
+  }
+  if (state.section === "editor") {
+    return state.estimateViewMode === "table" && state.editorTab !== "buffer";
+  }
+  return false;
+}
+
 function getRequiredLicenseSubsectionIds() {
   if (state.section === "base") {
     if (state.baseTab === "gsn") {
@@ -1086,16 +1177,8 @@ function getRequiredLicenseSubsectionIds() {
     return [];
   }
 
-  if (state.section === "editor") {
-    const ids = ["gsn_supplement_18"];
-    if (state.editorTab !== "buffer") {
-      const estimate = state.openEstimates.find((item) => item.id === state.editorTab);
-      const fgisId = subsectionIdForFGISSet(estimate?.fgisSetId || "");
-      if (fgisId && !ids.includes(fgisId)) {
-        ids.push(fgisId);
-      }
-    }
-    return ids;
+  if (state.section === "editor" && state.estimateViewMode === "table" && state.editorTab !== "buffer") {
+    return getEditorTableLicenseSubsectionIds();
   }
 
   return [];
@@ -1120,13 +1203,17 @@ function setSectionLicenseBlocked(section, blocked) {
   target.body.classList.toggle("hidden", blocked);
 }
 
+function formatLicenseBlockedMessage(blockedItems) {
+  const names = blockedItems.map((item) => item.name).join(", ");
+  return `Нет свободных лицензий для ${names}. Обратитесь к администратору системы.`;
+}
+
 function renderLicenseBlockMessage(section, blockedItems) {
   const target = licenseSectionElements(section);
   if (!target?.block || !blockedItems.length) {
     return;
   }
-  const names = blockedItems.map((item) => item.name).join(", ");
-  target.block.innerHTML = `<p class="license-block-message">Нет свободных лицензий для ${escapeHTML(names)}. Обратитесь к администратору системы.</p>`;
+  target.block.innerHTML = `<p class="license-block-message">${escapeHTML(formatLicenseBlockedMessage(blockedItems))}</p>`;
 }
 
 async function releaseLicenseSessions() {
@@ -1148,8 +1235,7 @@ async function releaseLicenseSessions() {
   state.licenseHeld = [];
 }
 
-async function syncLicenseSessionsForCurrentSection() {
-  const subsectionIds = getRequiredLicenseSubsectionIds();
+async function syncLicenseSessions(subsectionIds) {
   if (!state.me) {
     return [];
   }
@@ -1169,19 +1255,38 @@ async function syncLicenseSessionsForCurrentSection() {
       body: JSON.stringify({ subsectionIds }),
     });
     const payload = await response.json().catch(() => ({}));
-    if (response.status === 403 && payload?.blocked?.length) {
-      state.licenseBlocked = payload.blocked;
-      return payload.blocked;
+    if (response.status === 403 || payload?.granted === false) {
+      const blocked = Array.isArray(payload?.blocked) ? payload.blocked : [];
+      if (blocked.length) {
+        state.licenseBlocked = blocked;
+        return blocked;
+      }
+      const fallback = [{ subsectionId: "", name: "выбранных разделов" }];
+      state.licenseBlocked = fallback;
+      return fallback;
     }
     if (!response.ok) {
-      throw new Error(payload?.error || `HTTP ${response.status}`);
+      const fallback = [
+        {
+          subsectionId: "",
+          name: String(payload?.error || "лицензий").trim() || "лицензий",
+        },
+      ];
+      state.licenseBlocked = fallback;
+      return fallback;
     }
     state.licenseBlocked = [];
     state.licenseHeld = payload.held || [];
     return [];
   } catch {
-    return [];
+    const fallback = [{ subsectionId: "", name: "лицензий" }];
+    state.licenseBlocked = fallback;
+    return fallback;
   }
+}
+
+async function syncLicenseSessionsForCurrentSection() {
+  return syncLicenseSessions(getRequiredLicenseSubsectionIds());
 }
 
 function stopLicenseSessionSync() {
@@ -1198,11 +1303,14 @@ function startLicenseSessionSync() {
 
 async function applyLicenseGate() {
   const version = ++licenseGateVersion;
-  const needsLicense = state.section === "base" || state.section === "editor";
+  const needsLicense = sectionNeedsLicense();
 
   if (!needsLicense) {
     stopLicenseSessionSync();
     await releaseLicenseSessions();
+    if (state.section === "editor") {
+      setSectionLicenseBlocked("editor", false);
+    }
     renderSectionContent();
     return;
   }
@@ -1673,7 +1781,8 @@ function iconLock() {
 }
 
 function getEstimateLockInfo(estimateId) {
-  const lock = state.estimateLocks[estimateId];
+  const id = normalizeEstimateId(estimateId);
+  const lock = state.estimateLocks[id];
   if (!lock || lock.userId === state.me?.id) {
     return null;
   }
@@ -1867,7 +1976,7 @@ function renderEditorSubitems() {
   const estimateButtons = state.openEstimates
     .map(
       (estimate) => `
-        <button class="nav-sublink ${state.editorTab === estimate.id ? "active" : ""}" data-editor-tab="${estimate.id}" type="button">
+        <button class="nav-sublink ${sameEstimateId(state.editorTab, estimate.id) ? "active" : ""}" data-editor-tab="${estimate.id}" type="button">
           ${escapeHTML(editorEstimateLabel(estimate))}
         </button>
       `,
@@ -2199,7 +2308,10 @@ function renderGSNNode(node) {
 }
 
 function renderEditor() {
-  if (state.editorTab !== "buffer" && !state.openEstimates.some((estimate) => estimate.id === state.editorTab)) {
+  if (
+    state.editorTab !== "buffer" &&
+    !state.openEstimates.some((estimate) => sameEstimateId(estimate.id, state.editorTab))
+  ) {
     state.editorTab = "buffer";
     sessionStorage.setItem("nav_editor_tab", state.editorTab);
   }
@@ -2219,7 +2331,7 @@ function renderEditor() {
     return;
   }
 
-  const estimate = state.openEstimates.find((item) => item.id === state.editorTab);
+  const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, state.editorTab));
   if (!estimate) {
     syncEstimateCalcStatusPolling();
     els.editorEyebrow.textContent = "Редактор";
@@ -2229,6 +2341,15 @@ function renderEditor() {
     els.editorDescription.textContent = "";
     els.editorDescription.classList.add("hidden");
     els.editorContent.innerHTML = `<p class="muted">Выберите смету для редактирования.</p>`;
+    return;
+  }
+  if (editorOpeningEstimateId && sameEstimateId(editorOpeningEstimateId, estimate.id)) {
+    els.editorEyebrow.textContent = "Редактор сметы";
+    els.editorTitle.classList.add("hidden");
+    els.editorDescription.classList.add("hidden");
+    renderEditorEstimateViewModes(estimate);
+    els.editorContent.innerHTML = `<p class="muted">Открытие сметы…</p>`;
+    syncEstimateCalcStatusPolling();
     return;
   }
   els.editorEyebrow.textContent = "Редактор сметы";
@@ -2740,7 +2861,7 @@ function applyDistrictToEstimate(estimateID, options = {}) {
   saveEditorState();
   renderEditor();
   if (options.persist !== false) {
-    void persistOpenEstimate(estimateID).catch(() => {});
+    void persistOpenEstimate(estimateId).catch(() => {});
   }
   return true;
 }
@@ -2764,6 +2885,9 @@ async function applyDistrictDialog() {
 
   if (estimate.district !== previousDistrict) {
     (estimate.items || []).forEach(clearGsnLineCalcEnrichment);
+    if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
+      restartEstimateTableCalculation(estimateID, estimate);
+    }
     showMessage("Сметный район обновлён, позиции поставлены в очередь на пересчёт", "ok");
   }
 
@@ -2872,8 +2996,85 @@ function estimateGrandTotalForDisplay(items) {
   }, 0);
 }
 
-function estimateCalcProgress(items) {
+function estimateCalcProgressSlice(items, estimateId = "", limit = Infinity) {
   const calcItems = (items || []).filter(estimateLineNeedsGsnCalc);
+  if (estimateId && estimateCalcAwaitingServer.has(estimateId)) {
+    return { total: calcItems.length, processed: 0, errors: 0, grandTotal: 0 };
+  }
+  const cap = Number.isFinite(limit) ? Math.max(0, limit) : calcItems.length;
+  let processed = 0;
+  let errors = 0;
+  let grandTotal = 0;
+
+  for (const item of calcItems) {
+    if (processed >= cap) {
+      break;
+    }
+    const status = String(item.calcStatus || "").trim();
+    if (status !== "done" && status !== "failed" && status !== "dead") {
+      continue;
+    }
+    processed += 1;
+    if (status === "failed" || status === "dead") {
+      errors += 1;
+      continue;
+    }
+    if (estimateLineCountsTowardGrandTotal(item)) {
+      grandTotal += estimateLineTotal(item);
+    }
+  }
+
+  return { total: calcItems.length, processed, errors, grandTotal };
+}
+
+function estimateDisplayedGrandTotal(estimate) {
+  const items = estimate?.items || [];
+  const estimateId = estimate?.id || "";
+  const target = estimateCalcProgressTargets.get(estimateId);
+  if (target && target.total > 0) {
+    const displayed = target.displayed ?? 0;
+    return estimateCalcProgressSlice(items, estimateId, displayed).grandTotal;
+  }
+  return estimateGrandTotalForDisplay(items);
+}
+
+function markEstimateCalcAwaitingServer(estimateId) {
+  if (estimateId) {
+    estimateCalcAwaitingServer.add(estimateId);
+  }
+}
+
+function clearEstimateCalcAwaitingServer(estimateId) {
+  if (estimateId) {
+    estimateCalcAwaitingServer.delete(estimateId);
+  }
+}
+
+function restartEstimateTableCalculation(estimateId, estimate = null) {
+  const resolved = estimate || state.openEstimates.find((item) => item.id === estimateId);
+  if (!resolved) {
+    return;
+  }
+  const calcTotal = estimateCalcProgressTotal(resolved.items);
+  if (calcTotal > 0) {
+    estimateCalcProgressTargets.set(estimateId, {
+      total: calcTotal,
+      processed: 0,
+      errors: 0,
+      displayed: 0,
+    });
+    markEstimateCalcAwaitingServer(estimateId);
+  } else {
+    estimateCalcProgressTargets.delete(estimateId);
+    clearEstimateCalcAwaitingServer(estimateId);
+  }
+}
+
+function estimateCalcProgress(items, estimateId = "") {
+  const calcItems = (items || []).filter(estimateLineNeedsGsnCalc);
+  if (estimateId && estimateCalcAwaitingServer.has(estimateId)) {
+    return { total: calcItems.length, processed: 0, errors: 0 };
+  }
   let processed = 0;
   let errors = 0;
   calcItems.forEach((item) => {
@@ -2888,16 +3089,225 @@ function estimateCalcProgress(items) {
   return { total: calcItems.length, processed, errors };
 }
 
-function formatEstimateCalcProgressText(items) {
-  const { total, processed, errors } = estimateCalcProgress(items);
+function estimateCalcProgressView(items, estimateId = "") {
+  const { total, processed, errors } = estimateCalcProgress(items, estimateId);
   if (!total) {
+    return null;
+  }
+  return {
+    total,
+    processed,
+    errors,
+    done: processed >= total,
+  };
+}
+
+function renderEstimateCalcProgressHTML(items, estimateId = "", displayOverride = null) {
+  const view = displayOverride || estimateCalcProgressView(items, estimateId);
+  if (!view) {
     return "";
   }
-  let text = `Обработано позиций: ${processed}/${total}`;
-  if (errors > 0) {
-    text += `, ошибок: ${errors}`;
+  return `<span class="editor-estimate-calc-progress">
+    <span class="editor-estimate-calc-progress-main ${
+      view.done ? "editor-estimate-calc-progress-main-ok" : "editor-estimate-calc-progress-main-danger"
+    }">Обработано позиций: ${view.processed}/${view.total}</span>${
+      view.errors > 0
+        ? `<span class="editor-estimate-calc-progress-errors">, ошибок: ${view.errors}</span>`
+        : ""
+    }
+  </span>`;
+}
+
+function estimateCalcProgressTotal(items) {
+  return (items || []).filter(estimateLineNeedsGsnCalc).length;
+}
+
+function calcProgressFromStatusPayload(estimate, statuses) {
+  const items = estimate?.items || [];
+  const total = estimateCalcProgressTotal(items);
+  if (!total) {
+    return { total: 0, processed: 0, errors: 0 };
   }
-  return text;
+  const itemsById = new Map(items.map((item) => [item.id, item]));
+  let processed = 0;
+  let errors = 0;
+
+  (statuses || []).forEach((status) => {
+    const item = itemsById.get(status.lineId);
+    if (!item || !estimateLineNeedsGsnCalc(item)) {
+      return;
+    }
+    const nextStatus = String(status.status || "").trim();
+    if (nextStatus === "done" || nextStatus === "failed" || nextStatus === "dead") {
+      processed += 1;
+    }
+    if (nextStatus === "failed" || nextStatus === "dead") {
+      errors += 1;
+    }
+  });
+
+  return { total, processed, errors };
+}
+
+function getEstimateCalcProgressDisplay(estimateId, items) {
+  const target = estimateCalcProgressTargets.get(estimateId);
+  if (target && target.total > 0) {
+    const displayed = target.displayed ?? 0;
+    const slice = estimateCalcProgressSlice(items, estimateId, displayed);
+    const done = target.processed >= target.total && displayed >= target.total;
+    return {
+      total: target.total,
+      processed: displayed,
+      errors: slice.errors,
+      grandTotal: slice.grandTotal,
+      done,
+    };
+  }
+  const view = estimateCalcProgressView(items, estimateId);
+  if (!view) {
+    return null;
+  }
+  return {
+    ...view,
+    grandTotal: estimateGrandTotalForDisplay(items),
+  };
+}
+
+function updateCalcProgressTarget(estimateId, progress, estimate = null) {
+  const previous = estimateCalcProgressTargets.get(estimateId);
+  const itemTotal = estimate ? estimateCalcProgressTotal(estimate.items) : 0;
+  const total = itemTotal || progress.total || previous?.total || 0;
+  let processed = Math.max(progress.processed, previous?.processed ?? 0);
+  let errors = progress.errors ?? previous?.errors ?? 0;
+  if (estimate) {
+    const fromItems = estimateCalcProgress(estimate.items, estimateId);
+    processed = Math.max(processed, fromItems.processed);
+    errors = Math.max(errors, fromItems.errors);
+  }
+  estimateCalcProgressTargets.set(estimateId, {
+    total,
+    processed,
+    errors,
+    displayed: previous?.displayed ?? 0,
+  });
+}
+
+function stopCalcProgressAnimation() {
+  if (estimateCalcProgressAnimFrame) {
+    cancelAnimationFrame(estimateCalcProgressAnimFrame);
+    estimateCalcProgressAnimFrame = 0;
+  }
+}
+
+function startCalcProgressAnimation(estimateId) {
+  stopCalcProgressAnimation();
+  const tick = () => {
+    estimateCalcProgressAnimFrame = 0;
+    const estimate = state.openEstimates.find((item) => item.id === estimateId);
+    const target = estimateCalcProgressTargets.get(estimateId);
+    if (
+      !estimate ||
+      !target ||
+      state.section !== "editor" ||
+      state.editorTab !== estimateId ||
+      state.estimateViewMode !== "table"
+    ) {
+      return;
+    }
+
+    const step = Math.max(1, Math.ceil(target.total / 160));
+    if (target.displayed < target.processed) {
+      target.displayed = Math.min(target.processed, target.displayed + step);
+      updateEditorCalcProgressDom(estimate);
+      estimateCalcProgressAnimFrame = requestAnimationFrame(tick);
+      return;
+    }
+
+    target.displayed = target.processed;
+    updateEditorCalcProgressDom(estimate);
+  };
+  estimateCalcProgressAnimFrame = requestAnimationFrame(tick);
+}
+
+function resetEditorTableInteractionState() {
+  editorTableInteractionEnabled = false;
+  editorTableBodyReady = false;
+  syncEditorTablePassiveState();
+}
+
+function enableEditorTableInteraction() {
+  if (editorTableInteractionEnabled) {
+    return;
+  }
+  editorTableInteractionEnabled = true;
+  syncEditorTablePassiveState();
+}
+
+function syncEditorTablePassiveState() {
+  const tableBodyScroll = els.editorContent?.querySelector(".editor-estimate-table-body-scroll");
+  if (!tableBodyScroll) {
+    return;
+  }
+  const passive = !editorTableBodyReady;
+  tableBodyScroll.classList.toggle("editor-table-passive", passive);
+  tableBodyScroll.classList.toggle("editor-table-interactive", !passive);
+}
+
+function markEditorTableBodyReady() {
+  editorTableBodyReady = true;
+  enableEditorTableInteraction();
+  syncEditorTablePassiveState();
+}
+
+function updateEditorCalcProgressDom(estimate) {
+  const view = getEstimateCalcProgressDisplay(estimate.id, estimate.items || []);
+  if (!view) {
+    const progressRoot = els.editorContent?.querySelector(".editor-estimate-calc-progress");
+    if (progressRoot) {
+      progressRoot.hidden = true;
+    }
+    return;
+  }
+  let progressRoot = els.editorContent?.querySelector(".editor-estimate-calc-progress");
+  if (!progressRoot) {
+    const totalRow = els.editorContent?.querySelector(".editor-estimate-total-row");
+    if (totalRow) {
+      totalRow.insertAdjacentHTML("beforeend", renderEstimateCalcProgressHTML(estimate.items, estimate.id, view));
+    }
+    return;
+  }
+  progressRoot.hidden = false;
+  const progressMain = progressRoot.querySelector(".editor-estimate-calc-progress-main");
+  if (progressMain) {
+    progressMain.textContent = `Обработано позиций: ${view.processed}/${view.total}`;
+    progressMain.classList.toggle("editor-estimate-calc-progress-main-ok", view.done);
+    progressMain.classList.toggle("editor-estimate-calc-progress-main-danger", !view.done);
+  }
+  let errorsNode = progressRoot.querySelector(".editor-estimate-calc-progress-errors");
+  if (view.errors > 0) {
+    const errorsText = `, ошибок: ${view.errors}`;
+    if (errorsNode) {
+      errorsNode.textContent = errorsText;
+    } else {
+      progressRoot.insertAdjacentHTML("beforeend", `<span class="editor-estimate-calc-progress-errors">${errorsText}</span>`);
+    }
+  } else if (errorsNode) {
+    errorsNode.remove();
+  }
+  const totalOutput = els.editorContent?.querySelector(".editor-estimate-total-value");
+  if (totalOutput && view.grandTotal !== undefined) {
+    totalOutput.textContent = money.format(view.grandTotal);
+  }
+}
+
+function updateEditorTableTotals(estimate) {
+  const items = estimate.items || [];
+  updateCalcProgressTarget(estimate.id, estimateCalcProgress(items, estimate.id), estimate);
+  const totalOutput = els.editorContent?.querySelector(".editor-estimate-total-value");
+  if (totalOutput) {
+    totalOutput.textContent = money.format(estimateDisplayedGrandTotal(estimate));
+  }
+  updateEditorCalcProgressDom(estimate);
 }
 
 function formatEstimateMoney(value) {
@@ -2984,7 +3394,7 @@ function parseSourceDataPositionLineFieldsFromRawText(rawText) {
   }
 }
 
-function buildGsnPositionItemFromSourceDataLine({ existing, fields, rawText }) {
+function buildGsnPositionItemFromSourceDataLine({ existing, fields, rawText, lineIndex }) {
   const parsed = parseSourceDataPositionLineFields(fields);
   const rawTextUnchanged = existing && String(existing.rawText || "") === String(rawText || "");
   const calcDone = rawTextUnchanged && estimateLineCalcDone(existing);
@@ -3000,7 +3410,7 @@ function buildGsnPositionItemFromSourceDataLine({ existing, fields, rawText }) {
   const unitPrice = calcDone ? Number(existing.unitPrice || 0) : 0;
 
   return {
-    id: existing?.id || `line_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    id: existing?.id || `line_${lineIndex}`,
     type: "position",
     source: "gsn",
     sourceId: parsed.sourceCode,
@@ -3403,10 +3813,47 @@ function applyEstimateCalcRecord(item, calcJson) {
   if (record.isWork !== false && record.resources?.length) {
     refreshEstimateItemChildrenPricing(item, record.resources);
   }
+  item.calcRecordAppliedKey = JSON.stringify(calcJson || null);
   return true;
 }
 
-function applyEstimateCalcStatuses(estimate, statuses) {
+function estimateCalcRecordNeedsApply(item) {
+  if (!estimateLineCalcDone(item) || !item?.calcJson) {
+    return false;
+  }
+  const calcKey = item.calcJsonKey || JSON.stringify(item.calcJson || null);
+  return item.calcRecordAppliedKey !== calcKey;
+}
+
+function applyEstimateCalcRecordsBatch(estimate, statuses) {
+  const itemsById = new Map((estimate?.items || []).map((item) => [item.id, item]));
+  let changed = false;
+
+  (statuses || []).forEach((status) => {
+    if (status.status !== "done" || !status.calcJson) {
+      return;
+    }
+    const item = itemsById.get(status.lineId);
+    if (!item || !estimateCalcRecordNeedsApply(item)) {
+      return;
+    }
+    if (applyEstimateCalcRecord(item, status.calcJson)) {
+      changed = true;
+    }
+  });
+
+  return changed;
+}
+
+function shouldPreserveLocalGsnCalcOnMerge(local, saved) {
+  if (!local || !estimateLineIsGsn(local) || !estimateLineCalcDone(local)) {
+    return false;
+  }
+  const savedStatus = String(saved?.calcStatus || "").trim();
+  return savedStatus === "queued" || savedStatus === "leased" || savedStatus === "";
+}
+
+function applyEstimateCalcStatusFieldsOnly(estimate, statuses) {
   const itemsById = new Map((estimate?.items || []).map((item) => [item.id, item]));
   let changed = false;
 
@@ -3425,12 +3872,109 @@ function applyEstimateCalcStatuses(estimate, statuses) {
       item.calcJsonKey = nextCalcKey;
       changed = true;
     }
+  });
+
+  return changed;
+}
+
+function applyEstimateCalcStatuses(estimate, statuses) {
+  const itemsById = new Map((estimate?.items || []).map((item) => [item.id, item]));
+  let changed = applyEstimateCalcStatusFieldsOnly(estimate, statuses);
+
+  (statuses || []).forEach((status) => {
+    const item = itemsById.get(status.lineId);
+    if (!item) {
+      return;
+    }
+    const nextStatus = status.status || "";
     if (nextStatus === "done" && status.calcJson && applyEstimateCalcRecord(item, status.calcJson)) {
       changed = true;
     }
   });
 
   return changed;
+}
+
+async function scheduleEstimateCalcStatusApply(estimate, statuses) {
+  const token = ++estimateCalcApplyToken;
+  const estimateId = estimate.id;
+
+  for (let index = 0; index < statuses.length; index += ESTIMATE_CALC_APPLY_CHUNK) {
+    if (token !== estimateCalcApplyToken) {
+      return;
+    }
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const batch = statuses.slice(index, index + ESTIMATE_CALC_APPLY_CHUNK);
+    applyEstimateCalcStatusFieldsOnly(estimate, batch);
+    applyEstimateCalcRecordsBatch(estimate, batch);
+    updateCalcProgressTarget(estimateId, estimateCalcProgress(estimate.items, estimateId), estimate);
+    if (
+      state.section === "editor" &&
+      state.editorTab === estimateId &&
+      state.estimateViewMode === "table"
+    ) {
+      startCalcProgressAnimation(estimateId);
+      updateEditorCalcProgressDom(estimate);
+    }
+  }
+
+  if (token !== estimateCalcApplyToken) {
+    return;
+  }
+
+  const serverProgress = calcProgressFromStatusPayload(estimate, statuses);
+  saveEditorState();
+
+  if (
+    state.section === "editor" &&
+    state.editorTab === estimateId &&
+    state.estimateViewMode === "table"
+  ) {
+    updateEditorTableTotals(estimate);
+  }
+
+  if (serverProgress.total > 0 && serverProgress.processed >= serverProgress.total) {
+    await finalizeEstimateCalcEnrichment(estimate, statuses, token);
+  }
+}
+
+async function finalizeEstimateCalcEnrichment(estimate, statuses, token) {
+  const doneStatuses = (statuses || []).filter((status) => status.status === "done" && status.calcJson);
+  for (let index = 0; index < doneStatuses.length; index += ESTIMATE_CALC_APPLY_CHUNK) {
+    if (token !== estimateCalcApplyToken) {
+      return;
+    }
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    const batch = doneStatuses.slice(index, index + ESTIMATE_CALC_APPLY_CHUNK);
+    const itemsById = new Map((estimate?.items || []).map((item) => [item.id, item]));
+    batch.forEach((status) => {
+      const item = itemsById.get(status.lineId);
+      if (item) {
+        applyEstimateCalcRecord(item, status.calcJson);
+      }
+    });
+    if (
+      state.section === "editor" &&
+      state.editorTab === estimate.id &&
+      state.estimateViewMode === "table"
+    ) {
+      updateEditorTableTotals(estimate);
+    }
+  }
+
+  if (token !== estimateCalcApplyToken) {
+    return;
+  }
+
+  saveEditorState();
+  if (
+    state.section === "editor" &&
+    state.editorTab === estimate.id &&
+    state.estimateViewMode === "table" &&
+    isEditorContentMountedForEstimate(estimate.id)
+  ) {
+    updateEditorTableContent(estimate, { refreshBody: true });
+  }
 }
 
 async function pollEstimateCalcStatus(estimateId) {
@@ -3445,17 +3989,17 @@ async function pollEstimateCalcStatus(estimateId) {
   estimateCalcStatusPollInflight = estimateId;
   try {
     const response = await api(`/api/estimates/${estimateId}/calc-status`);
-    if (applyEstimateCalcStatuses(estimate, response.items || [])) {
-      saveEditorState();
+    clearEstimateCalcAwaitingServer(estimateId);
+    const statuses = response.items || [];
+    const serverProgress = calcProgressFromStatusPayload(estimate, statuses);
+    if (serverProgress.total > 0) {
+      updateCalcProgressTarget(estimateId, serverProgress, estimate);
       if (state.section === "editor" && state.editorTab === estimateId && state.estimateViewMode === "table") {
-        if (isEditorHeaderFieldActive()) {
-          pendingEditorRemountEstimateId = estimateId;
-          updateEditorTableContent(estimate);
-        } else {
-          mountEditorContent(estimate);
-        }
+        updateEditorCalcProgressDom(estimate);
       }
+      startCalcProgressAnimation(estimateId);
     }
+    void scheduleEstimateCalcStatusApply(estimate, statuses);
   } catch {
     return;
   } finally {
@@ -3470,6 +4014,8 @@ function stopEstimateCalcStatusPolling() {
     window.clearInterval(estimateCalcStatusPollTimer);
     estimateCalcStatusPollTimer = 0;
   }
+  stopCalcProgressAnimation();
+  estimateCalcApplyToken += 1;
 }
 
 function syncEstimateCalcStatusPolling() {
@@ -3778,6 +4324,15 @@ async function toggleEstimateLineExpand(estimateId, lineId) {
   renderEditor();
 }
 
+function syncEstimateViewModeTabState() {
+  if (!els.editorEstimateViewModes) {
+    return;
+  }
+  els.editorEstimateViewModes.querySelectorAll("[data-editor-view-mode]").forEach((button) => {
+    button.classList.toggle("active", state.estimateViewMode === button.dataset.editorViewMode);
+  });
+}
+
 function renderEditorEstimateViewModes(estimate) {
   if (!estimate || !els.editorEstimateViewModes) {
     els.editorEstimateViewModes?.classList.add("hidden");
@@ -3788,7 +4343,60 @@ function renderEditorEstimateViewModes(estimate) {
   }
 
   els.editorEstimateViewModes.classList.remove("hidden");
+  const existing = els.editorEstimateViewModes.querySelector("[data-editor-view-estimate]");
+  if (existing && existing.dataset.editorViewEstimate === estimate.id) {
+    syncEstimateViewModeTabState();
+    return;
+  }
   els.editorEstimateViewModes.innerHTML = renderEstimateViewModeTabs(estimate);
+}
+
+function cancelEditorTableBodyRender() {
+  editorTableBodyRenderToken += 1;
+}
+
+function mountEditorTableBody(estimate, tbody, { incremental = false } = {}) {
+  const rows = buildEstimateTableRows(estimate);
+  const emptyRow = `<tr><td colspan="8" class="muted">Строки сметы отсутствуют</td></tr>`;
+  if (!rows.length) {
+    tbody.innerHTML = emptyRow;
+    markEditorTableBodyReady();
+    return;
+  }
+
+  if (!incremental || rows.length <= EDITOR_TABLE_IMMEDIATE_ROWS) {
+    tbody.innerHTML = rows.join("");
+    markEditorTableBodyReady();
+    return;
+  }
+
+  const token = ++editorTableBodyRenderToken;
+  tbody.innerHTML = rows.slice(0, EDITOR_TABLE_IMMEDIATE_ROWS).join("");
+  markEditorTableBodyReady();
+  let index = EDITOR_TABLE_IMMEDIATE_ROWS;
+
+  const appendChunk = () => {
+    if (editorTableBodyRenderToken !== token) {
+      return;
+    }
+    if (state.editorTab !== estimate.id || state.estimateViewMode !== "table") {
+      return;
+    }
+    const liveTbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
+    if (!liveTbody || liveTbody !== tbody) {
+      return;
+    }
+    const end = Math.min(index + EDITOR_TABLE_CHUNK_ROWS, rows.length);
+    const template = document.createElement("template");
+    template.innerHTML = rows.slice(index, end).join("");
+    liveTbody.append(...template.content.children);
+    index = end;
+    if (index < rows.length) {
+      requestAnimationFrame(appendChunk);
+    }
+  };
+
+  requestAnimationFrame(appendChunk);
 }
 
 function renderEstimateViewModeTabs(estimate) {
@@ -3812,7 +4420,9 @@ function renderEstimateViewModeTabs(estimate) {
 
 function renderEstimateEditorHeader(estimate) {
   const items = estimate.items || [];
-  const calcProgressText = formatEstimateCalcProgressText(items);
+  const progressView = getEstimateCalcProgressDisplay(estimate.id, items);
+  const calcProgress = renderEstimateCalcProgressHTML(items, estimate.id, progressView);
+  const headerGrandTotal = progressView?.grandTotal ?? estimateGrandTotalForDisplay(items);
   return `
     <div class="editor-estimate-header">
       <label class="editor-estimate-header-field">
@@ -3846,13 +4456,11 @@ function renderEstimateEditorHeader(estimate) {
         >${renderFgisSetSelectOptions(estimate.fgisSetId)}</select>
       </label>
       <div class="editor-estimate-header-field editor-estimate-header-field-total">
-        <span class="muted">Сметная стоимость</span>
-        <output class="editor-estimate-total-value">${money.format(estimateGrandTotalForDisplay(items))}</output>
-        ${
-          calcProgressText
-            ? `<span class="editor-estimate-calc-progress muted">${escapeHTML(calcProgressText)}</span>`
-            : ""
-        }
+        <div class="editor-estimate-total-row">
+          <span class="muted">Сметная стоимость</span>
+          <output class="editor-estimate-total-value">${money.format(headerGrandTotal)}</output>
+        </div>
+        ${calcProgress}
       </div>
     </div>
     <div class="editor-estimate-meta">
@@ -3950,37 +4558,31 @@ function refreshEditorFgisSetSelect(estimate) {
   if (!select) {
     return false;
   }
-  const preservedValue = select.value || estimate.fgisSetId || "";
-  select.innerHTML = renderFgisSetSelectOptions(estimate.fgisSetId);
-  if (preservedValue) {
-    select.value = preservedValue;
-  }
+  const selectedId = String(estimate.fgisSetId || "");
+  select.innerHTML = renderFgisSetSelectOptions(selectedId);
+  select.value = selectedId;
   return true;
 }
 
-function updateEditorTableContent(estimate) {
+function updateEditorTableContent(estimate, options = {}) {
   if (state.estimateViewMode !== "table") {
     return;
   }
-  const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
-  if (!tbody) {
-    return;
+  const { refreshBody = false } = options;
+  if (refreshBody) {
+    const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
+    if (!tbody) {
+      return;
+    }
+    cancelEditorTableBodyRender();
+    editorTableBodyReady = false;
+    syncEditorTablePassiveState();
+    const itemCount = (estimate.items || []).length;
+    mountEditorTableBody(estimate, tbody, {
+      incremental: itemCount > EDITOR_TABLE_IMMEDIATE_ROWS,
+    });
   }
-  const rows = buildEstimateTableRows(estimate);
-  tbody.innerHTML = rows.length
-    ? rows.join("")
-    : `<tr><td colspan="8" class="muted">Строки сметы отсутствуют</td></tr>`;
-  const items = estimate.items || [];
-  const totalOutput = els.editorContent?.querySelector(".editor-estimate-total-value");
-  if (totalOutput) {
-    totalOutput.textContent = money.format(estimateGrandTotalForDisplay(items));
-  }
-  const progressOutput = els.editorContent?.querySelector(".editor-estimate-calc-progress");
-  if (progressOutput) {
-    const progressText = formatEstimateCalcProgressText(items);
-    progressOutput.textContent = progressText;
-    progressOutput.hidden = !progressText;
-  }
+  updateEditorTableTotals(estimate);
 }
 
 function flushPendingEditorRemount() {
@@ -4006,19 +4608,41 @@ function mountEditorContent(estimate, { force = false } = {}) {
     return;
   }
   pendingEditorRemountEstimateId = null;
+  cancelEditorTableBodyRender();
+  if (state.estimateViewMode === "table") {
+    resetEditorTableInteractionState();
+  }
   els.editorContent.innerHTML = renderEstimateEditor(estimate);
+  els.editorContent.classList.toggle("editor-content--table", state.estimateViewMode === "table");
   if (state.estimateViewMode === "text") {
     const textarea = els.editorContent.querySelector(`[data-editor-estimate-text="${estimate.id}"]`);
     if (textarea) {
-      textarea.value = getEstimateTextDraft(estimate);
+      const draft = state.estimateTextDrafts[estimate.id];
+      if (draft === undefined) {
+        textarea.value = "";
+        textarea.placeholder = "Загрузка текста сметы…";
+        textarea.disabled = true;
+        scheduleEstimateTextDraftBuild(estimate);
+      } else {
+        textarea.disabled = false;
+        textarea.placeholder = "";
+        textarea.value = draft;
+      }
     }
+    return;
+  }
+  const tbody = els.editorContent.querySelector(".editor-estimate-table tbody");
+  if (tbody) {
+    const itemCount = (estimate.items || []).length;
+    mountEditorTableBody(estimate, tbody, {
+      incremental: itemCount > EDITOR_TABLE_IMMEDIATE_ROWS,
+    });
   }
 }
 
 function renderEstimateTableEditor(estimate) {
-  const rows = buildEstimateTableRows(estimate);
   return `
-    <div class="table-wrap">
+    <div class="table-wrap editor-estimate-table-body-scroll">
       <table class="editor-estimate-table">
         <thead>
           <tr>
@@ -4032,9 +4656,7 @@ function renderEstimateTableEditor(estimate) {
             <th class="editor-estimate-actions-cell">Действия</th>
           </tr>
         </thead>
-        <tbody>
-          ${rows.length ? rows.join("") : `<tr><td colspan="8" class="muted">Строки сметы отсутствуют</td></tr>`}
-        </tbody>
+        <tbody></tbody>
       </table>
     </div>
     ${renderEstimateEditorActions(estimate, { tableMode: true })}
@@ -4047,8 +4669,12 @@ function renderEstimateEditor(estimate) {
   }
 
   return `
-    ${renderEstimateEditorHeader(estimate)}
-    ${renderEstimateTableEditor(estimate)}
+    <div class="editor-estimate-table-layout">
+      <div class="editor-estimate-chrome">
+        ${renderEstimateEditorHeader(estimate)}
+      </div>
+      ${renderEstimateTableEditor(estimate)}
+    </div>
   `;
 }
 
@@ -4165,7 +4791,7 @@ function clearGsnLineCalcEnrichment(item) {
 
 function enrichEditorEstimateItems(items) {
   (items || []).forEach((item) => {
-    if (estimateLineCalcDone(item) && item.calcJson) {
+    if (estimateCalcRecordNeedsApply(item)) {
       applyEstimateCalcRecord(item, item.calcJson);
     }
   });
@@ -4367,13 +4993,22 @@ function serializeSourceDataConstructionLine(estimate) {
 }
 
 function serializeSourceDataConfigLine(estimate) {
+  const raw = String(estimate.sourceDataConfigLineRaw || "");
+  if (raw.startsWith("F(")) {
+    return `${upsertSourceDataF49ConfigLine(raw, estimate.fgisSetId || "")}*`;
+  }
+  const fgisSetId = estimate.fgisSetId || "";
+  if (fgisSetId) {
+    return `F(${SOURCE_DATA_FORMAT_CODE})${ESTIMATE_TEXT_DELIMITER}наборФГИС=${escapeEstimateTextField(fgisSetId)}*`;
+  }
+  return `F(${SOURCE_DATA_FORMAT_CODE})*`;
+}
+
+function serializeSourceDataClosingLine(estimate) {
   if (estimate.sourceDataBimConfig) {
-    return `К${ESTIMATE_TEXT_DELIMITER}${estimate.sourceDataBimConfig}*`;
+    return `К${ESTIMATE_TEXT_DELIMITER}${escapeEstimateTextField(estimate.sourceDataBimConfig)}*`;
   }
-  if (estimate.fgisSetId) {
-    return `F(${SOURCE_DATA_FORMAT_CODE})${ESTIMATE_TEXT_DELIMITER}наборФГИС=${escapeEstimateTextField(estimate.fgisSetId)}*`;
-  }
-  return `К*`;
+  return "К*";
 }
 
 function estimateSourceDataPositionSerializedFields(item) {
@@ -4415,7 +5050,61 @@ function serializedSourceDataLineBody(line) {
   return line.endsWith("*") ? line.slice(0, -1) : line;
 }
 
+function hydrateEstimateSourceDataFgisSet(estimate) {
+  if (!estimate) {
+    return "";
+  }
+  const fromRaw = parseSourceDataFgisSetFromLine(String(estimate.sourceDataConfigLineRaw || ""));
+  const fgisSetId = String(estimate.fgisSetId || fromRaw || "").trim();
+  if (fgisSetId) {
+    estimate.fgisSetId = fgisSetId;
+    applyFgisSetToEstimateSourceData(estimate, fgisSetId);
+  }
+  return fgisSetId;
+}
+
+function syncEstimateSourceDataFromFgisSet(estimate) {
+  hydrateEstimateSourceDataFgisSet(estimate);
+}
+
+function scheduleEstimateTextDraftBuild(estimate) {
+  const estimateId = estimate.id;
+  if (state.estimateTextDrafts[estimateId] !== undefined) {
+    return;
+  }
+  window.setTimeout(() => {
+    if (state.estimateTextDrafts[estimateId] !== undefined) {
+      return;
+    }
+    state.estimateTextDrafts[estimateId] = serializeEstimateToText(estimate);
+    if (
+      state.section !== "editor" ||
+      !sameEstimateId(state.editorTab, estimateId) ||
+      state.estimateViewMode !== "text"
+    ) {
+      return;
+    }
+    const textarea = els.editorContent?.querySelector(`[data-editor-estimate-text="${estimateId}"]`);
+    if (!textarea) {
+      return;
+    }
+    textarea.disabled = false;
+    textarea.placeholder = "";
+    textarea.value = state.estimateTextDrafts[estimateId];
+  }, 0);
+}
+
+function writeEstimateTextDraftFromState(estimateId) {
+  const estimate = state.openEstimates.find((item) => item.id === estimateId);
+  if (!estimate) {
+    return;
+  }
+  syncEstimateSourceDataFromFgisSet(estimate);
+  state.estimateTextDrafts[estimateId] = serializeEstimateToText(estimate);
+}
+
 function serializeEstimateToText(estimate) {
+  syncEstimateSourceDataFromFgisSet(estimate);
   const lines = [
     serializeSourceDataEstimateHeaderLine(estimate),
     serializeSourceDataConstructionLine(estimate),
@@ -4429,9 +5118,7 @@ function serializeEstimateToText(estimate) {
       item.rawText = serializedSourceDataLineBody(line);
     }
   }
-  if (items.length > 0) {
-    lines.push("К*");
-  }
+  lines.push(serializeSourceDataClosingLine(estimate));
   return lines.join("\n");
 }
 
@@ -4503,28 +5190,142 @@ function parseSourceDataConstructionLine(line) {
   };
 }
 
-function parseSourceDataConfigLine(line) {
-  if (line.startsWith("F(")) {
-    const match = line.match(/^F\((\d+)\)(.*)$/);
-    if (!match) {
-      throw new Error("Строка F: неверный формат");
+function sourceDataFgisSetParamKey(field) {
+  if (!field) {
+    return "";
+  }
+  const eqIndex = field.indexOf("=");
+  if (eqIndex < 0) {
+    return "";
+  }
+  return field.slice(0, eqIndex).trim();
+}
+
+function upsertSourceDataF49ConfigLine(configLineBody, fgisSetId) {
+  if (!configLineBody.startsWith("F(")) {
+    return configLineBody;
+  }
+  const match = configLineBody.match(/^F\((\d+)\)(.*)$/);
+  if (!match) {
+    return configLineBody;
+  }
+  const formatCode = match[1];
+  const fields = splitEstimateTextLine(match[2] || "").map(unescapeEstimateTextField);
+  const otherFields = fields.filter((field) => {
+    const key = sourceDataFgisSetParamKey(field);
+    return key && key !== "наборФГИС" && key !== "fgisSetId";
+  });
+  const nextFields = [];
+  const fgisToUse = fgisSetId || parseSourceDataFgisSetFromLine(configLineBody);
+  if (fgisToUse) {
+    nextFields.push(`наборФГИС=${fgisToUse}`);
+  }
+  nextFields.push(...otherFields);
+  if (!nextFields.length) {
+    return `F(${formatCode})`;
+  }
+  return `F(${formatCode})${ESTIMATE_TEXT_DELIMITER}${nextFields.map(escapeEstimateTextField).join(ESTIMATE_TEXT_DELIMITER)}`;
+}
+
+function applyFgisSetToEstimateSourceData(estimate, fgisSetId) {
+  if (!estimate) {
+    return;
+  }
+  const nextFgisSetId = String(fgisSetId || "");
+  const raw = String(estimate.sourceDataConfigLineRaw || "");
+  if (raw.startsWith("F(")) {
+    estimate.sourceDataConfigLineRaw = upsertSourceDataF49ConfigLine(raw, nextFgisSetId);
+    return;
+  }
+  if (nextFgisSetId) {
+    estimate.sourceDataConfigLineRaw = `F(${SOURCE_DATA_FORMAT_CODE})${ESTIMATE_TEXT_DELIMITER}наборФГИС=${nextFgisSetId}`;
+    return;
+  }
+  if (!raw) {
+    estimate.sourceDataConfigLineRaw = `F(${SOURCE_DATA_FORMAT_CODE})`;
+  }
+}
+
+function applyParsedSourceDataFgisSet(estimate, parsedEstimate, fgisSetIdFromText = "") {
+  if (!estimate || !parsedEstimate) {
+    return "";
+  }
+  const fgisSetId = String(fgisSetIdFromText || parsedEstimate.fgisSetId || "").trim();
+  if (parsedEstimate.sourceDataConfigLineRaw) {
+    estimate.sourceDataConfigLineRaw = parsedEstimate.sourceDataConfigLineRaw;
+  }
+  estimate.fgisSetId = fgisSetId;
+  applyFgisSetToEstimateSourceData(estimate, fgisSetId);
+  return fgisSetId;
+}
+
+function extractSourceDataBimConfigFromLines(lines) {
+  for (let lineIndex = lines.length - 1; lineIndex >= 0; lineIndex -= 1) {
+    const trimmed = String(lines[lineIndex] || "").trimEnd();
+    if (!trimmed.endsWith("*")) {
+      continue;
     }
-    const fields = splitEstimateTextLine(match[2] || "").map(unescapeEstimateTextField);
-    const params = parseSourceDataParamMap(fields);
-    return {
-      fgisSetId: params.наборФГИС || params.fgisSetId || "",
-      sourceDataBimConfig: "",
-    };
+    const line = trimmed.slice(0, -1);
+    if (line === "К") {
+      return "";
+    }
+    if (line.startsWith("К")) {
+      const fields = splitSourceDataStrictFields(line.slice(1));
+      return fields[1] || fields[0] || "";
+    }
   }
-  if (!line.startsWith("К")) {
-    throw new Error("Третья строка должна начинаться с К или F(49)");
+  return "";
+}
+
+function parseSourceDataFgisSetFromLine(line) {
+  const normalizedLine = String(line || "").trim();
+  if (!normalizedLine.startsWith("F(")) {
+    return "";
   }
-  if (line === "К") {
-    return { sourceDataBimConfig: "" };
+  const match = normalizedLine.match(/^F\(\d+\)(.*)$/);
+  if (!match) {
+    return "";
   }
-  const fields = splitSourceDataStrictFields(line.slice(1));
-  const sourceDataBimConfig = fields[1] || fields[0] || "";
-  return { sourceDataBimConfig };
+  const fields = splitEstimateTextLine(match[2] || "").map(unescapeEstimateTextField);
+  const params = parseSourceDataParamMap(fields);
+  const mapValue = params.наборФГИС || params.fgisSetId;
+  if (mapValue) {
+    return String(mapValue).trim();
+  }
+  const body = String(match[1] || "");
+  const fallbackMatch = body.match(/(?:^|')\s*(?:наборФГИС|fgisSetId)\s*=\s*([^'*]+)/iu);
+  return fallbackMatch ? String(fallbackMatch[1] || "").trim() : "";
+}
+
+function extractFgisSetIdFromEstimateText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  let fgisSetId = "";
+  for (const rawLine of lines) {
+    if (!rawLine.endsWith("*")) {
+      continue;
+    }
+    const parsed = parseSourceDataFgisSetFromLine(rawLine.slice(0, -1));
+    if (parsed) {
+      fgisSetId = parsed;
+    }
+  }
+  return fgisSetId;
+}
+
+function parseSourceDataConfigLine(line) {
+  if (!line.startsWith("F(")) {
+    throw new Error("Третья строка должна начинаться с F(49)");
+  }
+  const match = line.match(/^F\((\d+)\)(.*)$/);
+  if (!match) {
+    throw new Error("Строка F: неверный формат");
+  }
+  return {
+    fgisSetId: parseSourceDataFgisSetFromLine(line),
+  };
 }
 
 function isSourceDataSkippedLine(line) {
@@ -4550,12 +5351,11 @@ function applyLegacyEstimateTextToEstimate(estimate, lines) {
 
   const [code, title, description = "", district = "", fgisSetId = ""] = headerFields;
   const previousDistrict = estimate.district || "";
-  const previousFgisSetId = estimate.fgisSetId || "";
   estimate.code = code;
   estimate.title = title;
   estimate.description = description;
   estimate.district = headerFields.length > 3 ? district : previousDistrict;
-  estimate.fgisSetId = headerFields.length > 4 ? fgisSetId : previousFgisSetId;
+  estimate.fgisSetId = headerFields.length > 4 ? fgisSetId : "";
 
   const existingItems = estimate.items || [];
   const existingById = new Map(existingItems.map((item) => [item.id, item]));
@@ -4674,15 +5474,15 @@ function trimSourceDataRecordLine(line, lineNumber) {
 
 function applySourceDataTextToEstimate(estimate, lines) {
   if (lines.length < 3) {
-    throw new Error("Формат «Исходные данные»: ожидается минимум 3 строки (Э, Ю, К)");
+    throw new Error("Формат «Исходные данные»: ожидается минимум 3 строки (Э, Ю, F(49))");
   }
 
   const header = parseSourceDataEstimateHeaderLine(trimSourceDataRecordLine(lines[0], 1));
   const construction = parseSourceDataConstructionLine(trimSourceDataRecordLine(lines[1], 2));
-  const config = parseSourceDataConfigLine(trimSourceDataRecordLine(lines[2], 3));
+  const configLineRaw = trimSourceDataRecordLine(lines[2], 3);
+  parseSourceDataConfigLine(configLineRaw);
 
   const previousDistrict = estimate.district || "";
-  const previousFgisSetId = estimate.fgisSetId || "";
   estimate.sourceDataNumericId = header.sourceDataNumericId;
   estimate.sourceDataDocumentSet = header.sourceDataDocumentSet || "";
   estimate.sourceDataCalculationFlags = header.sourceDataCalculationFlags || "";
@@ -4697,13 +5497,9 @@ function applySourceDataTextToEstimate(estimate, lines) {
   estimate.constructionLabel =
     `${construction.constructionCode || ""} ${construction.constructionName || ""}`.trim();
   estimate.objectLabel = `${construction.objectCode || ""} ${construction.objectName || ""}`.trim();
-  estimate.sourceDataBimConfig = config.sourceDataBimConfig || "";
-
-  if (config.fgisSetId) {
-    estimate.fgisSetId = config.fgisSetId;
-  } else if (!estimate.fgisSetId) {
-    estimate.fgisSetId = previousFgisSetId;
-  }
+  estimate.sourceDataConfigLineRaw = configLineRaw;
+  estimate.sourceDataBimConfig = extractSourceDataBimConfigFromLines(lines);
+  estimate.fgisSetId = parseSourceDataFgisSetFromLine(configLineRaw);
   const existingItems = estimate.items || [];
   const existingById = new Map(existingItems.map((item) => [item.id, item]));
   const newItems = [];
@@ -4765,18 +5561,7 @@ function applySourceDataTextToEstimate(estimate, lines) {
 
     const normalizedCode = parsedFields.sourceCode;
     const existing =
-      findExistingGsnItemByCode(existingItems, normalizedCode) ||
-      [...existingById.values()].find((item) => {
-        const code = estimateLineNormalizedSourceCode(item) || estimateSourceDataPositionCode(item);
-        if (String(code).trim() !== normalizedCode) {
-          return false;
-        }
-        if (!parsedFields.hasName) {
-          return true;
-        }
-        return String(item.name || "") === String(parsedFields.name || "");
-      }) ||
-      null;
+      [...existingById.values()].find((item) => String(item.rawText || "") === line) || null;
 
     const normalizedSource = String(existing?.source || "").toLowerCase();
     const isUserPosition = normalizedSource === "user_position" && existing?.sourceId;
@@ -4820,6 +5605,7 @@ function applySourceDataTextToEstimate(estimate, lines) {
         existing,
         fields,
         rawText: line,
+        lineIndex,
       }),
     );
   }
@@ -4845,6 +5631,17 @@ function findExistingGsnItemByCode(items, code) {
 
 function invalidateEstimateTextDraft(estimateId) {
   delete state.estimateTextDrafts[estimateId];
+}
+
+function resolveEstimateTextDraftForParse(estimateId, estimate) {
+  const textarea = els.editorContent?.querySelector(`[data-editor-estimate-text="${estimateId}"]`);
+  if (textarea) {
+    return textarea.value;
+  }
+  if (state.estimateTextDrafts[estimateId] !== undefined) {
+    return state.estimateTextDrafts[estimateId];
+  }
+  return serializeEstimateToText(estimate);
 }
 
 function readEstimateTextDraft(estimateId) {
@@ -4894,35 +5691,75 @@ async function setEstimateViewMode(estimateId, mode) {
 
   if (state.estimateViewMode === "text" && mode === "table") {
     const previousDistrict = estimate.district || "";
-    const previousFgisSetId = estimate.fgisSetId || "";
-    const draft = readEstimateTextDraft(estimateId);
+    const draft = resolveEstimateTextDraftForParse(estimateId, estimate);
+    const fgisSetIdFromText = extractFgisSetIdFromEstimateText(draft);
+    const parsedEstimate = cloneOpenEstimate(estimate);
     try {
-      applyEstimateTextToEstimate(estimate, draft ?? serializeEstimateToText(estimate));
-      enrichEditorEstimateItems(estimate.items);
-      if (!estimate.district && previousDistrict) {
-        estimate.district = previousDistrict;
+      applyEstimateTextToEstimate(parsedEstimate, draft);
+      enrichEditorEstimateItems(parsedEstimate.items);
+      markEstimateCalcAwaitingServer(estimateId);
+      if (!parsedEstimate.district && previousDistrict) {
+        parsedEstimate.district = previousDistrict;
       }
-      if (!estimate.fgisSetId && previousFgisSetId) {
-        estimate.fgisSetId = previousFgisSetId;
-      }
-      invalidateEstimateTextDraft(estimateId);
-      state.estimateViewMode = "table";
-      renderEditor();
-      saveEditorState();
-      void persistOpenEstimate(estimateId)
-        .then(() => pollEstimateCalcStatus(estimateId))
-        .catch(() => {});
     } catch (error) {
       showMessage(error.message || "Не удалось разобрать текст сметы", "error");
       return;
     }
+
+    const fgisSetId = applyParsedSourceDataFgisSet(parsedEstimate, parsedEstimate, fgisSetIdFromText);
+    const estimateIndex = state.openEstimates.findIndex((item) => item.id === estimateId);
+    if (estimateIndex >= 0) {
+      state.openEstimates[estimateIndex] = parsedEstimate;
+    }
+    invalidateEstimateTextDraft(estimateId);
+
+    resetEditorTableInteractionState();
+    restartEstimateTableCalculation(estimateId, parsedEstimate);
+
+    state.estimateViewMode = "table";
+    renderEditor();
+    refreshEditorFgisSetSelect(parsedEstimate);
+    saveEditorState();
+
+    void (async () => {
+      const blocked = await syncLicenseSessions(getEditorTableLicenseSubsectionIdsForFgisSet(fgisSetId));
+      if (blocked.length) {
+        state.estimateViewMode = "text";
+        const currentEstimate = state.openEstimates[estimateIndex];
+        if (currentEstimate) {
+          applyParsedSourceDataFgisSet(currentEstimate, parsedEstimate, fgisSetIdFromText);
+        }
+        saveEditorState();
+        writeEstimateTextDraftFromState(estimateId);
+        renderEditor();
+        showMessage(formatLicenseBlockedMessage(blocked), "error");
+        try {
+          await persistOpenEstimate(estimateId, { skipTextDraftSync: true });
+        } catch {
+          return;
+        }
+        return;
+      }
+
+      setSectionLicenseBlocked("editor", false);
+      startLicenseSessionSync();
+      try {
+        await persistOpenEstimate(estimateId);
+        void pollEstimateCalcStatus(estimateId);
+      } catch {
+        return;
+      }
+    })();
     return;
   }
 
   if (mode === "text") {
     readEstimateHeaderFieldsFromDom(estimateId);
-    state.estimateTextDrafts[estimateId] = serializeEstimateToText(estimate);
+    writeEstimateTextDraftFromState(estimateId);
     saveEditorState();
+    stopLicenseSessionSync();
+    void releaseLicenseSessions();
+    setSectionLicenseBlocked("editor", false);
   }
 
   state.estimateViewMode = mode;
@@ -4937,8 +5774,9 @@ async function syncEstimateTextDraftIfNeeded(estimateId) {
   if (!estimate) {
     return;
   }
-  const draft = readEstimateTextDraft(estimateId) ?? serializeEstimateToText(estimate);
+  const draft = resolveEstimateTextDraftForParse(estimateId, estimate);
   applyEstimateTextToEstimate(estimate, draft);
+  applyParsedSourceDataFgisSet(estimate, estimate, extractFgisSetIdFromEstimateText(draft));
   invalidateEstimateTextDraft(estimateId);
   saveEditorState();
 }
@@ -5329,7 +6167,50 @@ async function addBufferToEstimate(estimateId) {
   }
 }
 
-function buildEditorEstimateFromSource(sourceEstimate) {
+function findCachedSourceEstimate(estimateId) {
+  return state.estimates.find((item) => sameEstimateId(item.id, estimateId)) || null;
+}
+
+function mergeEditorEstimateFromExisting(editorEstimate, existingEstimate) {
+  if (!existingEstimate?.items?.length) {
+    return editorEstimate;
+  }
+  const previousById = new Map(existingEstimate.items.map((line) => [line.id, line]));
+  editorEstimate.items = editorEstimate.items.map((item) => {
+    const previous = previousById.get(item.id);
+    if (!previous) {
+      return item;
+    }
+    return {
+      ...item,
+      sourceCode: previous.sourceCode || item.sourceCode || estimateLineSourceCode(item),
+      recordCode: previous.recordCode || item.recordCode || item.code,
+      children: previous.children,
+      hasResources: previous.hasResources ?? item.hasResources,
+    };
+  });
+  if (existingEstimate.district && !editorEstimate.district) {
+    editorEstimate.district = existingEstimate.district;
+  }
+  if (existingEstimate.fgisSetId && !editorEstimate.fgisSetId) {
+    editorEstimate.fgisSetId = existingEstimate.fgisSetId;
+  }
+  if (existingEstimate.code && !editorEstimate.code) {
+    editorEstimate.code = existingEstimate.code;
+  }
+  if (existingEstimate.title && !editorEstimate.title) {
+    editorEstimate.title = existingEstimate.title;
+  }
+  if (existingEstimate.sourceDataConfigLineRaw) {
+    editorEstimate.sourceDataConfigLineRaw = existingEstimate.sourceDataConfigLineRaw;
+  }
+  if (existingEstimate.sourceDataBimConfig) {
+    editorEstimate.sourceDataBimConfig = existingEstimate.sourceDataBimConfig;
+  }
+  return editorEstimate;
+}
+
+function buildEditorEstimateFromSource(sourceEstimate, existingEstimate = null) {
   const object = state.objects.find((item) => item.id === sourceEstimate.objectId);
   const construction = object
     ? state.constructions.find((item) => item.id === object.constructionId)
@@ -5348,6 +6229,7 @@ function buildEditorEstimateFromSource(sourceEstimate) {
     sourceDataCalculationFlags: sourceEstimate.sourceDataCalculationFlags || "",
     sourceDataSummaryChapterNo: sourceEstimate.sourceDataSummaryChapterNo || "",
     sourceDataBimConfig: sourceEstimate.sourceDataBimConfig || "",
+    sourceDataConfigLineRaw: sourceEstimate.sourceDataConfigLineRaw || "",
     constructionName: construction?.name || "",
     constructionCode: construction?.code || "",
     objectName: object?.name || "",
@@ -5381,7 +6263,10 @@ function buildEditorEstimateFromSource(sourceEstimate) {
       return editorItem;
     }),
   };
-  enrichEditorEstimateItems(editorEstimate.items);
+  hydrateEstimateSourceDataFgisSet(editorEstimate);
+  if (existingEstimate) {
+    mergeEditorEstimateFromExisting(editorEstimate, existingEstimate);
+  }
   return editorEstimate;
 }
 
@@ -5537,10 +6422,10 @@ async function createEditorEstimate() {
       }
     }
 
-    saveEditorState();
     state.section = "editor";
     renderConstructionTree();
     renderSections();
+    saveEditorState();
     showMessage("Новая смета создана в структуре «Стройки»", "ok");
   } catch (error) {
     showMessage(error.message || "Не удалось создать смету", "error");
@@ -5951,10 +6836,81 @@ function editorItemFromNode(node) {
   };
 }
 
+function compactEstimateLineForSession(item) {
+  if (!item || typeof item !== "object") {
+    return item;
+  }
+  return {
+    id: item.id,
+    type: item.type,
+    source: item.source,
+    sourceCode: item.sourceCode,
+    code: item.code,
+    recordCode: item.recordCode,
+    originalCode: item.originalCode,
+    name: item.name,
+    unit: item.unit,
+    quantity: item.quantity,
+    unitPrice: item.unitPrice,
+    total: item.total,
+    hasResources: item.hasResources,
+    rawText: item.rawText,
+    calcStatus: item.calcStatus,
+    calcError: item.calcError,
+    isWork: item.isWork,
+    unitPriceText: item.unitPriceText,
+    unitPriceIndex: item.unitPriceIndex,
+  };
+}
+
+function compactOpenEstimatesForSession(estimates) {
+  return (estimates || []).map((estimate) => ({
+    id: estimate.id,
+    objectId: estimate.objectId,
+    code: estimate.code,
+    title: estimate.title,
+    description: estimate.description,
+    status: estimate.status,
+    district: estimate.district,
+    fgisSetId: estimate.fgisSetId,
+    sourceDataDocumentSet: estimate.sourceDataDocumentSet,
+    sourceDataCalculationFlags: estimate.sourceDataCalculationFlags,
+    sourceDataSummaryChapterNo: estimate.sourceDataSummaryChapterNo,
+    sourceDataBimConfig: estimate.sourceDataBimConfig,
+    sourceDataConfigLineRaw: estimate.sourceDataConfigLineRaw,
+    constructionName: estimate.constructionName,
+    constructionCode: estimate.constructionCode,
+    objectName: estimate.objectName,
+    objectCode: estimate.objectCode,
+    constructionLabel: estimate.constructionLabel,
+    objectLabel: estimate.objectLabel,
+    items: Array.isArray(estimate.items) ? estimate.items.map(compactEstimateLineForSession) : [],
+  }));
+}
+
+function writeSessionJSON(key, value) {
+  sessionStorage.setItem(key, JSON.stringify(value));
+}
+
 function saveEditorState() {
-  sessionStorage.setItem("nav_editor_buffer", JSON.stringify(state.buffer));
-  sessionStorage.setItem("nav_editor_estimates", JSON.stringify(state.openEstimates));
-  sessionStorage.setItem("nav_editor_tab", state.editorTab);
+  try {
+    writeSessionJSON("nav_editor_buffer", state.buffer);
+    writeSessionJSON("nav_editor_estimates", compactOpenEstimatesForSession(state.openEstimates));
+    sessionStorage.setItem("nav_editor_tab", state.editorTab);
+  } catch {
+    try {
+      writeSessionJSON(
+        "nav_editor_estimates",
+        state.openEstimates.map((estimate) => ({
+          id: estimate.id,
+          objectId: estimate.objectId,
+        })),
+      );
+      sessionStorage.setItem("nav_editor_tab", state.editorTab);
+    } catch {
+      // Квота sessionStorage не должна блокировать работу редактора в памяти.
+    }
+  }
   refreshUserPositionsPanelIfVisible();
   refreshGSNLeafActionsInDOM();
 }
@@ -5999,7 +6955,20 @@ function estimateItemsForApi(items) {
   });
 }
 
-async function persistOpenEstimate(estimateId) {
+function estimateLineSyncKey(item) {
+  if (!item) {
+    return "";
+  }
+  return [
+    item.type || "",
+    item.source || "",
+    item.code || "",
+    item.originalCode || "",
+    item.rawText || "",
+  ].join("|");
+}
+
+async function persistOpenEstimate(estimateId, options = {}) {
   if (!state.me || !isPersistedEstimateId(estimateId)) {
     return;
   }
@@ -6014,10 +6983,12 @@ async function persistOpenEstimate(estimateId) {
     return;
   }
 
-  try {
-    await syncEstimateTextDraftIfNeeded(estimateId);
-  } catch {
-    return;
+  if (!options.skipTextDraftSync) {
+    try {
+      await syncEstimateTextDraftIfNeeded(estimateId);
+    } catch {
+      return;
+    }
   }
 
   try {
@@ -6058,21 +7029,72 @@ async function persistOpenEstimate(estimateId) {
       } else {
         state.estimates.push(updated);
       }
+      if (updated.fgisSetId !== undefined) {
+        editorEstimate.fgisSetId = String(updated.fgisSetId || "");
+        if (editorEstimate.fgisSetId) {
+          applyFgisSetToEstimateSourceData(editorEstimate, editorEstimate.fgisSetId);
+        }
+      }
       if (Array.isArray(updated.items)) {
-        const savedById = new Map(updated.items.map((item) => [item.id, item]));
-        editorEstimate.items = (editorEstimate.items || []).map((item) => {
-          const saved = savedById.get(item.id);
-          if (!saved) {
-            return item;
+        const localItems = editorEstimate.items || [];
+        const localById = new Map(localItems.map((item) => [item.id, item]));
+        const localByKey = new Map();
+        localItems.forEach((item) => {
+          const key = estimateLineSyncKey(item);
+          if (!key) {
+            return;
           }
-          return {
-            ...item,
-            quantity: Number(saved.quantity || 0),
-            rawText: saved.rawText || item.rawText || "",
-          };
+          const bucket = localByKey.get(key);
+          if (bucket) {
+            bucket.push(item);
+          } else {
+            localByKey.set(key, [item]);
+          }
         });
+        editorEstimate.items = updated.items.map((saved) => {
+          let local = localById.get(saved.id) || null;
+          if (!local) {
+            const key = estimateLineSyncKey(saved);
+            const bucket = localByKey.get(key);
+            if (bucket?.length) {
+              local = bucket.shift();
+            }
+          }
+          const merged = {
+            ...(local || {}),
+            ...saved,
+            quantity: Number(saved.quantity || 0),
+            rawText: saved.rawText || local?.rawText || "",
+          };
+          if (shouldPreserveLocalGsnCalcOnMerge(local, saved)) {
+            merged.calcStatus = local.calcStatus;
+            merged.calcError = local.calcError;
+            merged.calcJson = local.calcJson;
+            merged.calcJsonKey = local.calcJsonKey;
+            merged.calcRecordAppliedKey = local.calcRecordAppliedKey;
+            merged.originalCode = local.originalCode || merged.originalCode;
+            merged.name = local.name || merged.name;
+            merged.unit = local.unit || merged.unit;
+            merged.unitPrice = local.unitPrice;
+            merged.unitPriceText = local.unitPriceText;
+            merged.unitPriceIndex = local.unitPriceIndex;
+            merged.total = local.total;
+            merged.hasResources = local.hasResources;
+            merged.children = local.children;
+            merged.isWork = local.isWork;
+          }
+          return merged;
+        });
+        clearEstimateCalcAwaitingServer(estimateId);
         if (state.editorTab === estimateId) {
-          renderEditor();
+          if (state.estimateViewMode === "table" && isEditorContentMountedForEstimate(estimateId)) {
+            if (isEditorHeaderFieldActive()) {
+              pendingEditorRemountEstimateId = estimateId;
+            }
+            updateEditorTableTotals(editorEstimate);
+          } else {
+            renderEditor();
+          }
         }
       }
       renderConstructionTree();
@@ -6194,22 +7216,47 @@ async function updateEstimateFgisSet(estimateID, value) {
   }
 
   estimate.fgisSetId = nextFgisSetId;
-  invalidateEstimateTextDraft(estimateID);
+  applyFgisSetToEstimateSourceData(estimate, nextFgisSetId);
+  writeEstimateTextDraftFromState(estimateID);
+
+  const blocked = await syncLicenseSessions(getEditorTableLicenseSubsectionIdsForFgisSet(nextFgisSetId));
+  saveEditorState();
+  refreshEditorFgisSetSelect(estimate);
+
+  if (blocked.length) {
+    setSectionLicenseBlocked("editor", true);
+    renderLicenseBlockMessage("editor", blocked);
+    showMessage(formatLicenseBlockedMessage(blocked), "error");
+    try {
+      await persistOpenEstimate(estimateID, { skipTextDraftSync: true });
+    } catch {
+      return;
+    }
+    return;
+  }
+
+  setSectionLicenseBlocked("editor", false);
   (estimate.items || []).forEach(clearGsnLineCalcEnrichment);
+  if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
+    restartEstimateTableCalculation(estimateID, estimate);
+  }
 
   try {
-    saveEditorState();
     renderEditor();
-    void applyLicenseGate();
-    await persistOpenEstimate(estimateID);
+    startLicenseSessionSync();
+    await persistOpenEstimate(estimateID, { skipTextDraftSync: true });
     void pollEstimateCalcStatus(estimateID);
     showMessage("Набор сметных цен обновлён, позиции поставлены в очередь на пересчёт", "ok");
   } catch (error) {
+    estimate.fgisSetId = previousFgisSetId;
+    applyFgisSetToEstimateSourceData(estimate, previousFgisSetId);
+    writeEstimateTextDraftFromState(estimateID);
+    refreshEditorFgisSetSelect(estimate);
     showMessage(error.message || "Не удалось пересчитать стоимости", "error");
     saveEditorState();
     renderEditor();
     try {
-      await persistOpenEstimate(estimateID);
+      await persistOpenEstimate(estimateID, { skipTextDraftSync: true });
     } catch {
       return;
     }
@@ -6384,100 +7431,109 @@ async function closeEstimateFromEditor(estimateID) {
 }
 
 async function openEstimateInEditor(estimateID) {
-  if (isEstimateLockedByOther(estimateID)) {
-    const lock = getEstimateLockInfo(estimateID);
-    showMessage(`Смета редактируется ${lock?.userName || "другим пользователем"}`, "error");
-    return;
-  }
-
-  try {
-    await acquireEstimateLock(estimateID);
-  } catch (error) {
-    if (error.status === 409 && error.lock) {
-      state.estimateLocks[estimateID] = error.lock;
-      renderConstructionTree();
-      showMessage(`Смета редактируется ${error.lock.userName}`, "error");
-      return;
-    }
-    showMessage(error.message, "error");
-    return;
-  }
-
-  await flushPersistOpenEstimate(estimateID);
-
-  try {
-    const [constructions, objects, estimates] = await Promise.all([
-      api("/api/constructions"),
-      api("/api/objects"),
-      api("/api/estimates"),
-    ]);
-    state.constructions = constructions;
-    state.objects = objects;
-    state.estimates = estimates;
-  } catch (error) {
-    showMessage(error.message, "error");
-    return;
-  }
-
-  const sourceEstimate = state.estimates.find((item) => item.id === estimateID);
-  if (!sourceEstimate) {
+  const estimateId = normalizeEstimateId(estimateID);
+  if (!estimateId) {
     showMessage("Смета не найдена", "error");
     return;
   }
 
-  const existingEstimate = state.openEstimates.find((item) => item.id === estimateID);
-  const editorEstimate = buildEditorEstimateFromSource(sourceEstimate);
-  if (existingEstimate?.items?.length) {
-    editorEstimate.items = editorEstimate.items.map((item) => {
-      const previous = existingEstimate.items.find((line) => line.id === item.id);
-      if (!previous) {
-        return item;
+  if (isEstimateLockedByOther(estimateId)) {
+    const lock = getEstimateLockInfo(estimateId);
+    showMessage(`Смета редактируется ${lock?.userName || "другим пользователем"}`, "error");
+    return;
+  }
+
+  const existingIndex = state.openEstimates.findIndex((item) => sameEstimateId(item.id, estimateId));
+  if (existingIndex >= 0) {
+    try {
+      await acquireEstimateLock(estimateId);
+    } catch (error) {
+      if (error.status === 409 && error.lock) {
+        state.estimateLocks[estimateId] = error.lock;
+        renderConstructionTree();
+        showMessage(`Смета редактируется ${error.lock.userName}`, "error");
+        return;
       }
-      return {
-        ...item,
-        sourceCode: previous.sourceCode || item.sourceCode || estimateLineSourceCode(item),
-        recordCode: previous.recordCode || item.recordCode || item.code,
-        children: previous.children,
-        hasResources: previous.hasResources ?? item.hasResources,
-      };
-    });
-  }
-  if (existingEstimate?.district && !editorEstimate.district) {
-    editorEstimate.district = existingEstimate.district;
-    void persistOpenEstimate(estimateID).catch(() => {});
-  }
-  if (existingEstimate?.fgisSetId && !editorEstimate.fgisSetId) {
-    editorEstimate.fgisSetId = existingEstimate.fgisSetId;
-    void persistOpenEstimate(estimateID).catch(() => {});
-  }
-  if (existingEstimate?.code && !editorEstimate.code) {
-    editorEstimate.code = existingEstimate.code;
-  }
-  if (existingEstimate?.title && !editorEstimate.title) {
-    editorEstimate.title = existingEstimate.title;
+      showMessage(error.message || "Не удалось открыть смету в редакторе", "error");
+      return;
+    }
+    state.estimateViewMode = "text";
+    state.editorTab = state.openEstimates[existingIndex].id;
+    state.section = "editor";
+    renderSections();
+    saveEditorState();
+    showMessage("Смета открыта в редакторе", "ok");
+    return;
   }
 
   try {
-    enrichEditorEstimateItems(editorEstimate.items);
-  } catch (error) {
-    showMessage(error.message || "Не удалось загрузить данные расчёта для сметы", "error");
-  }
+    try {
+      await acquireEstimateLock(estimateId);
+    } catch (error) {
+      if (error.status === 409 && error.lock) {
+        state.estimateLocks[estimateId] = error.lock;
+        renderConstructionTree();
+        showMessage(`Смета редактируется ${error.lock.userName}`, "error");
+        return;
+      }
+      throw error;
+    }
 
-  const existingIndex = state.openEstimates.findIndex((item) => item.id === estimateID);
-  if (existingIndex >= 0) {
-    state.openEstimates[existingIndex] = editorEstimate;
-  } else {
+    let sourceEstimate = findCachedSourceEstimate(estimateId);
+    if (!sourceEstimate) {
+      await refreshConstructionData();
+      sourceEstimate = findCachedSourceEstimate(estimateId);
+    }
+    if (!sourceEstimate) {
+      showMessage("Смета не найдена", "error");
+      return;
+    }
+
+    const existingEstimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+    editorOpeningEstimateId = estimateId;
+    state.estimateViewMode = "text";
+    state.editorTab = estimateId;
+    state.section = "editor";
+    renderSections();
+
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+
+    if (editorOpeningEstimateId !== estimateId) {
+      return;
+    }
+
+    const editorEstimate = buildEditorEstimateFromSource(sourceEstimate, existingEstimate);
+    editorEstimate.id = normalizeEstimateId(editorEstimate.id);
+    hydrateEstimateSourceDataFgisSet(editorEstimate);
+
+    if (existingEstimate?.district && !editorEstimate.district) {
+      void persistOpenEstimate(editorEstimate.id).catch(() => {});
+    }
+    if (existingEstimate?.fgisSetId && !editorEstimate.fgisSetId) {
+      void persistOpenEstimate(editorEstimate.id).catch(() => {});
+    }
+
+    if (editorOpeningEstimateId !== estimateId) {
+      return;
+    }
+
     state.openEstimates.push(editorEstimate);
+    editorOpeningEstimateId = null;
+    invalidateEstimateTextDraft(editorEstimate.id);
+    renderEditor();
+    saveEditorState();
+    showMessage("Смета открыта в редакторе", "ok");
+  } catch (error) {
+    if (editorOpeningEstimateId === estimateId) {
+      editorOpeningEstimateId = null;
+      if (state.section === "editor" && sameEstimateId(state.editorTab, estimateId)) {
+        state.editorTab = "buffer";
+        state.section = "constructions";
+        renderSections();
+      }
+    }
+    showMessage(error.message || "Не удалось открыть смету в редакторе", "error");
   }
-
-  invalidateEstimateTextDraft(estimateID);
-  state.estimateViewMode = "text";
-  state.editorTab = estimateID;
-  state.section = "editor";
-  saveEditorState();
-  renderConstructionTree();
-  renderSections();
-  showMessage("Смета открыта в редакторе", "ok");
 }
 
 function formatNumber(value) {
@@ -7227,7 +8283,8 @@ async function api(path, options = {}) {
 
 function showMessage(text, kind = "") {
   els.message.textContent = text;
-  els.message.className = `message ${kind}`;
+  els.message.className = kind ? `message ${kind}` : "message";
+  els.message.classList.remove("hidden");
   window.clearTimeout(showMessage.timer);
   showMessage.timer = window.setTimeout(() => {
     els.message.classList.add("hidden");

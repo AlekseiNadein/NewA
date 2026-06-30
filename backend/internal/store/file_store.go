@@ -17,7 +17,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"nav-saas-mvp/backend/internal/auth"
 	"nav-saas-mvp/backend/internal/domain"
 )
 
@@ -31,77 +30,17 @@ type FileStore struct {
 	mu            sync.RWMutex
 	path          string
 	treeDB        *pgxpool.Pool
-	companies     map[string]domain.Company
-	users         map[string]domain.User
 	constructions map[string]domain.Construction
 	objects       map[string]domain.ConstructionObject
 	estimates     map[string]domain.Estimate
-	licenses      map[string]map[string]int
 	settings      domain.AppSettings
 }
 
 type snapshot struct {
-	Companies     []domain.Company            `json:"companies"`
-	Users         []storedUser                `json:"users"`
 	Constructions []domain.Construction       `json:"constructions"`
 	Objects       []domain.ConstructionObject `json:"objects"`
 	Estimates     []domain.Estimate           `json:"estimates"`
-	Licenses      []storedCompanyLicenses     `json:"licenses,omitempty"`
 	Settings      domain.AppSettings          `json:"settings,omitempty"`
-}
-
-type storedCompanyLicenses struct {
-	CompanyID string         `json:"companyId"`
-	Items     map[string]int `json:"items"`
-}
-
-type storedUser struct {
-	ID                   string    `json:"id"`
-	CompanyID            string    `json:"companyId"`
-	Email                string    `json:"email"`
-	Name                 string    `json:"name"`
-	Role                 string    `json:"role,omitempty"`
-	Authorized           bool      `json:"authorized"`
-	IsAdministrator      bool      `json:"isAdministrator"`
-	IsSuperAdministrator bool      `json:"isSuperAdministrator"`
-	PasswordHash         string    `json:"passwordHash"`
-	PasswordSalt         string    `json:"passwordSalt"`
-	CreatedAt            time.Time `json:"createdAt"`
-	UpdatedAt            time.Time `json:"updatedAt"`
-}
-
-type NewUser struct {
-	CompanyID            string `json:"companyId"`
-	CompanyName          string `json:"companyName"`
-	Email                string `json:"email"`
-	Name                 string `json:"name"`
-	Password             string `json:"password"`
-	Authorized           bool   `json:"authorized"`
-	IsAdministrator      bool   `json:"isAdministrator"`
-	IsSuperAdministrator bool   `json:"isSuperAdministrator"`
-}
-
-type RegisterUser struct {
-	CompanyName     string `json:"companyName"`
-	Name            string `json:"name"`
-	Email           string `json:"email"`
-	Password        string `json:"password"`
-	PasswordConfirm string `json:"passwordConfirm"`
-}
-
-type UpdateUser struct {
-	CompanyID            string `json:"companyId"`
-	Email                string `json:"email"`
-	Name                 string `json:"name"`
-	Password             string `json:"password"`
-	Authorized           bool   `json:"authorized"`
-	IsAdministrator      bool   `json:"isAdministrator"`
-	IsSuperAdministrator bool   `json:"isSuperAdministrator"`
-}
-
-type UserView struct {
-	domain.User
-	CompanyName string `json:"companyName"`
 }
 
 type EstimateInput struct {
@@ -135,12 +74,9 @@ const (
 func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 	store := &FileStore{
 		path:          path,
-		companies:     map[string]domain.Company{},
-		users:         map[string]domain.User{},
 		constructions: map[string]domain.Construction{},
 		objects:       map[string]domain.ConstructionObject{},
 		estimates:     map[string]domain.Estimate{},
-		licenses:      map[string]map[string]int{},
 		settings:      defaultAppSettings(),
 	}
 
@@ -156,30 +92,6 @@ func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 		store.treeDB = pool
 		if err := store.ensureTreeSchema(context.Background()); err != nil {
 			return nil, err
-		}
-	}
-
-	if len(store.users) == 0 {
-		if err := store.seed(); err != nil {
-			return nil, err
-		}
-	} else {
-		changed, err := store.ensureDemoCredentials()
-		if err != nil {
-			return nil, err
-		}
-		flagsChanged, err := store.ensureUserFlags()
-		if err != nil {
-			return nil, err
-		}
-		if changed || flagsChanged {
-			if err := store.save(); err != nil {
-				return nil, err
-			}
-		} else if len(store.constructions) == 0 {
-			if err := store.ensureDemoStructure(); err != nil {
-				return nil, err
-			}
 		}
 	}
 
@@ -200,489 +112,6 @@ func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 	}
 
 	return store, nil
-}
-
-func (s *FileStore) FindUserByEmail(email string) (domain.User, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	normalized := strings.ToLower(strings.TrimSpace(email))
-	for _, user := range s.users {
-		if user.Email == normalized {
-			return user, true
-		}
-	}
-
-	return domain.User{}, false
-}
-
-func (s *FileStore) FindUserForLogin(companyName, login string) (domain.User, bool) {
-	login = strings.TrimSpace(login)
-	if login == "" {
-		return domain.User{}, false
-	}
-
-	normalizedEmail := strings.ToLower(login)
-	if strings.Contains(normalizedEmail, "@") {
-		if user, ok := s.FindUserByEmail(normalizedEmail); ok {
-			return user, true
-		}
-	}
-
-	return s.FindUserByCompanyAndName(companyName, login)
-}
-
-func (s *FileStore) FindUserByCompanyAndName(companyName, userName string) (domain.User, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	company, ok := s.findCompanyByNameLocked(companyName)
-	if !ok {
-		return domain.User{}, false
-	}
-
-	normalizedName := normalizePersonName(userName)
-	normalizedEmail := strings.ToLower(strings.TrimSpace(userName))
-	loginByEmail := strings.Contains(normalizedEmail, "@")
-	for _, user := range s.users {
-		if user.CompanyID != company.ID {
-			continue
-		}
-		if normalizePersonName(user.Name) == normalizedName {
-			return user, true
-		}
-		if loginByEmail && user.Email == normalizedEmail {
-			return user, true
-		}
-	}
-
-	return domain.User{}, false
-}
-
-func (s *FileStore) FindOrCreateCompanyByName(name string) (domain.Company, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return domain.Company{}, ErrConflict
-	}
-
-	if company, ok := s.findCompanyByNameLocked(name); ok {
-		return company, nil
-	}
-
-	now := time.Now().UTC()
-	company := domain.Company{
-		ID:        newID("cmp"),
-		Name:      name,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	s.companies[company.ID] = company
-	return company, s.saveLocked()
-}
-
-func (s *FileStore) FindCompanyByName(name string) (domain.Company, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	return s.findCompanyByNameLocked(name)
-}
-
-func migrateStoredUser(user storedUser) storedUser {
-	if user.Role != "" && !user.Authorized && !user.IsAdministrator && !user.IsSuperAdministrator {
-		switch domain.Role(user.Role) {
-		case domain.RoleSuperAdmin:
-			user.IsSuperAdministrator = true
-			user.IsAdministrator = true
-			user.Authorized = true
-		case domain.RoleCompanyAdmin:
-			user.IsAdministrator = true
-			user.Authorized = true
-		case domain.RoleUser:
-			user.Authorized = true
-		}
-	}
-
-	switch user.Email {
-	case "admin@example.com":
-		user.Name = "Суперадминистратор"
-		user.IsSuperAdministrator = true
-		user.IsAdministrator = true
-		user.Authorized = true
-	case "manager@example.com":
-		if user.Name == "Company Manager" {
-			user.Name = "Администратор компании"
-		}
-		user.IsAdministrator = true
-		user.Authorized = true
-	case "user@example.com":
-		if user.Name == "Estimate User" {
-			user.Name = "Пользователь"
-		}
-		user.Authorized = true
-	}
-
-	return user
-}
-
-func (s *FileStore) findCompanyByNameLocked(name string) (domain.Company, bool) {
-	normalized := normalizeCompanyName(name)
-	for _, company := range s.companies {
-		if normalizeCompanyName(company.Name) == normalized {
-			return company, true
-		}
-	}
-	return domain.Company{}, false
-}
-
-func (s *FileStore) FindUserByID(id string) (domain.User, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	user, ok := s.users[id]
-	return user, ok
-}
-
-func (u storedUser) toDomain() domain.User {
-	user := domain.User{
-		ID:                   u.ID,
-		CompanyID:            u.CompanyID,
-		Email:                u.Email,
-		Name:                 u.Name,
-		Authorized:           u.Authorized,
-		IsAdministrator:      u.IsAdministrator,
-		IsSuperAdministrator: u.IsSuperAdministrator,
-		PasswordHash:         u.PasswordHash,
-		PasswordSalt:         u.PasswordSalt,
-		CreatedAt:            u.CreatedAt,
-		UpdatedAt:            u.UpdatedAt,
-	}
-	if u.Role != "" && !user.IsSuperAdministrator && !user.IsAdministrator && !user.Authorized {
-		switch domain.Role(u.Role) {
-		case domain.RoleSuperAdmin:
-			user.IsSuperAdministrator = true
-			user.IsAdministrator = true
-			user.Authorized = true
-		case domain.RoleCompanyAdmin:
-			user.IsAdministrator = true
-			user.Authorized = true
-		case domain.RoleUser:
-			user.Authorized = true
-		}
-	}
-	return user
-}
-
-func migrateStoredCompany(company domain.Company) domain.Company {
-	if company.Name == "Demo Company" {
-		company.Name = "Система"
-	}
-	return company
-}
-
-func userToStored(user domain.User) storedUser {
-	return storedUser{
-		ID:                   user.ID,
-		CompanyID:            user.CompanyID,
-		Email:                user.Email,
-		Name:                 user.Name,
-		Authorized:           user.Authorized,
-		IsAdministrator:      user.IsAdministrator,
-		IsSuperAdministrator: user.IsSuperAdministrator,
-		PasswordHash:         user.PasswordHash,
-		PasswordSalt:         user.PasswordSalt,
-		CreatedAt:            user.CreatedAt,
-		UpdatedAt:            user.UpdatedAt,
-	}
-}
-
-func (s *FileStore) ListCompanies() []domain.Company {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	companies := make([]domain.Company, 0, len(s.companies))
-	for _, company := range s.companies {
-		companies = append(companies, company)
-	}
-
-	sort.Slice(companies, func(i, j int) bool {
-		return companies[i].Name < companies[j].Name
-	})
-
-	return companies
-}
-
-func (s *FileStore) CreateCompany(name string) (domain.Company, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return domain.Company{}, ErrConflict
-	}
-
-	for _, company := range s.companies {
-		if strings.EqualFold(company.Name, name) {
-			return domain.Company{}, ErrConflict
-		}
-	}
-
-	now := time.Now().UTC()
-	company := domain.Company{
-		ID:        newID("cmp"),
-		Name:      name,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	s.companies[company.ID] = company
-	return company, s.saveLocked()
-}
-
-func (s *FileStore) UserView(user domain.User) UserView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	company := s.companies[user.CompanyID]
-	return UserView{
-		User:        user,
-		CompanyName: company.Name,
-	}
-}
-
-func (s *FileStore) ListUsers(companyID string, includeAll bool) []UserView {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	users := make([]UserView, 0, len(s.users))
-	for _, user := range s.users {
-		if includeAll || user.CompanyID == companyID {
-			company := s.companies[user.CompanyID]
-			users = append(users, UserView{
-				User:        user,
-				CompanyName: company.Name,
-			})
-		}
-	}
-
-	sort.Slice(users, func(i, j int) bool {
-		if users[i].CompanyName != users[j].CompanyName {
-			return users[i].CompanyName < users[j].CompanyName
-		}
-		return users[i].Name < users[j].Name
-	})
-
-	return users
-}
-
-func (s *FileStore) CreateUser(input NewUser) (domain.User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	input.Name = strings.TrimSpace(input.Name)
-	input.Password = strings.TrimSpace(input.Password)
-	input.CompanyName = strings.TrimSpace(input.CompanyName)
-
-	if input.Email == "" || input.Name == "" || input.Password == "" {
-		return domain.User{}, ErrConflict
-	}
-
-	if input.CompanyID == "" && input.CompanyName != "" {
-		company, ok := s.findCompanyByNameLocked(input.CompanyName)
-		if !ok {
-			now := time.Now().UTC()
-			company = domain.Company{
-				ID:        newID("cmp"),
-				Name:      input.CompanyName,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}
-			s.companies[company.ID] = company
-		}
-		input.CompanyID = company.ID
-	}
-
-	if input.CompanyID == "" {
-		return domain.User{}, ErrConflict
-	}
-
-	if _, ok := s.companies[input.CompanyID]; !ok {
-		return domain.User{}, ErrNotFound
-	}
-
-	for _, user := range s.users {
-		if user.Email == input.Email {
-			return domain.User{}, ErrConflict
-		}
-	}
-
-	hash, salt, err := auth.NewPassword(input.Password)
-	if err != nil {
-		return domain.User{}, err
-	}
-
-	now := time.Now().UTC()
-	user := domain.User{
-		ID:                   newID("usr"),
-		CompanyID:            input.CompanyID,
-		Email:                input.Email,
-		Name:                 input.Name,
-		Authorized:           input.Authorized,
-		IsAdministrator:      input.IsAdministrator,
-		IsSuperAdministrator: input.IsSuperAdministrator,
-		PasswordHash:         hash,
-		PasswordSalt:         salt,
-		CreatedAt:            now,
-		UpdatedAt:            now,
-	}
-
-	s.users[user.ID] = user
-	return user, s.saveLocked()
-}
-
-func (s *FileStore) RegisterUser(input RegisterUser) (domain.User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	input.CompanyName = strings.TrimSpace(input.CompanyName)
-	input.Name = strings.TrimSpace(input.Name)
-	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	input.Password = strings.TrimSpace(input.Password)
-	input.PasswordConfirm = strings.TrimSpace(input.PasswordConfirm)
-
-	if input.CompanyName == "" || input.Name == "" || input.Email == "" || input.Password == "" {
-		return domain.User{}, ErrConflict
-	}
-	if input.Password != input.PasswordConfirm {
-		return domain.User{}, ErrConflict
-	}
-
-	for _, user := range s.users {
-		if user.Email == input.Email {
-			return domain.User{}, ErrConflict
-		}
-	}
-
-	company, ok := s.findCompanyByNameLocked(input.CompanyName)
-	if !ok {
-		now := time.Now().UTC()
-		company = domain.Company{
-			ID:        newID("cmp"),
-			Name:      input.CompanyName,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		s.companies[company.ID] = company
-	}
-
-	hash, salt, err := auth.NewPassword(input.Password)
-	if err != nil {
-		return domain.User{}, err
-	}
-
-	now := time.Now().UTC()
-	user := domain.User{
-		ID:                   newID("usr"),
-		CompanyID:            company.ID,
-		Email:                input.Email,
-		Name:                 input.Name,
-		Authorized:           false,
-		IsAdministrator:      false,
-		IsSuperAdministrator: false,
-		PasswordHash:         hash,
-		PasswordSalt:         salt,
-		CreatedAt:            now,
-		UpdatedAt:            now,
-	}
-
-	s.users[user.ID] = user
-	return user, s.saveLocked()
-}
-
-func (s *FileStore) UpdateUser(id string, actorCompanyID string, includeAll bool, input UpdateUser) (domain.User, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	current, ok := s.users[id]
-	if !ok {
-		return domain.User{}, ErrNotFound
-	}
-	if !includeAll && current.CompanyID != actorCompanyID {
-		return domain.User{}, ErrForbidden
-	}
-
-	input.Email = strings.ToLower(strings.TrimSpace(input.Email))
-	input.Name = strings.TrimSpace(input.Name)
-	input.Password = strings.TrimSpace(input.Password)
-
-	if input.Email == "" || input.Name == "" {
-		return domain.User{}, ErrConflict
-	}
-
-	for _, user := range s.users {
-		if user.ID != id && user.Email == input.Email {
-			return domain.User{}, ErrConflict
-		}
-	}
-
-	companyID := current.CompanyID
-	if includeAll && strings.TrimSpace(input.CompanyID) != "" {
-		if _, ok := s.companies[input.CompanyID]; !ok {
-			return domain.User{}, ErrNotFound
-		}
-		companyID = input.CompanyID
-	}
-
-	authorized := input.Authorized
-	isAdministrator := input.IsAdministrator
-	isSuperAdministrator := input.IsSuperAdministrator
-	if !includeAll {
-		isSuperAdministrator = false
-		companyID = current.CompanyID
-	}
-
-	updated := current
-	updated.CompanyID = companyID
-	updated.Email = input.Email
-	updated.Name = input.Name
-	updated.Authorized = authorized
-	updated.IsAdministrator = isAdministrator
-	updated.IsSuperAdministrator = isSuperAdministrator
-	updated.UpdatedAt = time.Now().UTC()
-
-	if input.Password != "" {
-		hash, salt, err := auth.NewPassword(input.Password)
-		if err != nil {
-			return domain.User{}, err
-		}
-		updated.PasswordHash = hash
-		updated.PasswordSalt = salt
-	}
-
-	s.users[id] = updated
-	return updated, s.saveLocked()
-}
-
-func (s *FileStore) DeleteUser(id string, actorCompanyID string, includeAll bool) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	current, ok := s.users[id]
-	if !ok {
-		return ErrNotFound
-	}
-	if current.IsSuperAdministrator {
-		return ErrForbidden
-	}
-	if !includeAll && current.CompanyID != actorCompanyID {
-		return ErrForbidden
-	}
-
-	delete(s.users, id)
-	return s.saveLocked()
 }
 
 func (s *FileStore) ListConstructions(companyID string, includeAll bool) []domain.Construction {
@@ -717,10 +146,6 @@ func (s *FileStore) CreateConstruction(companyID string, input ConstructionInput
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if _, ok := s.companies[companyID]; !ok {
-		return domain.Construction{}, ErrNotFound
-	}
 
 	name := strings.TrimSpace(input.Name)
 	code := strings.TrimSpace(input.Code)
@@ -951,10 +376,6 @@ func (s *FileStore) CreateEstimate(companyID string, input EstimateInput) (domai
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.companies[companyID]; !ok {
-		return domain.Estimate{}, ErrNotFound
-	}
-
 	input.ObjectID = strings.TrimSpace(input.ObjectID)
 	if input.ObjectID == "" {
 		return domain.Estimate{}, ErrConflict
@@ -1068,14 +489,6 @@ func (s *FileStore) load() error {
 		return err
 	}
 
-	for _, company := range snap.Companies {
-		company = migrateStoredCompany(company)
-		s.companies[company.ID] = company
-	}
-	for _, user := range snap.Users {
-		user = migrateStoredUser(user)
-		s.users[user.ID] = user.toDomain()
-	}
 	for _, construction := range snap.Constructions {
 		s.constructions[construction.ID] = construction
 	}
@@ -1084,12 +497,6 @@ func (s *FileStore) load() error {
 	}
 	for _, estimate := range snap.Estimates {
 		s.estimates[estimate.ID] = estimate
-	}
-	for _, entry := range snap.Licenses {
-		if entry.CompanyID == "" || entry.Items == nil {
-			continue
-		}
-		s.licenses[entry.CompanyID] = normalizeLicenseItems(entry.Items)
 	}
 	s.settings = normalizeAppSettings(snap.Settings)
 
@@ -1102,21 +509,12 @@ func (s *FileStore) saveLocked() error {
 	}
 
 	snap := snapshot{
-		Companies:     make([]domain.Company, 0, len(s.companies)),
-		Users:         make([]storedUser, 0, len(s.users)),
 		Constructions: make([]domain.Construction, 0, len(s.constructions)),
 		Objects:       make([]domain.ConstructionObject, 0, len(s.objects)),
 		Estimates:     make([]domain.Estimate, 0, len(s.estimates)),
-		Licenses:      make([]storedCompanyLicenses, 0, len(s.licenses)),
 		Settings:      normalizeAppSettings(s.settings),
 	}
 
-	for _, company := range s.companies {
-		snap.Companies = append(snap.Companies, company)
-	}
-	for _, user := range s.users {
-		snap.Users = append(snap.Users, userToStored(user))
-	}
 	for _, construction := range s.constructions {
 		snap.Constructions = append(snap.Constructions, construction)
 	}
@@ -1126,22 +524,7 @@ func (s *FileStore) saveLocked() error {
 	for _, estimate := range s.estimates {
 		snap.Estimates = append(snap.Estimates, estimate)
 	}
-	for companyID, items := range s.licenses {
-		if len(items) == 0 {
-			continue
-		}
-		snap.Licenses = append(snap.Licenses, storedCompanyLicenses{
-			CompanyID: companyID,
-			Items:     items,
-		})
-	}
 
-	sort.Slice(snap.Companies, func(i, j int) bool {
-		return snap.Companies[i].Name < snap.Companies[j].Name
-	})
-	sort.Slice(snap.Users, func(i, j int) bool {
-		return snap.Users[i].Email < snap.Users[j].Email
-	})
 	sort.Slice(snap.Constructions, func(i, j int) bool {
 		return compareCodes(snap.Constructions[i].Code, snap.Constructions[j].Code)
 	})
@@ -1151,9 +534,6 @@ func (s *FileStore) saveLocked() error {
 	sort.Slice(snap.Estimates, func(i, j int) bool {
 		return compareCodes(snap.Estimates[i].Code, snap.Estimates[j].Code)
 	})
-	sort.Slice(snap.Licenses, func(i, j int) bool {
-		return snap.Licenses[i].CompanyID < snap.Licenses[j].CompanyID
-	})
 
 	content, err := json.MarshalIndent(snap, "", "  ")
 	if err != nil {
@@ -1161,178 +541,6 @@ func (s *FileStore) saveLocked() error {
 	}
 
 	return os.WriteFile(s.path, content, 0o600)
-}
-
-func (s *FileStore) seed() error {
-	now := time.Now().UTC()
-	company := domain.Company{
-		ID:        newID("cmp"),
-		Name:      "Система",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	s.companies[company.ID] = company
-
-	hash, salt, err := auth.NewPassword("admin123")
-	if err != nil {
-		return err
-	}
-
-	user := domain.User{
-		ID:                   newID("usr"),
-		CompanyID:            company.ID,
-		Email:                "admin@example.com",
-		Name:                 "Суперадминистратор",
-		Authorized:           true,
-		IsAdministrator:      true,
-		IsSuperAdministrator: true,
-		PasswordHash:         hash,
-		PasswordSalt:         salt,
-		CreatedAt:            now,
-		UpdatedAt:            now,
-	}
-	s.users[user.ID] = user
-
-	return s.saveLocked()
-}
-
-func (s *FileStore) ensureDemoStructure() error {
-	now := time.Now().UTC()
-	for _, company := range s.companies {
-		construction := domain.Construction{
-			ID:        newID("con"),
-			CompanyID: company.ID,
-			Code:      "01",
-			Name:      "Демо-стройка",
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		s.constructions[construction.ID] = construction
-
-		object := domain.ConstructionObject{
-			ID:             newID("obj"),
-			CompanyID:      company.ID,
-			ConstructionID: construction.ID,
-			Code:           "01-01",
-			Name:           "Объект 1",
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		}
-		s.objects[object.ID] = object
-
-		for id, estimate := range s.estimates {
-			if estimate.CompanyID == company.ID && estimate.ObjectID == "" {
-				estimate.ObjectID = object.ID
-				estimate.UpdatedAt = now
-				s.estimates[id] = estimate
-			}
-		}
-	}
-
-	return s.saveLocked()
-}
-
-func (s *FileStore) ensureDemoCredentials() (bool, error) {
-	demoUsers := map[string]string{
-		"admin@example.com": "admin123",
-	}
-
-	changed := false
-	for id, user := range s.users {
-		if user.PasswordHash != "" && user.PasswordSalt != "" {
-			continue
-		}
-
-		password, ok := demoUsers[user.Email]
-		if !ok {
-			password = "change-me"
-		}
-
-		hash, salt, err := auth.NewPassword(password)
-		if err != nil {
-			return false, err
-		}
-
-		user.PasswordHash = hash
-		user.PasswordSalt = salt
-		user.UpdatedAt = time.Now().UTC()
-		s.users[id] = user
-		changed = true
-	}
-
-	return changed, nil
-}
-
-func normalizeCompanyName(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	replacements := []struct{ from, to string }{
-		{"«", "\""}, {"»", "\""},
-		{"“", "\""}, {"”", "\""},
-		{"„", "\""}, {"‟", "\""},
-	}
-	for _, item := range replacements {
-		name = strings.ReplaceAll(name, item.from, item.to)
-	}
-	return name
-}
-
-func normalizePersonName(name string) string {
-	parts := strings.Fields(strings.ToLower(strings.TrimSpace(name)))
-	if len(parts) == 0 {
-		return ""
-	}
-	if len(parts) == 1 {
-		return parts[0]
-	}
-
-	initStart := len(parts)
-	for i := 1; i < len(parts); i++ {
-		if looksLikeInitial(parts[i]) {
-			initStart = i
-			break
-		}
-	}
-	if initStart == len(parts) {
-		return strings.Join(parts, " ")
-	}
-
-	surname := strings.Join(parts[:initStart], " ")
-	initials := compactInitials(parts[initStart:])
-	if initials == "" {
-		return surname
-	}
-	return strings.TrimSpace(surname + " " + initials)
-}
-
-func looksLikeInitial(part string) bool {
-	part = strings.TrimSuffix(part, ".")
-	runes := []rune(part)
-	return len(runes) > 0 && len(runes) <= 2
-}
-
-func compactInitials(parts []string) string {
-	letters := make([]rune, 0, len(parts))
-	for _, part := range parts {
-		for _, r := range part {
-			if r == '.' || r == ' ' {
-				continue
-			}
-			letters = append(letters, r)
-		}
-	}
-	if len(letters) == 0 {
-		return ""
-	}
-
-	var b strings.Builder
-	for i, r := range letters {
-		if i > 0 {
-			b.WriteRune('.')
-		}
-		b.WriteRune(r)
-	}
-	b.WriteRune('.')
-	return b.String()
 }
 
 func buildEstimate(id string, companyID string, input EstimateInput, createdAt time.Time, updatedAt time.Time) (domain.Estimate, error) {
@@ -1394,7 +602,18 @@ func (s *FileStore) ensureConstructionStructure() (bool, error) {
 	defer s.mu.Unlock()
 
 	changed := false
-	for companyID := range s.companies {
+	companyIDs := make(map[string]struct{})
+	for _, construction := range s.constructions {
+		if construction.CompanyID != "" {
+			companyIDs[construction.CompanyID] = struct{}{}
+		}
+	}
+	for _, estimate := range s.estimates {
+		if estimate.CompanyID != "" {
+			companyIDs[estimate.CompanyID] = struct{}{}
+		}
+	}
+	for companyID := range companyIDs {
 		beforeConstructions := len(s.constructions)
 		s.ensureDefaultConstructionLocked(companyID)
 		if len(s.constructions) > beforeConstructions {
@@ -2074,8 +1293,8 @@ func NormalizeCalcWorkerCount(value int) int {
 	if value < 1 {
 		return 1
 	}
-	if value > 16 {
-		return 16
+	if value > 8 {
+		return 8
 	}
 	return value
 }
@@ -2231,6 +1450,26 @@ SET calc_status = 'leased',
 WHERE estimate_id = $1 AND id = $2 AND revision = $3
 `, job.EstimateID, job.LineID, job.Revision)
 	return job, true, nil
+}
+
+func (s *FileStore) ReleaseStuckCalcJobLeases(ctx context.Context) (int64, error) {
+	if s.treeDB == nil {
+		return 0, nil
+	}
+	tag, err := s.treeDB.Exec(ctx, `
+UPDATE estimate_calc_jobs
+SET status = 'queued',
+    leased_until = NULL,
+    locked_by = '',
+    updated_at = now()
+WHERE status = 'leased'
+    AND leased_until IS NOT NULL
+    AND leased_until < now()
+`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (s *FileStore) CompleteEstimateCalcJob(ctx context.Context, job EstimateCalcJob, result EstimateLineCalcResult) error {
@@ -2537,64 +1776,6 @@ func newID(prefix string) string {
 	return prefix + "_" + hex.EncodeToString(bytes)
 }
 
-func validRole(role domain.Role) bool {
-	switch role {
-	case domain.RoleSuperAdmin, domain.RoleCompanyAdmin, domain.RoleUser:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *FileStore) ensureUserFlags() (bool, error) {
-	changed := false
-	for id, user := range s.users {
-		updated := user
-		userChanged := false
-
-		if user.Email == "admin@example.com" {
-			if !user.IsSuperAdministrator || !user.IsAdministrator || !user.Authorized {
-				updated.IsSuperAdministrator = true
-				updated.IsAdministrator = true
-				updated.Authorized = true
-				userChanged = true
-			}
-			if user.Name != "Суперадминистратор" {
-				updated.Name = "Суперадминистратор"
-				userChanged = true
-			}
-		}
-		if user.Email == "manager@example.com" {
-			if !user.IsAdministrator || !user.Authorized {
-				updated.IsAdministrator = true
-				updated.Authorized = true
-				userChanged = true
-			}
-		}
-		if user.Email == "user@example.com" && !user.Authorized {
-			updated.Authorized = true
-			userChanged = true
-		}
-
-		if userChanged {
-			updated.UpdatedAt = time.Now().UTC()
-			s.users[id] = updated
-			changed = true
-		}
-	}
-
-	for id, company := range s.companies {
-		if company.Name == "Demo Company" {
-			company.Name = "Система"
-			company.UpdatedAt = time.Now().UTC()
-			s.companies[id] = company
-			changed = true
-		}
-	}
-
-	return changed, nil
-}
-
 func validEstimateStatus(status domain.EstimateStatus) bool {
 	switch status {
 	case domain.EstimateDraft, domain.EstimateApproved, domain.EstimateArchived:
@@ -2613,104 +1794,3 @@ func validEstimateLineType(lineType string) bool {
 	}
 }
 
-func normalizeLicenseItems(items map[string]int) map[string]int {
-	normalized := make(map[string]int, len(domain.BaseSubsections()))
-	for _, subsection := range domain.BaseSubsections() {
-		count := 0
-		if items != nil {
-			if value, ok := items[string(subsection.ID)]; ok && value > 0 {
-				count = value
-			}
-		}
-		normalized[string(subsection.ID)] = count
-	}
-	return normalized
-}
-
-func (s *FileStore) companyLicensesLocked(companyID string) map[string]int {
-	if items, ok := s.licenses[companyID]; ok {
-		return normalizeLicenseItems(items)
-	}
-	return normalizeLicenseItems(nil)
-}
-
-func (s *FileStore) GetCompanyLicenses(companyID string) (domain.CompanyLicensesView, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	company, ok := s.companies[companyID]
-	if !ok {
-		return domain.CompanyLicensesView{}, ErrNotFound
-	}
-
-	items := s.companyLicensesLocked(companyID)
-	viewItems := make([]domain.CompanyLicense, 0, len(domain.BaseSubsections()))
-	for _, subsection := range domain.BaseSubsections() {
-		viewItems = append(viewItems, domain.CompanyLicense{
-			SubsectionID: subsection.ID,
-			Name:         subsection.Name,
-			Available:    items[string(subsection.ID)],
-		})
-	}
-
-	return domain.CompanyLicensesView{
-		CompanyID:   company.ID,
-		CompanyName: company.Name,
-		Items:       viewItems,
-	}, nil
-}
-
-type UpdateCompanyLicensesInput struct {
-	Items map[string]int `json:"items"`
-}
-
-func (s *FileStore) UpdateCompanyLicenses(companyID string, input UpdateCompanyLicensesInput) (domain.CompanyLicensesView, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, ok := s.companies[companyID]; !ok {
-		return domain.CompanyLicensesView{}, ErrNotFound
-	}
-
-	items := normalizeLicenseItems(nil)
-	for key, value := range input.Items {
-		if !domain.ValidBaseSubsectionID(domain.BaseSubsectionID(key)) {
-			return domain.CompanyLicensesView{}, ErrConflict
-		}
-		if value < 0 {
-			return domain.CompanyLicensesView{}, ErrConflict
-		}
-		items[key] = value
-	}
-
-	s.licenses[companyID] = items
-	if err := s.saveLocked(); err != nil {
-		return domain.CompanyLicensesView{}, err
-	}
-
-	company := s.companies[companyID]
-	viewItems := make([]domain.CompanyLicense, 0, len(domain.BaseSubsections()))
-	for _, subsection := range domain.BaseSubsections() {
-		viewItems = append(viewItems, domain.CompanyLicense{
-			SubsectionID: subsection.ID,
-			Name:         subsection.Name,
-			Available:    items[string(subsection.ID)],
-		})
-	}
-
-	return domain.CompanyLicensesView{
-		CompanyID:   company.ID,
-		CompanyName: company.Name,
-		Items:       viewItems,
-	}, nil
-}
-
-func (s *FileStore) LicenseAvailable(companyID, subsectionID string) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if _, ok := s.companies[companyID]; !ok {
-		return 0
-	}
-	return s.companyLicensesLocked(companyID)[subsectionID]
-}

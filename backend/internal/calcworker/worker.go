@@ -14,6 +14,7 @@ import (
 )
 
 const defaultLease = 45 * time.Second
+const jobProcessTimeout = 40 * time.Second
 
 type Worker struct {
 	store *store.FileStore
@@ -61,8 +62,14 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		return fmt.Errorf("record code is empty")
 	}
 
-	record, err := w.gsn.GetRecordDetail(ctx, code, job.FgisSetID, job.District)
+	jobCtx, cancel := context.WithTimeout(ctx, jobProcessTimeout)
+	defer cancel()
+
+	record, err := w.gsn.GetRecordDetail(jobCtx, code, job.FgisSetID, job.District)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("GSN lookup timed out after %s", jobProcessTimeout)
+		}
 		if errors.Is(err, gsn.ErrNotConfigured) {
 			return err
 		}
@@ -102,6 +109,20 @@ func (m *Manager) Run(ctx context.Context) {
 		slog.Warn("GSN database is not configured; calc worker service is idle")
 		<-ctx.Done()
 		return
+	}
+
+	settings, err := m.store.GetAppSettings()
+	if err != nil {
+		slog.Warn("failed to read app settings", "error", err)
+	} else {
+		workerCount := store.NormalizeCalcWorkerCount(settings.CalcWorkerCount)
+		m.gsn.SetMaxOpenConns(workerCount + 4)
+	}
+
+	if released, err := m.store.ReleaseStuckCalcJobLeases(ctx); err != nil {
+		slog.Warn("failed to release stuck calc job leases", "error", err)
+	} else if released > 0 {
+		slog.Info("released stuck calc job leases", "count", released)
 	}
 
 	var cancel context.CancelFunc

@@ -1169,8 +1169,50 @@ p {
   min-width: 0;
 }
 
-.editor-content .table-wrap {
-  overflow-x: visible;
+.editor-content.editor-content--table {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.editor-estimate-table-layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: calc(100vh - 14.5rem);
+  max-height: calc(100vh - 14.5rem);
+  min-width: 0;
+}
+
+.editor-estimate-table-layout .editor-estimate-chrome {
+  flex: 0 0 auto;
+}
+
+.editor-estimate-table-layout .editor-estimate-table-body-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 0.25rem;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.editor-estimate-table-layout .editor-estimate-actions {
+  flex: 0 0 auto;
+  margin-top: 0.75rem;
+}
+
+.editor-estimate-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #fff;
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.editor-estimate-chrome {
+  position: relative;
+  z-index: 2;
+  contain: layout style;
 }
 
 .editor-estimate-header {
@@ -1179,6 +1221,7 @@ p {
   align-items: center;
   gap: 0.55rem 1.1rem;
   margin-bottom: 0.75rem;
+  contain: layout style paint;
 }
 
 .editor-estimate-header-field {
@@ -1202,6 +1245,7 @@ p {
   font: inherit;
   font-size: 0.92rem;
   color: var(--text);
+  contain: layout style paint;
 }
 
 .editor-estimate-header-field:not(.editor-estimate-header-field-grow) input {
@@ -1251,11 +1295,29 @@ p {
   gap: 0.2rem;
 }
 
+.editor-estimate-total-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
 .editor-estimate-calc-progress {
   font-size: 0.68rem;
   line-height: 1.2;
   text-align: right;
   white-space: nowrap;
+}
+
+.editor-estimate-calc-progress-main-danger {
+  color: var(--danger);
+}
+
+.editor-estimate-calc-progress-main-ok {
+  color: var(--ok);
+}
+
+.editor-estimate-calc-progress-errors {
+  color: var(--danger);
 }
 
 .editor-estimate-total-value {
@@ -1353,6 +1415,10 @@ p {
   align-items: center;
   gap: 0.3rem;
   margin: 0.65rem 0 0.75rem;
+  position: relative;
+  z-index: 2;
+  contain: layout style;
+  isolation: isolate;
 }
 
 .editor-view-mode-tab {
@@ -1366,6 +1432,7 @@ p {
   color: var(--text);
   cursor: pointer;
   white-space: nowrap;
+  contain: layout style paint;
 }
 
 .editor-view-mode-tab:hover {
@@ -1437,6 +1504,35 @@ p {
 
 .table-wrap {
   overflow-x: auto;
+  overflow-y: visible;
+  margin-top: 0.25rem;
+}
+
+.editor-table-passive tbody {
+  pointer-events: none;
+}
+
+.editor-table-passive tbody .icon-button,
+.editor-table-passive tbody .editor-line-expand-btn {
+  cursor: default;
+}
+
+.editor-table-passive tbody .icon-button:hover,
+.editor-table-passive tbody .editor-line-expand-btn:hover {
+  border-color: var(--border);
+  background: #fff;
+  color: var(--text);
+}
+
+.editor-table-passive tbody .icon-button-danger:hover {
+  border-color: var(--border);
+  background: #fff;
+  color: var(--text);
+}
+
+.editor-table-interactive tbody {
+  pointer-events: auto;
+  user-select: text;
 }
 
 .editor-estimate-table {
@@ -1446,6 +1542,7 @@ p {
   font-size: 0.88rem;
   font-variant-numeric: tabular-nums;
   table-layout: fixed;
+  contain: layout style;
 }
 
 .editor-estimate-table th,
@@ -1481,6 +1578,11 @@ p {
   white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+
+.editor-estimate-table tbody tr {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2.5rem;
 }
 
 .editor-estimate-table td.editor-estimate-index-cell {

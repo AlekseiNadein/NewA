@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"nav-saas-mvp/backend/internal/auth"
+	"nav-saas-mvp/backend/internal/authapi"
+	"nav-saas-mvp/backend/internal/authstore"
 	"nav-saas-mvp/backend/internal/domain"
 	"nav-saas-mvp/backend/internal/gsn"
 	"nav-saas-mvp/backend/internal/presence"
@@ -20,7 +22,11 @@ import (
 
 type Server struct {
 	store           *store.FileStore
+	authStore       *authstore.Store
+	authReader      authstore.AppReader
 	auth            *auth.Service
+	authAPI         *authapi.Server
+	authProxy       http.Handler
 	gsn             *gsn.Service
 	estimateLocks   *presence.EstimateLocks
 	licenseSessions *presence.LicenseSessions
@@ -32,30 +38,43 @@ type contextKey string
 
 const claimsKey contextKey = "claims"
 
-func NewServer(store *store.FileStore, authService *auth.Service, gsnService *gsn.Service, webDir string) *Server {
-	return &Server{
+func NewServer(store *store.FileStore, authStore *authstore.Store, authService *auth.Service, gsnService *gsn.Service, webDir string, authServiceURL string) (*Server, error) {
+	if authStore == nil {
+		return nil, errors.New("auth store is required")
+	}
+
+	authProxy, err := newAuthServiceProxy(authServiceURL)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Server{
 		store:           store,
+		authStore:       authStore,
+		authReader:      authStore,
 		auth:            authService,
+		authProxy:       authProxy,
 		gsn:             gsnService,
 		estimateLocks:   presence.NewEstimateLocks(),
 		licenseSessions: presence.NewLicenseSessions(),
 		webDir:          webDir,
 		static:          http.FileServer(http.Dir(webDir)),
 	}
+	if authProxy == nil {
+		s.authAPI = authapi.New(authStore, authService)
+	}
+	return s, nil
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/auth/login", s.handleLogin)
-	mux.HandleFunc("/api/auth/logout", s.handleLogout)
-	mux.HandleFunc("/api/auth/register", s.handleRegister)
-	mux.Handle("/api/me", s.withAuth(http.HandlerFunc(s.handleMe)))
-	mux.Handle("/api/companies", s.withAuth(http.HandlerFunc(s.handleCompanies)))
-	mux.Handle("/api/users", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleUsers))))
-	mux.Handle("/api/users/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleUserByID))))
+	if s.authProxy != nil {
+		mountAuthProxy(mux, s.authProxy)
+	} else if s.authAPI != nil {
+		s.authAPI.RegisterRoutes(mux)
+	}
 	mux.Handle("/api/admin/estimate-locks", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLocks))))
 	mux.Handle("/api/admin/estimate-locks/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLockByID))))
-	mux.Handle("/api/admin/licenses", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminLicenses))))
 	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))
 	mux.Handle("/api/constructions/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructionByID))))
 	mux.Handle("/api/objects", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjects))))
@@ -80,234 +99,6 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/", s.static)
 
 	return s.withCommonHeaders(mux)
-}
-
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var input struct {
-		CompanyName string `json:"companyName"`
-		Name        string `json:"name"`
-		Password    string `json:"password"`
-	}
-	if err := readJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-
-	token, user, err := s.auth.Login(input.CompanyName, input.Name, input.Password)
-	if err != nil {
-		switch {
-		case errors.Is(err, auth.ErrNotAuthorized):
-			writeError(w, http.StatusForbidden, "учётная запись ожидает подтверждения администратора")
-		default:
-			writeError(w, http.StatusUnauthorized, "неверная компания, ФИО или пароль")
-		}
-		return
-	}
-
-	auth.SetSessionCookie(w, r, token)
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user": user,
-		"access": map[string]bool{
-			"app":   user.CanAccessApp(),
-			"admin": user.CanAccessAdmin(),
-		},
-	})
-}
-
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	auth.ClearSessionCookie(w, r)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var input store.RegisterUser
-	if err := readJSON(r, &input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid json")
-		return
-	}
-
-	if input.Password != input.PasswordConfirm {
-		writeError(w, http.StatusBadRequest, "пароли не совпадают")
-		return
-	}
-
-	user, err := s.store.RegisterUser(input)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"user":    user,
-		"message": "заявка на регистрацию отправлена, ожидайте подтверждения администратора",
-	})
-}
-
-func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	claims := mustClaims(r)
-	user, ok := s.store.FindUserByID(claims.UserID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "user not found")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user": user,
-		"access": map[string]bool{
-			"app":   user.CanAccessApp(),
-			"admin": user.CanAccessAdmin(),
-		},
-		"claims": claims,
-	})
-}
-
-func (s *Server) handleCompanies(w http.ResponseWriter, r *http.Request) {
-	claims := mustClaims(r)
-	switch r.Method {
-	case http.MethodGet:
-		companies := s.store.ListCompanies()
-		if !claims.Role.CanManageCompanies() {
-			filtered := companies[:0]
-			for _, company := range companies {
-				if company.ID == claims.CompanyID {
-					filtered = append(filtered, company)
-				}
-			}
-			companies = filtered
-		}
-		writeJSON(w, http.StatusOK, companies)
-
-	case http.MethodPost:
-		if !claims.Role.CanManageCompanies() {
-			writeError(w, http.StatusForbidden, "only super admin can create companies")
-			return
-		}
-
-		var input struct {
-			Name string `json:"name"`
-		}
-		if err := readJSON(r, &input); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-
-		company, err := s.store.CreateCompany(input.Name)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, company)
-
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
-	claims := mustClaims(r)
-	if !claims.Role.CanManageUsers() {
-		writeError(w, http.StatusForbidden, "not enough permissions")
-		return
-	}
-
-	includeAll := claims.Role == domain.RoleSuperAdmin
-	switch r.Method {
-	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.store.ListUsers(claims.CompanyID, includeAll))
-
-	case http.MethodPost:
-		var input store.NewUser
-		if err := readJSON(r, &input); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-
-		if !includeAll {
-			input.CompanyID = claims.CompanyID
-			input.CompanyName = ""
-			input.IsSuperAdministrator = false
-		}
-
-		user, err := s.store.CreateUser(input)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusCreated, s.store.UserView(user))
-
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
-	claims := mustClaims(r)
-	id := strings.TrimPrefix(r.URL.Path, "/api/users/")
-	if id == "" {
-		writeError(w, http.StatusNotFound, "user not found")
-		return
-	}
-
-	includeAll := claims.Role == domain.RoleSuperAdmin
-	switch r.Method {
-	case http.MethodPut:
-		var input store.UpdateUser
-		if err := readJSON(r, &input); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-
-		user, err := s.store.UpdateUser(id, claims.CompanyID, includeAll, input)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-
-		writeJSON(w, http.StatusOK, s.store.UserView(user))
-
-	case http.MethodDelete:
-		if err := s.store.DeleteUser(id, claims.CompanyID, includeAll); err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
 }
 
 func (s *Server) handleConstructions(w http.ResponseWriter, r *http.Request) {
@@ -573,10 +364,9 @@ func (s *Server) handleEstimateCalcStatus(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {
 	claims := mustClaims(r)
-	user, ok := s.store.FindUserByID(claims.UserID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "user not found")
-		return
+	userName := strings.TrimSpace(claims.Name)
+	if userName == "" {
+		userName = claims.Email
 	}
 
 	switch r.Method {
@@ -605,10 +395,10 @@ func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {
 		result := s.licenseSessions.Sync(
 			claims.CompanyID,
 			claims.UserID,
-			user.Name,
+			userName,
 			validated,
 			func(subsectionID string) int {
-				return s.store.LicenseAvailable(claims.CompanyID, subsectionID)
+				return s.authReader.LicenseAvailable(claims.CompanyID, subsectionID)
 			},
 			func(subsectionID string) string {
 				return domain.BaseSubsectionName(domain.BaseSubsectionID(subsectionID))
@@ -683,10 +473,9 @@ func (s *Server) handleEstimateLock(w http.ResponseWriter, r *http.Request, esti
 		return
 	}
 
-	user, ok := s.store.FindUserByID(claims.UserID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "user not found")
-		return
+	userName := strings.TrimSpace(claims.Name)
+	if userName == "" {
+		userName = claims.Email
 	}
 
 	switch r.Method {
@@ -696,7 +485,7 @@ func (s *Server) handleEstimateLock(w http.ResponseWriter, r *http.Request, esti
 			return
 		}
 
-		lock, err := s.estimateLocks.Acquire(estimateID, claims.UserID, user.Name, estimate.CompanyID)
+		lock, err := s.estimateLocks.Acquire(estimateID, claims.UserID, userName, estimate.CompanyID)
 		if err != nil {
 			var conflict presence.LockConflict
 			if errors.As(err, &conflict) {
@@ -750,8 +539,8 @@ func (s *Server) handleAdminEstimateLocks(w http.ResponseWriter, r *http.Request
 	includeAll := claims.Role == domain.RoleSuperAdmin
 	locks := s.estimateLocks.List(claims.CompanyID, includeAll)
 
-	companyNames := make(map[string]string, len(s.store.ListCompanies()))
-	for _, company := range s.store.ListCompanies() {
+	companyNames := make(map[string]string, len(s.authReader.ListCompanies()))
+	for _, company := range s.authReader.ListCompanies() {
 		companyNames[company.ID] = company.Name
 	}
 
@@ -779,71 +568,6 @@ func (s *Server) handleAdminEstimateLocks(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, items)
-}
-
-func (s *Server) handleAdminLicenses(w http.ResponseWriter, r *http.Request) {
-	claims := mustClaims(r)
-
-	switch r.Method {
-	case http.MethodGet:
-		companyID := strings.TrimSpace(r.URL.Query().Get("companyId"))
-		if claims.Role != domain.RoleSuperAdmin {
-			companyID = claims.CompanyID
-		} else if companyID == "" {
-			companyID = claims.CompanyID
-		}
-
-		view, err := s.store.GetCompanyLicenses(companyID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "company not found")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "failed to read licenses")
-			return
-		}
-		view.Editable = claims.Role.CanManageLicenses()
-		writeJSON(w, http.StatusOK, view)
-	case http.MethodPut:
-		if !claims.Role.CanManageLicenses() {
-			writeError(w, http.StatusForbidden, "редактировать лицензии может только суперадминистратор")
-			return
-		}
-
-		var input struct {
-			CompanyID string         `json:"companyId"`
-			Items     map[string]int `json:"items"`
-		}
-		if err := readJSON(r, &input); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
-			return
-		}
-
-		companyID := strings.TrimSpace(input.CompanyID)
-		if companyID == "" {
-			writeError(w, http.StatusBadRequest, "companyId is required")
-			return
-		}
-
-		view, err := s.store.UpdateCompanyLicenses(companyID, store.UpdateCompanyLicensesInput{
-			Items: input.Items,
-		})
-		if err != nil {
-			switch {
-			case errors.Is(err, store.ErrNotFound):
-				writeError(w, http.StatusNotFound, "company not found")
-			case errors.Is(err, store.ErrConflict):
-				writeError(w, http.StatusBadRequest, "invalid license data")
-			default:
-				writeError(w, http.StatusInternalServerError, "failed to update licenses")
-			}
-			return
-		}
-		view.Editable = true
-		writeJSON(w, http.StatusOK, view)
-	default:
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
 }
 
 func (s *Server) handleAdminEstimateLockByID(w http.ResponseWriter, r *http.Request) {
@@ -1217,12 +941,7 @@ func (s *Server) withAdmin(next http.Handler) http.Handler {
 func (s *Server) withAuthorized(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims := mustClaims(r)
-		user, ok := s.store.FindUserByID(claims.UserID)
-		if !ok {
-			writeError(w, http.StatusUnauthorized, "user not found")
-			return
-		}
-		if !user.CanAccessApp() {
+		if !claims.CanAccessApp() {
 			writeError(w, http.StatusForbidden, "учётная запись не авторизована для работы в системе")
 			return
 		}
@@ -1291,11 +1010,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, authstore.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, store.ErrForbidden):
+	case errors.Is(err, store.ErrForbidden), errors.Is(err, authstore.ErrForbidden):
 		writeError(w, http.StatusForbidden, "not enough permissions")
-	case errors.Is(err, store.ErrConflict):
+	case errors.Is(err, store.ErrConflict), errors.Is(err, authstore.ErrConflict):
 		writeError(w, http.StatusBadRequest, "некорректные или конфликтующие данные")
 	default:
 		slog.Error("store operation failed", "error", err)
