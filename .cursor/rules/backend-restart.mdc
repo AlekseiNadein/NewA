@@ -11,19 +11,21 @@ alwaysApply: true
 
 - Любые изменения в `backend/**` (Go-код, маршруты, конфигурация сервера)
 - Изменения схем БД, от которых зависит runtime (`db/schema.sql`, `db/gsn_schema.sql`)
+- Изменения nginx-конфига (`deploy/nginx.conf`) или скриптов запуска
 - Смена переменных окружения сервера (`APP_ADDR`, `APP_DATA_PATH`, `APP_DATABASE_URL`, `APP_GSN_DATABASE_URL` и т.п.)
 
-Перезапуск **не нужен** только для изменений во frontend (`web/**`) и документации, если backend не менялся.
+Перезапуск **не нужен** только для изменений во frontend (`web/**`) и документации, если backend и nginx не менялись.
 
 ## Составляющие системы
 
 | Процесс | Порт | Скрипт |
 |---------|------|--------|
+| Nginx (вход) | `:8080` | `scripts/restart-nginx.bat` |
 | Auth service | `:8081` | `scripts/restart-auth-server.bat` |
-| API + frontend | `:8080` | `run.bat` (основной процесс) |
+| API + frontend | `:8090` | `run.bat` (основной процесс) |
 | Сервис расчёта смет | — | `scripts/restart-calc-worker.bat` |
 
-`run.bat` **автоматически** перезапускает auth и calc worker перед стартом API.
+`run.bat` **автоматически** перезапускает auth, calc worker и nginx перед стартом API.
 
 ## Запускать сервер только с указанием окружения
 
@@ -31,19 +33,18 @@ alwaysApply: true
 
 Обязательные переменные (значения — как в `run.bat`):
 
-- `APP_ADDR`
+- `APP_ADDR` (`:8090` — внутренний порт app; публичный вход через nginx `:8080`)
 - `APP_WEB_DIR`
 - `APP_DATA_PATH`
 - `APP_DATABASE_URL`
 - `APP_AUTH_DATABASE_URL`
-- `APP_AUTH_SERVICE_URL`
 - `APP_JWT_SECRET`
 - `APP_GSN_DATABASE_URL`
 
 ## Как перезапускать
 
-1. Останови текущий процесс на `:8080` (или `data\nav-server.exe`), если он запущен.
-2. Запусти backend **только** через `run.bat` (он перезапустит auth, calc worker и выставит все переменные):
+1. Останови текущий процесс на `:8090` (или `data\nav-server.exe`), если он запущен.
+2. Запусти backend **только** через `run.bat` (он перезапустит auth, calc worker, nginx и выставит все переменные):
 
 ```powershell
 cd C:\NAV\Cursor\NewA
@@ -52,9 +53,10 @@ cd C:\NAV\Cursor\NewA
 
 Если нужен фоновый запуск без `run.bat` — сначала задай те же `APP_*` переменные, затем запускай бинарник.
 
-3. После `run.bat` убедись, что поднялись **все три** процесса:
+3. После `run.bat` убедись, что поднялись **все четыре** компонента:
+   - `nginx.exe` слушает `:8080`, ответ на `http://localhost:8080`
    - `nav-auth-server.exe` слушает `:8081`
-   - `nav-server.exe` слушает `:8080`, ответ на `http://localhost:8080`
+   - `nav-server.exe` слушает `:8090`
    - `nav-calc-worker.exe` запущен (нет ошибки `GSN database is not configured` в логе worker)
    - GSN доступен в UI (нет ошибки `GSN database is not configured`)
 

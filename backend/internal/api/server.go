@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"nav-saas-mvp/backend/internal/auth"
-	"nav-saas-mvp/backend/internal/authapi"
 	"nav-saas-mvp/backend/internal/authstore"
 	"nav-saas-mvp/backend/internal/domain"
 	"nav-saas-mvp/backend/internal/gsn"
@@ -25,8 +24,6 @@ type Server struct {
 	authStore       *authstore.Store
 	authReader      authstore.AppReader
 	auth            *auth.Service
-	authAPI         *authapi.Server
-	authProxy       http.Handler
 	gsn             *gsn.Service
 	estimateLocks   *presence.EstimateLocks
 	licenseSessions *presence.LicenseSessions
@@ -38,41 +35,22 @@ type contextKey string
 
 const claimsKey contextKey = "claims"
 
-func NewServer(store *store.FileStore, authStore *authstore.Store, authService *auth.Service, gsnService *gsn.Service, webDir string, authServiceURL string) (*Server, error) {
-	if authStore == nil {
-		return nil, errors.New("auth store is required")
-	}
-
-	authProxy, err := newAuthServiceProxy(authServiceURL)
-	if err != nil {
-		return nil, err
-	}
-
-	s := &Server{
+func NewServer(store *store.FileStore, authStore *authstore.Store, authService *auth.Service, gsnService *gsn.Service, webDir string) *Server {
+	return &Server{
 		store:           store,
 		authStore:       authStore,
 		authReader:      authStore,
 		auth:            authService,
-		authProxy:       authProxy,
 		gsn:             gsnService,
 		estimateLocks:   presence.NewEstimateLocks(),
 		licenseSessions: presence.NewLicenseSessions(),
 		webDir:          webDir,
 		static:          http.FileServer(http.Dir(webDir)),
 	}
-	if authProxy == nil {
-		s.authAPI = authapi.New(authStore, authService)
-	}
-	return s, nil
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
-	if s.authProxy != nil {
-		mountAuthProxy(mux, s.authProxy)
-	} else if s.authAPI != nil {
-		s.authAPI.RegisterRoutes(mux)
-	}
 	mux.Handle("/api/admin/estimate-locks", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLocks))))
 	mux.Handle("/api/admin/estimate-locks/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLockByID))))
 	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))

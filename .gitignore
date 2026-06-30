@@ -1,4 +1,8 @@
 data/
 backups/
+tools/nginx/
+deploy/logs/
+deploy/temp/
+deploy/mime.types
 *.log
 .DS_Store

@@ -2982,9 +2982,31 @@ function estimateLineCountsTowardGrandTotal(item) {
     return false;
   }
   if (estimateLineNeedsGsnCalc(item)) {
-    return estimateLineCalcDone(item);
+    return estimateLineCalcPricingReady(item);
   }
   return true;
+}
+
+function estimateLineCalcPricingReady(item) {
+  const status = String(item?.calcStatus || "").trim();
+  if (status !== "done") {
+    return false;
+  }
+  return Boolean(item?.calcRecordAppliedKey);
+}
+
+function estimateCalcTerminalStatus(status) {
+  const value = String(status || "").trim();
+  return value === "done" || value === "failed" || value === "dead" || value === "leased";
+}
+
+function estimateCalcProgressDisplayErrors(target, displayed) {
+  const totalErrors = target?.errors ?? 0;
+  const processed = target?.processed ?? 0;
+  if (processed <= 0 || displayed >= processed) {
+    return totalErrors;
+  }
+  return Math.min(totalErrors, Math.round((totalErrors * displayed) / processed));
 }
 
 function estimateGrandTotalForDisplay(items) {
@@ -3011,7 +3033,7 @@ function estimateCalcProgressSlice(items, estimateId = "", limit = Infinity) {
       break;
     }
     const status = String(item.calcStatus || "").trim();
-    if (status !== "done" && status !== "failed" && status !== "dead") {
+    if (!estimateCalcTerminalStatus(status)) {
       continue;
     }
     processed += 1;
@@ -3019,7 +3041,7 @@ function estimateCalcProgressSlice(items, estimateId = "", limit = Infinity) {
       errors += 1;
       continue;
     }
-    if (estimateLineCountsTowardGrandTotal(item)) {
+    if (estimateLineCalcPricingReady(item)) {
       grandTotal += estimateLineTotal(item);
     }
   }
@@ -3079,7 +3101,7 @@ function estimateCalcProgress(items, estimateId = "") {
   let errors = 0;
   calcItems.forEach((item) => {
     const status = String(item.calcStatus || "").trim();
-    if (status === "done" || status === "failed" || status === "dead") {
+    if (estimateCalcTerminalStatus(status)) {
       processed += 1;
     }
     if (status === "failed" || status === "dead") {
@@ -3138,7 +3160,7 @@ function calcProgressFromStatusPayload(estimate, statuses) {
       return;
     }
     const nextStatus = String(status.status || "").trim();
-    if (nextStatus === "done" || nextStatus === "failed" || nextStatus === "dead") {
+    if (estimateCalcTerminalStatus(nextStatus)) {
       processed += 1;
     }
     if (nextStatus === "failed" || nextStatus === "dead") {
@@ -3158,7 +3180,7 @@ function getEstimateCalcProgressDisplay(estimateId, items) {
     return {
       total: target.total,
       processed: displayed,
-      errors: slice.errors,
+      errors: estimateCalcProgressDisplayErrors(target, displayed),
       grandTotal: slice.grandTotal,
       done,
     };
@@ -3991,6 +4013,8 @@ async function pollEstimateCalcStatus(estimateId) {
     const response = await api(`/api/estimates/${estimateId}/calc-status`);
     clearEstimateCalcAwaitingServer(estimateId);
     const statuses = response.items || [];
+    applyEstimateCalcStatusFieldsOnly(estimate, statuses);
+    applyEstimateCalcRecordsBatch(estimate, statuses);
     const serverProgress = calcProgressFromStatusPayload(estimate, statuses);
     if (serverProgress.total > 0) {
       updateCalcProgressTarget(estimateId, serverProgress, estimate);

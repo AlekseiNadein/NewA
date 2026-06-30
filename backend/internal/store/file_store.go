@@ -1556,12 +1556,16 @@ WHERE id = $1
 `, job.ID, nextStatus, time.Now().UTC().Add(backoff), message); err != nil {
 		return err
 	}
+	lineStatus := "failed"
+	if nextStatus == "dead" {
+		lineStatus = "dead"
+	}
 	if _, err := tx.Exec(ctx, `
 UPDATE app_estimate_lines
 SET calc_status = $4,
     calc_error = $5
 WHERE estimate_id = $1 AND id = $2 AND revision = $3
-`, job.EstimateID, job.LineID, job.Revision, nextStatus, message); err != nil {
+`, job.EstimateID, job.LineID, job.Revision, lineStatus, message); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

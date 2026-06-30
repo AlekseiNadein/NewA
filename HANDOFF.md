@@ -14,8 +14,9 @@ run.bat
 
 | Процесс | Как запускается | Порт / роль |
 |---------|-----------------|-------------|
+| **Nginx** | `run.bat` → `scripts/restart-nginx.bat` | `:8080` — единая точка входа (UI + маршрутизация auth/app) |
 | **Auth service** | `run.bat` → `scripts/restart-auth-server.bat` | `:8081` — login, users, companies, licenses |
-| **API + frontend** | `run.bat` (основной процесс в текущем окне) | `:8080` — бизнес-API, UI; auth-маршруты **проксируются** на `:8081` |
+| **API + frontend** | `run.bat` (основной процесс в текущем окне) | `:8090` — бизнес-API, статика (доступ через nginx `:8080`) |
 | **Сервис расчёта** | `run.bat` → `scripts/restart-calc-worker.bat` | фон — очередь `estimate_calc_jobs`, расчёт позиций ГСН |
 
 Ручной запуск (отладка, отдельное окно с логом в консоли):
@@ -33,23 +34,32 @@ run.bat
 | `restart-calc-worker.bat` | stop → build → фоновый старт |
 | `run-auth-server-exec.bat` | env + `nav-auth-server.exe` |
 | `run-calc-worker-exec.bat` | env + `nav-calc-worker.exe` → лог `data/calc-worker.log` |
+| `restart-nginx.bat` | stop → setup (если нужно) → фоновый старт nginx |
+| `setup-nginx.bat` | скачивание portable nginx в `tools/nginx/` |
 
-**Проверка после `run.bat`:** три процесса `nav-auth-server.exe`, `nav-server.exe`, `nav-calc-worker.exe`; порты `:8081`, `:8080`; в логе worker нет `GSN database is not configured`.
+**Проверка после `run.bat`:** четыре компонента — `nginx.exe` на `:8080`, `nav-auth-server.exe` на `:8081`, `nav-server.exe` на `:8090`, `nav-calc-worker.exe`; в логе worker нет `GSN database is not configured`.
 
 Логин (рабочая база): **Система** / **nadein.av@yandex.ru** / **admin123**  
 Демо из README (**admin@example.com**) в `data/app.json` может отсутствовать; в форме подставляется из черновика `localStorage`.
 
 | Env | Назначение |
 |-----|------------|
+| `APP_ADDR` | внутренний порт app-сервера (`:8090`); публичный вход — nginx `:8080` |
 | `APP_DATA_PATH` | legacy JSON snapshot: **только** settings (если нет PG); сметы/стройки — в `APP_DATABASE_URL` |
 | `APP_AUTH_DATABASE_URL` | **auth-контур**: `auth.companies`, `auth.users`, `auth.company_licenses` (по умолчанию = `APP_DATABASE_URL`) |
-| `APP_AUTH_SERVICE_URL` | URL отдельного auth-сервиса, напр. `http://127.0.0.1:8081` (если задан — auth API проксируется с `:8080`) |
 | `APP_JWT_SECRET` | общий секрет JWT для app и auth (обязательно одинаковый при раздельных процессах) |
 | `APP_DATABASE_URL` | стройки, объекты, сметы, строки, очередь расчёта, `app_settings` |
 | `APP_GSN_DATABASE_URL` | `gsn.*`, `fgis_cs.*` |
 
 Импорт справочников (не при старте): `import_regions`, `import_resource_codifier`, `import_fgis_cs`.  
 Принудительный импорт users/companies из JSON: `go run .\backend\cmd\migrate_auth` (нужен `APP_AUTH_DATABASE_URL`).
+
+## Auth-контур (фаза 4, 2026-06-30)
+
+- **nginx** на `:8080` — единая точка входа; auth-маршруты → `:8081`, остальное → app `:8090`.
+- Go reverse proxy (`internal/api/proxy.go`, `APP_AUTH_SERVICE_URL`) **удалён**.
+- Конфиг: `deploy/nginx.conf`; установка nginx: `scripts/setup-nginx.bat`.
+- App-сервис отдаёт только бизнес-API и статику; auth API — только через auth-сервис.
 
 ## Auth-контур (фаза 3, 2026-06-30)
 
@@ -66,18 +76,11 @@ Auth **не участвует** в calc worker: worker не используе�
 
 После выноса auth перезапуск `run.bat` **раньше не поднимал** calc worker → очередь копилась, UI показывал «В очереди». Сейчас `run.bat` перезапускает worker автоматически (см. раздел «Запуск»).
 
-## Auth-контур (фаза 4 — запланировано)
-
-- Заменить Go reverse proxy (`APP_AUTH_SERVICE_URL`, `internal/api/proxy.go`) на **nginx** как единую точку входа.
-- Пример конфига: `deploy/nginx-phase4.example.conf`.
-- App-сервис отдаёт только бизнес-API; auth-маршруты маршрутизирует nginx на `:8081`.
-
 ## Auth-контур (фаза 2, 2026-06-30)
 
 - `backend/cmd/auth_server` — отдельный процесс `:8081` (`run-auth.bat`).
 - `backend/internal/authapi` — HTTP handlers auth API.
-- При `APP_AUTH_SERVICE_URL` основной `:8080` **проксирует** auth-маршруты на auth-сервис; frontend не меняется.
-- Запуск: сначала `run-auth.bat`, затем `run.bat` (или без `APP_AUTH_SERVICE_URL` — auth in-process, как в фазе 1).
+- На фазе 2 auth-маршруты проксировались Go reverse proxy с `:8080`; с фазы 4 — через nginx.
 
 ## Auth-контур (фаза 1)
 
@@ -310,15 +313,16 @@ scripts/restart-{auth-server,calc-worker}.bat
 
 Контекст: вынос auth в отдельный сервис + PG ([транскрипт сессии](38c90377-ea92-47e6-8587-fe20b20621b9)) и последующая стабилизация calc worker.
 
-### Auth: фазы 1–3 (реализовано)
+### Auth: фазы 1–4 (реализовано)
 
 | Фаза | Содержание |
 |------|------------|
 | **1** | `db/auth_schema.sql`, пакет `authstore`, автоимпорт из `app.json` при пустой auth БД |
-| **2** | `backend/cmd/auth_server` (`:8081`), `authapi`, proxy с `:8080` при `APP_AUTH_SERVICE_URL` |
+| **2** | `backend/cmd/auth_server` (`:8081`), `authapi` |
 | **3** | users/companies/licenses **только** в `auth.*`; `FileStore` без учёток; JWT с `authorized`; `withAuthorized` по claims |
+| **4** | nginx `:8080` вместо Go-proxy; app `:8090` internal; `deploy/nginx.conf`, `scripts/setup-nginx.bat` |
 
-Ключевые пути: `backend/internal/authstore/`, `backend/internal/authapi/`, `backend/internal/api/proxy.go`, `backend/cmd/migrate_auth/`.
+Ключевые пути: `backend/internal/authstore/`, `backend/internal/authapi/`, `deploy/nginx.conf`, `backend/cmd/migrate_auth/`.
 
 ### Запуск: автоперезапуск всех составляющих
 
@@ -342,10 +346,9 @@ scripts/restart-{auth-server,calc-worker}.bat
 
 ### Следующие шаги
 
-1. **Фаза 4 auth:** nginx вместо Go-proxy (`deploy/nginx-phase4.example.conf`).
-2. Оптимизация `listRecordResources` (убрать N+1) — если снова упираемся в таймаут 40 с.
-3. Очистка/компактификация старых `estimate_calc_jobs` (`dead`, stale revision).
-4. В UI «Настройки» — подсказка: рекомендуемо 2–4 worker-а.
+1. Оптимизация `listRecordResources` (убрать N+1) — если снова упираемся в таймаут 40 с.
+2. Очистка/компактификация старых `estimate_calc_jobs` (`dead`, stale revision).
+3. В UI «Настройки» — подсказка: рекомендуемо 2–4 worker-а.
 
 ### Незакоммиченные изменения (сессия)
 
