@@ -1192,8 +1192,35 @@ p {
   flex: 1 1 auto;
   min-height: 0;
   margin-top: 0.25rem;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.editor-estimate-table-body-scroll .editor-estimate-table {
+  display: block;
+  width: 100%;
+}
+
+.editor-estimate-table-body-scroll .editor-estimate-table thead {
+  display: block;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #fff;
+  box-shadow: 0 1px 0 var(--border);
+}
+
+.editor-estimate-table-body-scroll .editor-estimate-table tbody {
+  display: block;
+}
+
+.editor-estimate-table-body-scroll .editor-estimate-table thead tr,
+.editor-estimate-table-body-scroll .editor-estimate-table tbody tr {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
 }
 
 .editor-estimate-table-layout .editor-estimate-actions {
@@ -1202,11 +1229,7 @@ p {
 }
 
 .editor-estimate-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   background: #fff;
-  box-shadow: 0 1px 0 var(--border);
 }
 
 .editor-estimate-chrome {
@@ -1542,7 +1565,6 @@ p {
   font-size: 0.88rem;
   font-variant-numeric: tabular-nums;
   table-layout: fixed;
-  contain: layout style;
 }
 
 .editor-estimate-table th,
@@ -1578,11 +1600,6 @@ p {
   white-space: normal;
   word-break: break-word;
   overflow-wrap: anywhere;
-}
-
-.editor-estimate-table tbody tr {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 2.5rem;
 }
 
 .editor-estimate-table td.editor-estimate-index-cell {

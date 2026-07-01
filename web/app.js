@@ -243,8 +243,7 @@ let estimateCalcProgressAnimFrame = 0;
 let editorTableInteractionEnabled = false;
 let editorTableBodyReady = false;
 let editorTableBodyRenderToken = 0;
-const EDITOR_TABLE_IMMEDIATE_ROWS = 60;
-const EDITOR_TABLE_CHUNK_ROWS = 50;
+let editorTableRowRefreshFrame = 0;
 const LARGE_ESTIMATE_CALC_LINE_THRESHOLD = 250;
 const LARGE_ESTIMATE_CALC_STATUS_POLL_MS = 2000;
 const LARGE_ESTIMATE_CALC_APPLY_CHUNK = 120;
@@ -829,6 +828,24 @@ els.editorContent.addEventListener(
     }
   },
   { capture: true },
+);
+
+els.editorContent.addEventListener(
+  "scroll",
+  (event) => {
+    const scrollEl = event.target.closest?.(".editor-estimate-table-body-scroll");
+    if (!scrollEl) {
+      return;
+    }
+    if (state.section !== "editor" || state.estimateViewMode !== "table") {
+      return;
+    }
+    const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, state.editorTab));
+    if (estimate) {
+      maybeFlushEditorTableBodyOnScroll(scrollEl, estimate);
+    }
+  },
+  { passive: true, capture: true },
 );
 
 els.estimateLineDialogForm.addEventListener("submit", async (event) => {
@@ -4853,19 +4870,7 @@ function syncLargeEstimateTableRows(estimate) {
 }
 
 function scheduleLargeEstimateTableRowRefresh(estimate) {
-  let frames = 0;
-  const tick = () => {
-    frames += 1;
-    refreshAllRenderedEstimateTableRows(estimate);
-    const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
-    const rendered =
-      tbody?.querySelectorAll(`[data-editor-line-edit="${CSS.escape(estimate.id)}"]`).length || 0;
-    const total = (estimate.items || []).length;
-    if (frames < 240 && rendered < total) {
-      requestAnimationFrame(tick);
-    }
-  };
-  requestAnimationFrame(tick);
+  scheduleEstimateTableRowRefresh(estimate);
 }
 
 async function applyIncrementalEstimateCalcUpdates(estimate, statuses) {
@@ -4899,8 +4904,7 @@ async function applyIncrementalEstimateCalcUpdates(estimate, statuses) {
     ) {
       updateEditorCalcProgressDom(estimate);
       updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: true });
-      refreshAllRenderedEstimateTableRows(estimate);
-      scheduleLargeEstimateTableRowRefresh(estimate);
+      scheduleEstimateTableRowRefresh(estimate);
       const progress = estimateCalcProgress(estimate.items, estimateId);
       if (progress.total > 0 && progress.processed >= progress.total) {
         syncLargeEstimateTableRows(estimate);
@@ -5015,6 +5019,14 @@ async function pollEstimateCalcStatus(estimateId) {
     enrichEditorEstimateItems(estimate.items);
     await applyIncrementalEstimateCalcUpdates(estimate, statuses);
 
+    if (
+      state.section === "editor" &&
+      sameEstimateId(state.editorTab, estimateId) &&
+      state.estimateViewMode === "table"
+    ) {
+      ensureEditorTableBodyComplete(estimate);
+    }
+
     ensureEstimateCalcProgressTarget(estimateId, estimate);
     updateCalcProgressTarget(estimateId, estimateCalcProgress(estimate.items, estimateId), estimate);
 
@@ -5026,7 +5038,7 @@ async function pollEstimateCalcStatus(estimateId) {
       sameEstimateId(state.editorTab, estimateId) &&
       state.estimateViewMode === "table"
     ) {
-      refreshAllRenderedEstimateTableRows(estimate);
+      scheduleEstimateTableRowRefresh(estimate);
       if (progress.total > 0 && progress.processed >= progress.total) {
         syncLargeEstimateTableRows(estimate);
       }
@@ -5141,6 +5153,7 @@ function refreshEstimateTableCalcVisuals(estimate, { lineIds = null } = {}) {
   }
   const large = isLargeEstimateForCalc(estimate);
   updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: large });
+  flushEditorTableBodyAppend(estimate);
   refreshAllRenderedEstimateTableRows(estimate);
   if (!large) {
     refreshEstimateTableCodeCells(estimate, lineIds);
@@ -5527,7 +5540,84 @@ function cancelEditorTableBodyRender() {
   editorTableBodyRenderToken += 1;
 }
 
-function mountEditorTableBody(estimate, tbody, { incremental = false } = {}) {
+function countEditorTableMainRows(tbody) {
+  return tbody?.querySelectorAll("tr.editor-estimate-row-main").length || 0;
+}
+
+function isEditorTableBodyComplete(estimate, tbody = null) {
+  const liveTbody = tbody || els.editorContent?.querySelector(".editor-estimate-table tbody");
+  if (!liveTbody) {
+    return false;
+  }
+  const items = estimate.items || [];
+  if (!items.length) {
+    return true;
+  }
+  return countEditorTableMainRows(liveTbody) >= items.length;
+}
+
+function ensureEditorTableBodyComplete(estimate) {
+  const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
+  if (!tbody) {
+    return false;
+  }
+  const items = estimate.items || [];
+  if (!items.length) {
+    markEditorTableBodyReady();
+    return true;
+  }
+  if (isEditorTableBodyComplete(estimate, tbody)) {
+    markEditorTableBodyReady();
+    return true;
+  }
+
+  editorTableBodyReady = false;
+  cancelEditorTableBodyRender();
+  const scrollEl = tbody.closest(".editor-estimate-table-body-scroll");
+  const scrollTop = scrollEl?.scrollTop ?? 0;
+  tbody.innerHTML = buildEstimateTableRows(estimate).join("");
+  markEditorTableBodyReady();
+  if (scrollEl) {
+    scrollEl.scrollTop = scrollTop;
+  }
+  return true;
+}
+
+function flushEditorTableBodyAppend(estimate) {
+  return ensureEditorTableBodyComplete(estimate);
+}
+
+function maybeFlushEditorTableBodyOnScroll(scrollEl, estimate) {
+  if (isEditorTableBodyComplete(estimate)) {
+    if (!editorTableBodyReady) {
+      markEditorTableBodyReady();
+    }
+    return;
+  }
+  ensureEditorTableBodyComplete(estimate);
+}
+
+function scheduleEstimateTableRowRefresh(estimate) {
+  const estimateId = estimate.id;
+  if (editorTableRowRefreshFrame) {
+    return;
+  }
+  editorTableRowRefreshFrame = requestAnimationFrame(() => {
+    editorTableRowRefreshFrame = 0;
+    const live = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+    if (
+      live &&
+      state.section === "editor" &&
+      sameEstimateId(state.editorTab, estimateId) &&
+      state.estimateViewMode === "table"
+    ) {
+      ensureEditorTableBodyComplete(live);
+      refreshAllRenderedEstimateTableRows(live);
+    }
+  });
+}
+
+function mountEditorTableBody(estimate, tbody) {
   const items = estimate.items || [];
   const emptyRow = `<tr><td colspan="8" class="muted">Строки сметы отсутствуют</td></tr>`;
   if (!items.length) {
@@ -5536,50 +5626,10 @@ function mountEditorTableBody(estimate, tbody, { incremental = false } = {}) {
     return;
   }
 
-  if (!incremental || items.length <= EDITOR_TABLE_IMMEDIATE_ROWS) {
-    tbody.innerHTML = buildEstimateTableRows(estimate).join("");
-    markEditorTableBodyReady();
-    return;
-  }
-
-  const token = ++editorTableBodyRenderToken;
-  const firstEnd = Math.min(EDITOR_TABLE_IMMEDIATE_ROWS, items.length);
-  tbody.innerHTML = buildEstimateTableRows(estimate, {
-    start: 0,
-    end: firstEnd,
-    positionNumberStart: 0,
-  }).join("");
+  cancelEditorTableBodyRender();
+  editorTableBodyReady = false;
+  tbody.innerHTML = buildEstimateTableRows(estimate).join("");
   markEditorTableBodyReady();
-  let index = firstEnd;
-
-  const appendChunk = () => {
-    if (editorTableBodyRenderToken !== token) {
-      return;
-    }
-    if (state.editorTab !== estimate.id || state.estimateViewMode !== "table") {
-      return;
-    }
-    const liveTbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
-    if (!liveTbody || liveTbody !== tbody) {
-      return;
-    }
-    const end = Math.min(index + EDITOR_TABLE_CHUNK_ROWS, items.length);
-    const template = document.createElement("template");
-    template.innerHTML = buildEstimateTableRows(estimate, {
-      start: index,
-      end,
-      positionNumberStart: countEstimateTablePositionNumberBefore(items, index),
-    }).join("");
-    liveTbody.append(...template.content.children);
-    index = end;
-    if (index < items.length) {
-      requestAnimationFrame(appendChunk);
-    }
-  };
-
-  if (index < items.length) {
-    requestAnimationFrame(appendChunk);
-  }
 }
 
 function renderEstimateViewModeTabs(estimate) {
@@ -5760,13 +5810,15 @@ function updateEditorTableContent(estimate, options = {}) {
     if (!tbody) {
       return;
     }
+    const scrollEl = els.editorContent?.querySelector(".editor-estimate-table-body-scroll");
+    const scrollTop = scrollEl?.scrollTop ?? 0;
     cancelEditorTableBodyRender();
     editorTableBodyReady = false;
     syncEditorTablePassiveState();
-    const itemCount = (estimate.items || []).length;
-    mountEditorTableBody(estimate, tbody, {
-      incremental: itemCount > EDITOR_TABLE_IMMEDIATE_ROWS,
-    });
+    mountEditorTableBody(estimate, tbody);
+    if (scrollEl) {
+      scrollEl.scrollTop = scrollTop;
+    }
   }
   updateEditorTableTotals(estimate);
 }
@@ -5819,16 +5871,14 @@ function mountEditorContent(estimate, { force = false } = {}) {
   }
   const tbody = els.editorContent.querySelector(".editor-estimate-table tbody");
   if (tbody) {
-    const itemCount = (estimate.items || []).length;
-    mountEditorTableBody(estimate, tbody, {
-      incremental: itemCount > EDITOR_TABLE_IMMEDIATE_ROWS,
-    });
+    mountEditorTableBody(estimate, tbody);
+    ensureEditorTableBodyComplete(estimate);
   }
 }
 
 function renderEstimateTableEditor(estimate) {
   return `
-    <div class="table-wrap editor-estimate-table-body-scroll">
+    <div class="editor-estimate-table-body-scroll">
       <table class="editor-estimate-table">
         <thead>
           <tr>
@@ -8795,6 +8845,20 @@ async function openEstimateInEditor(estimateID) {
       }
       showMessage(error.message || "Не удалось открыть смету в редакторе", "error");
       return;
+    }
+    const existingEstimate = state.openEstimates[existingIndex];
+    if (!Array.isArray(existingEstimate.items) || existingEstimate.items.length === 0) {
+      let sourceEstimate = findCachedSourceEstimate(estimateId);
+      if (!sourceEstimate) {
+        await refreshConstructionData();
+        sourceEstimate = findCachedSourceEstimate(estimateId);
+      }
+      if (sourceEstimate) {
+        const hydratedEstimate = buildEditorEstimateFromSource(sourceEstimate, existingEstimate);
+        hydratedEstimate.id = normalizeEstimateId(hydratedEstimate.id);
+        hydrateEstimateSourceDataFgisSet(hydratedEstimate);
+        state.openEstimates[existingIndex] = hydratedEstimate;
+      }
     }
     state.estimateViewMode = "text";
     state.editorTab = state.openEstimates[existingIndex].id;

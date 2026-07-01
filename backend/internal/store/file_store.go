@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,6 +33,8 @@ type FileStore struct {
 	path          string
 	treeDB        *pgxpool.Pool
 	queueMode     string
+	calcStartMu   sync.Mutex
+	calcStartJobs map[string]struct{}
 	constructions map[string]domain.Construction
 	objects       map[string]domain.ConstructionObject
 	estimates     map[string]domain.Estimate
@@ -78,6 +81,7 @@ func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 	store := &FileStore{
 		path:          path,
 		queueMode:     queueMode,
+		calcStartJobs: map[string]struct{}{},
 		constructions: map[string]domain.Construction{},
 		objects:       map[string]domain.ConstructionObject{},
 		estimates:     map[string]domain.Estimate{},
@@ -1710,32 +1714,55 @@ WHERE id = $1
 		District:  district,
 		FgisSetID: fgisSetID,
 	}
-
-	tx, err := s.treeDB.Begin(ctx)
-	if err != nil {
-		return err
+	if !s.markEstimateCalcStartJob(id) {
+		return nil
 	}
-	defer tx.Rollback(ctx)
+	go s.runEstimateCalcStart(context.Background(), estimate)
+	return nil
+}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM calc_message_receipts WHERE estimate_id = $1`, id); err != nil {
-		return err
+func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate) {
+	defer s.unmarkEstimateCalcStartJob(estimate.ID)
+	if err := s.enqueueEstimateCalcBatches(ctx, estimate); err != nil {
+		slog.Warn("estimate calc enqueue failed", "estimate", estimate.ID, "error", err)
 	}
+}
 
-	rows, err := tx.Query(ctx, `
+func (s *FileStore) markEstimateCalcStartJob(estimateID string) bool {
+	s.calcStartMu.Lock()
+	defer s.calcStartMu.Unlock()
+	if _, exists := s.calcStartJobs[estimateID]; exists {
+		return false
+	}
+	s.calcStartJobs[estimateID] = struct{}{}
+	return true
+}
+
+func (s *FileStore) unmarkEstimateCalcStartJob(estimateID string) {
+	s.calcStartMu.Lock()
+	defer s.calcStartMu.Unlock()
+	delete(s.calcStartJobs, estimateID)
+}
+
+type estimateCalcStartLine struct {
+	line domain.EstimateItem
+}
+
+const estimateCalcStartBatchSize = 200
+
+func (s *FileStore) enqueueEstimateCalcBatches(ctx context.Context, estimate domain.Estimate) error {
+	rows, err := s.treeDB.Query(ctx, `
 SELECT id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text
 FROM app_estimate_lines
 WHERE estimate_id = $1
 ORDER BY sort_order, id
-`, id)
+`, estimate.ID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 
-	type lineRow struct {
-		line domain.EstimateItem
-	}
-	lines := make([]lineRow, 0)
+	lines := make([]estimateCalcStartLine, 0)
 	for rows.Next() {
 		var line domain.EstimateItem
 		if err := rows.Scan(
@@ -1744,19 +1771,34 @@ ORDER BY sort_order, id
 		); err != nil {
 			return err
 		}
-		lines = append(lines, lineRow{line: line})
+		lines = append(lines, estimateCalcStartLine{line: line})
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	for _, row := range lines {
-		line := prepareEstimateLineForStorage(estimate, row.line)
-		if !shouldEnqueueEstimateLineCalc(line) {
-			continue
+	for batchStart := 0; batchStart < len(lines); batchStart += estimateCalcStartBatchSize {
+		batchEnd := batchStart + estimateCalcStartBatchSize
+		if batchEnd > len(lines) {
+			batchEnd = len(lines)
 		}
-		line.Revision = estimateLineRevision(estimate, line)
-		if _, err := tx.Exec(ctx, `
+		tx, err := s.treeDB.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if batchStart == 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM calc_message_receipts WHERE estimate_id = $1`, estimate.ID); err != nil {
+				_ = tx.Rollback(ctx)
+				return err
+			}
+		}
+		for _, row := range lines[batchStart:batchEnd] {
+			line := prepareEstimateLineForStorage(estimate, row.line)
+			if !shouldEnqueueEstimateLineCalc(line) {
+				continue
+			}
+			line.Revision = estimateLineRevision(estimate, line)
+			if _, err := tx.Exec(ctx, `
 UPDATE app_estimate_lines
 SET calc_status = 'queued',
     calc_error = '',
@@ -1766,15 +1808,20 @@ SET calc_status = 'queued',
     calculated_at = NULL,
     revision = $3
 WHERE estimate_id = $1 AND id = $2
-`, id, line.ID, line.Revision); err != nil {
-			return err
+`, estimate.ID, line.ID, line.Revision); err != nil {
+				_ = tx.Rollback(ctx)
+				return err
+			}
+			if err := enqueueEstimateLineCalcJobTx(ctx, tx, estimate, line, s.queueMode); err != nil {
+				_ = tx.Rollback(ctx)
+				return err
+			}
 		}
-		if err := enqueueEstimateLineCalcJobTx(ctx, tx, estimate, line, s.queueMode); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
 	}
-
-	return tx.Commit(ctx)
+	return nil
 }
 
 func prepareEstimateLineForStorage(estimate domain.Estimate, line domain.EstimateItem) domain.EstimateItem {
