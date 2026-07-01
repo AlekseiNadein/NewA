@@ -71,6 +71,7 @@
             <button class="nav-link active" data-admin-section="users" type="button">Пользователи</button>
             <button class="nav-link" data-admin-section="licenses" type="button">Лицензии</button>
             <button class="nav-link" data-admin-section="estimates" type="button">Сметы</button>
+            <button class="nav-link" data-admin-section="queue" type="button">Очередь</button>
           </nav>
         </aside>
 
@@ -197,6 +198,21 @@
             <div id="adminEstimatesTable" class="admin-table-wrap"></div>
           </section>
         </div>
+
+        <div id="adminQueueSection" class="admin-section-view hidden">
+          <section class="card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Очередь расчёта</p>
+                <h2>RabbitMQ / DLQ</h2>
+                <p id="adminQueueHint" class="muted">Состояние очереди расчёта смет и динамика DLQ.</p>
+              </div>
+              <button id="refreshAdminQueueButton" class="secondary" type="button">Обновить</button>
+            </div>
+            <div id="adminQueueStats" class="admin-queue-stats"></div>
+            <div id="adminQueueHistory" class="admin-table-wrap"></div>
+          </section>
+        </div>
         </section>
       </section>
 
@@ -204,6 +220,6 @@
     </main>
 
     <script src="/admin-login-draft.js?v=20260622h"></script>
-    <script type="module" src="/admin.js?v=20260622h"></script>
+    <script type="module" src="/admin.js?v=20260630a"></script>
   </body>
 </html>

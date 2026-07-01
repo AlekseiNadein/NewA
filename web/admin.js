@@ -21,6 +21,7 @@ const state = {
   adminEstimateLocks: [],
   adminLicenses: null,
   adminLicensesCompanyId: "",
+  adminQueueStats: null,
 };
 
 const showMessage = bindMessage(document.querySelector("#message"));
@@ -57,7 +58,14 @@ const els = {
   adminEstimatesTable: document.querySelector("#adminEstimatesTable"),
   adminEstimatesHint: document.querySelector("#adminEstimatesHint"),
   refreshAdminEstimatesButton: document.querySelector("#refreshAdminEstimatesButton"),
+  adminQueueSection: document.querySelector("#adminQueueSection"),
+  adminQueueStats: document.querySelector("#adminQueueStats"),
+  adminQueueHistory: document.querySelector("#adminQueueHistory"),
+  adminQueueHint: document.querySelector("#adminQueueHint"),
+  refreshAdminQueueButton: document.querySelector("#refreshAdminQueueButton"),
 };
+
+let adminQueuePollTimer = null;
 
 els.loginForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -123,6 +131,15 @@ els.refreshAdminEstimatesButton?.addEventListener("click", async () => {
   try {
     await refreshAdminEstimateLocks();
     showMessage("Список обновлён", "ok");
+  } catch (error) {
+    showMessage(error.message, "error");
+  }
+});
+
+els.refreshAdminQueueButton?.addEventListener("click", async () => {
+  try {
+    await refreshAdminQueueStats();
+    showMessage("Статистика обновлена", "ok");
   } catch (error) {
     showMessage(error.message, "error");
   }
@@ -244,6 +261,13 @@ async function refreshAdminEstimateLocks() {
   }
 }
 
+async function refreshAdminQueueStats() {
+  state.adminQueueStats = await api("/api/admin/queue-stats");
+  if (state.adminSection === "queue") {
+    renderAdminQueue();
+  }
+}
+
 async function refreshAdminLicenses() {
   const isSuperAdmin = Boolean(state.me?.isSuperAdministrator);
   const companyId = isSuperAdmin ? state.adminLicensesCompanyId || state.me?.companyId : state.me?.companyId;
@@ -287,6 +311,7 @@ const adminSectionViews = {
   users: () => els.adminUsersSection,
   licenses: () => els.adminLicensesSection,
   estimates: () => els.adminEstimatesSection,
+  queue: () => els.adminQueueSection,
 };
 
 function setActiveAdminSection(section) {
@@ -308,6 +333,7 @@ async function switchAdminSection(section) {
   state.adminSection = section;
   renderAdminNav();
   setActiveAdminSection(section);
+  stopAdminQueuePoll();
 
   if (section === "users") {
     await refreshAdminUsers();
@@ -316,6 +342,12 @@ async function switchAdminSection(section) {
 
   if (section === "licenses") {
     await refreshAdminLicenses();
+    return;
+  }
+
+  if (section === "queue") {
+    await refreshAdminQueueStats();
+    startAdminQueuePoll();
     return;
   }
 
@@ -354,6 +386,9 @@ function renderShell() {
       renderAdminEstimates();
     } else if (state.adminSection === "licenses") {
       renderAdminLicenses();
+    } else if (state.adminSection === "queue") {
+      renderAdminQueue();
+      startAdminQueuePoll();
     } else {
       renderAdminUsers();
     }
@@ -604,6 +639,135 @@ async function finishAdminEstimateLock(estimateId) {
     showMessage("Редактирование завершено", "ok");
   } catch (error) {
     showMessage(error.message, "error");
+  }
+}
+
+function queueStatusClass(value, okWhen) {
+  return value === okWhen ? "admin-queue-ok" : "admin-queue-warn";
+}
+
+function queueBoolLabel(value) {
+  return value ? "да" : "нет";
+}
+
+function renderAdminQueue() {
+  const stats = state.adminQueueStats;
+  if (!stats) {
+    els.adminQueueStats.innerHTML = `<p class="muted">Загрузка…</p>`;
+    els.adminQueueHistory.innerHTML = "";
+    return;
+  }
+
+  const queue = stats.queue || {};
+  const depths = queue.depths || {};
+  const dlq = stats.dlq || {};
+  const alerts = stats.alerts || {};
+  const dlqCurrent = dlq.current ?? depths["estimate.calc.dlq"] ?? 0;
+  const mainDepth = depths["estimate.calc.main"] ?? 0;
+  const growth10m = dlq.growth10m ?? 0;
+  const growthKnown = Boolean(dlq.hasGrowthBaseline);
+  const growthText = growthKnown ? `${growth10m >= 0 ? "+" : ""}${growth10m}` : "—";
+  const activeAlerts = Object.entries(alerts)
+    .filter(([, active]) => active)
+    .map(([key]) => key);
+
+  els.adminQueueHint.textContent =
+    queue.mode === "rabbit"
+      ? "Режим RabbitMQ: мониторинг DLQ, outbox и подключений publisher/consumer."
+      : `Режим «${queue.mode || "—"}»: статистика очереди в основном актуальна для rabbit.`;
+
+  els.adminQueueStats.innerHTML = `
+    <div class="admin-queue-grid">
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Статус</span>
+        <strong class="${stats.status === "ok" ? "admin-queue-ok" : "admin-queue-warn"}">${escapeHTML(stats.status || "—")}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">DLQ (сейчас)</span>
+        <strong class="${dlqCurrent === 0 ? "admin-queue-ok" : "admin-queue-warn"}">${dlqCurrent}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Рост DLQ за 10 мин</span>
+        <strong class="${dlq.growthAlert ? "admin-queue-warn" : "admin-queue-ok"}">${escapeHTML(growthText)}</strong>
+        ${growthKnown ? `<span class="muted admin-queue-sub">порог ${dlq.growthThreshold ?? 50}</span>` : `<span class="muted admin-queue-sub">нужна история</span>`}
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Основная очередь</span>
+        <strong>${mainDepth}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Outbox pending</span>
+        <strong class="${(queue.outboxPending ?? 0) > 100 ? "admin-queue-warn" : ""}">${queue.outboxPending ?? 0}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Pipeline ready</span>
+        <strong class="${queueStatusClass(stats.pipelineReady, true)}">${queueBoolLabel(stats.pipelineReady)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Release ready</span>
+        <strong class="${queueStatusClass(stats.releaseReady, true)}">${queueBoolLabel(stats.releaseReady)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Publisher</span>
+        <strong class="${queueStatusClass(queue.publisher?.connected, true)}">${queueBoolLabel(queue.publisher?.connected)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Consumer</span>
+        <strong class="${queueStatusClass(queue.consumer?.connected, true)}">${queueBoolLabel(queue.consumer?.connected)}</strong>
+      </div>
+    </div>
+    ${
+      activeAlerts.length
+        ? `<p class="admin-queue-alerts"><strong>Алерты:</strong> ${activeAlerts.map((key) => escapeHTML(key)).join(", ")}</p>`
+        : `<p class="muted admin-queue-alerts">Активных алертов нет.</p>`
+    }
+  `;
+
+  const history = Array.isArray(stats.history) ? [...stats.history].reverse() : [];
+  if (!history.length) {
+    els.adminQueueHistory.innerHTML = `<p class="muted">История накопится после нескольких опросов (не чаще раза в минуту).</p>`;
+    return;
+  }
+
+  els.adminQueueHistory.innerHTML = `
+    <table class="admin-table admin-table--queue">
+      <thead>
+        <tr>
+          <th>Время</th>
+          <th>DLQ</th>
+          <th>Main</th>
+          <th>Outbox</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${history
+          .map(
+            (point) => `
+              <tr>
+                <td>${escapeHTML(formatAdminDateTime(point.at))}</td>
+                <td class="${point.dlq > 0 ? "admin-queue-warn" : ""}">${point.dlq ?? 0}</td>
+                <td>${point.main ?? 0}</td>
+                <td>${point.outboxPending ?? 0}</td>
+              </tr>
+            `,
+          )
+          .join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function startAdminQueuePoll() {
+  stopAdminQueuePoll();
+  adminQueuePollTimer = window.setInterval(() => {
+    void refreshAdminQueueStats().catch(() => {});
+  }, 30000);
+}
+
+function stopAdminQueuePoll() {
+  if (adminQueuePollTimer != null) {
+    window.clearInterval(adminQueuePollTimer);
+    adminQueuePollTimer = null;
   }
 }
 

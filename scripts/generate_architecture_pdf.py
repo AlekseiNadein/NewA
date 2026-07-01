@@ -3,11 +3,19 @@
 """Generate architecture description PDF (NAV SaaS MVP)."""
 
 import re
+import sys
 import textwrap
 from datetime import date
 from pathlib import Path
 
 from fpdf import FPDF
+from PIL import Image
+
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from architecture_diagram import render_architecture_diagram
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS_DIR = ROOT / "docs"
@@ -130,6 +138,24 @@ class ArchPDF(FPDF):
     def mono_block(self, text: str) -> None:
         self._write_block(text, 9, "", 4.8, fill=True)
 
+    def embed_diagram(self, image_path: Path) -> None:
+        self._at_margin()
+        with Image.open(image_path) as im:
+            w_px, h_px = im.size
+        width_mm = self.epw
+        height_mm = width_mm * h_px / w_px
+        self.image(str(image_path), w=width_mm, h=height_mm)
+        self.ln(2)
+
+TECH_STACK = (
+    "Клиент: HTML5, CSS3, Vanilla JavaScript, sessionStorage\n"
+    "Прокси: Nginx (deploy/nginx.conf)\n"
+    "Серверы: Go 1.25, net/http, pgx/v5 (PostgreSQL)\n"
+    "Auth: JWT HMAC-SHA256, HTTP-only cookie\n"
+    "Очередь: RabbitMQ (AMQP), transactional outbox\n"
+    "Сборка и запуск: go build, run.bat (Windows)"
+)
+
 
 def build_pdf() -> None:
     version_date = date.today().strftime("%Y-%m-%d")
@@ -140,142 +166,156 @@ def build_pdf() -> None:
 
     pdf.write_doc_title("Архитектура проекта NAV SaaS MVP", f"Версия {version_date}")
     pdf.lead(
-        "Пробный вертикальный срез SaaS-платформы для автоматизации выпуска смет "
-        "(ГСН-2022, ФГИС ЦС). Целевая схема: ADMIN FR / USER FR -> BK -> AC/JWT -> storage."
+        "SaaS-платформа для автоматизации выпуска смет (ГСН-2022, ФГИС ЦС). "
+        "Мультисервисный контур: nginx (единая точка входа) -> auth-сервис + UserData-server + calc worker."
     )
+
+    pdf.section_title("Схема приложения")
+    diagram_path = DOCS_DIR / "_architecture-diagram.png"
+    render_architecture_diagram(diagram_path)
+    pdf.embed_diagram(diagram_path)
+    pdf.mono_block(TECH_STACK)
 
     pdf.section_title("Общая схема")
     pdf.body(
-        "Два основных процесса: API-сервер (run.bat, порт 8080) и отдельный calc worker "
-        "(run-calc-worker.bat). Браузерный UI (web/) обращается к API по REST с JWT в cookie. "
-        "Сервер раздаёт статику, обслуживает auth и CRUD, читает справочник ГСН. "
-        "Worker забирает задачи из очереди PostgreSQL и обогащает строки смет данными ГСН."
+        "Запуск одной командой run.bat поднимает четыре компонента. "
+        "Публичный вход — nginx на :8080 (UI и маршрутизация). "
+        "Auth API проксируется на :8081, бизнес-API и статика — на UserData-server :8090. "
+        "Calc worker работает в фоне и не использует JWT."
     )
     pdf.mono_block(
         "Клиенты: web/ (основной UI), web/admin.html (админка)\n"
-        "Процессы: backend/cmd/server, backend/cmd/calc_worker\n"
-        "Хранилища: data/app.json, PostgreSQL app_*, PostgreSQL gsn.*/fgis_cs.*"
+        "Nginx :8080 -> auth :8081 | app :8090\n"
+        "Процессы: nav-auth-server, UserData-server (nav-server.exe), nav-calc-worker, nginx\n"
+        "Хранилища: PostgreSQL auth.*, app_*, gsn.*/fgis_cs.*; RabbitMQ; data/app.json (legacy)"
     )
 
-    pdf.subsection_title("Процессы")
-    pdf.bullet("API + frontend (run.bat) — HTTP-сервер, auth, CRUD, GSN API, раздача web/")
-    pdf.bullet("Calc worker (run-calc-worker.bat) — асинхронный расчёт позиций смет из очереди")
+    pdf.subsection_title("Процессы (run.bat)")
+    pdf.bullet("Nginx (:8080) — единая точка входа; deploy/nginx.conf")
+    pdf.bullet("Auth service (:8081) — login, users, companies, licenses; cmd/auth_server")
+    pdf.bullet("UserData-server (:8090) — бизнес-API, статика, outbox publisher, healthz; cmd/server")
+    pdf.bullet("Calc worker (фон) — потребитель очереди; пишет calc_json/calc_status в app.*")
 
     pdf.section_title("Backend (Go)")
     pdf.body(
-        "Монолитный HTTP-сервер с модульной внутренней структурой. "
-        "Точка входа — backend/cmd/server/main.go."
+        "Несколько процессов с общими пакетами internal/. "
+        "App-сервер: backend/cmd/server/main.go. Auth: backend/cmd/auth_server."
     )
     pdf.mono_block(
         "backend/\n"
-        "  cmd/server/          — основной API\n"
-        "  cmd/calc_worker/     — воркер расчёта смет\n"
-        "  cmd/import_*         — CLI-импорт справочников\n"
-        "  internal/api/        — маршруты, middleware, handlers\n"
-        "  internal/auth/       — JWT (HMAC SHA-256), пароли, cookie-сессии\n"
-        "  internal/domain/     — доменные модели\n"
-        "  internal/store/      — FileStore: гибрид JSON + PostgreSQL\n"
-        "  internal/gsn/        — справочник ГСН-2022 и ФГИС\n"
-        "  internal/calcworker/ — логика воркера и Manager пула goroutine\n"
-        "  internal/presence/   — блокировки смет, лицензионные сессии (in-memory)"
+        "  cmd/server/           — app API + outbox publisher\n"
+        "  cmd/auth_server/      — auth API (:8081)\n"
+        "  cmd/calc_worker/      — расчёт позиций (Rabbit / legacy DB)\n"
+        "  cmd/migrate_auth/     — импорт users из JSON в auth.*\n"
+        "  internal/api/         — маршруты app, healthz, queue-stats\n"
+        "  internal/authapi/     — handlers auth API\n"
+        "  internal/auth/        — JWT verify (app), пароли (auth)\n"
+        "  internal/authstore/   — PG: auth.companies, auth.users, licenses\n"
+        "  internal/store/       — сметы, стройки, outbox, очередь DB\n"
+        "  internal/gsn/         — справочник ГСН-2022 и ФГИС\n"
+        "  internal/calcworker/  — worker, Rabbit consumer, Manager\n"
+        "  internal/outbox/      — publisher outbox -> RabbitMQ\n"
+        "  internal/queue/       — инспекция очередей RabbitMQ\n"
+        "  internal/presence/    — блокировки смет, лиценз. сессии (in-memory)"
     )
 
-    pdf.subsection_title("API-сервер (internal/api/server.go)")
-    pdf.bullet("http.ServeMux с префиксом /api/")
-    pdf.bullet("Middleware: CORS, JWT из cookie, проверки authorized / admin")
-    pdf.bullet("Статика из APP_WEB_DIR; админ-страница /admin")
-    pdf.body("Группы эндпоинтов:")
-    pdf.bullet("Auth: /api/auth/login, logout, register, /api/me")
-    pdf.bullet("Организация: /api/companies, /api/users")
-    pdf.bullet("Предметная область: /api/constructions, /api/objects, /api/estimates")
-    pdf.bullet("Расчёт: GET /api/estimates/{id}/calc-status")
-    pdf.bullet("GSN: /api/gsn/hierarchy, record, regions, fgis-sets и др.")
-    pdf.bullet("Админ: /api/admin/estimate-locks, /api/admin/licenses")
-    pdf.bullet("Настройки: GET/PUT /api/settings (число calc worker-ов)")
+    pdf.subsection_title("Auth-контур")
+    pdf.bullet("users/companies/licenses — только PostgreSQL auth.* (db/auth_schema.sql)")
+    pdf.bullet("JWT в cookie; claims: name, authorized; app проверяет доступ по claims")
+    pdf.bullet("APP_AUTH_DATABASE_URL обязателен; APP_JWT_SECRET одинаковый у auth и app")
+    pdf.bullet("Nginx маршрутизирует /api/auth/*, /api/me, /api/users, /api/companies -> :8081")
+    pdf.bullet("Go reverse proxy в app удалён; auth не участвует в расчёте смет")
 
-    pdf.subsection_title("Аутентификация (internal/auth)")
-    pdf.bullet("Роли: super_admin, company_admin, user")
-    pdf.bullet("Логин по компании + ФИО или e-mail + пароль")
-    pdf.bullet("JWT в HTTP-only cookie; пароли SHA-256 с солью")
+    pdf.subsection_title("App API (internal/api/server.go)")
+    pdf.bullet("Стройки, объекты, сметы, GSN, settings, estimate-locks, license-sessions")
+    pdf.bullet("GET /api/healthz — состояние очереди, publisher/consumer, outbox, DLQ")
+    pdf.bullet("GET /api/admin/queue-stats — мониторинг RabbitMQ (только админы)")
+    pdf.bullet("GET /api/estimates/{id}/calc-status — polling статуса расчёта")
+    pdf.bullet("Статика web/; админка /admin")
 
-    pdf.subsection_title("Хранилище (internal/store/file_store.go)")
-    pdf.body("Гибридная модель:")
-    pdf.bullet("Пользователи, компании, лицензии, настройки — data/app.json")
-    pdf.bullet(
-        "Стройки, объекты, сметы, строки, очередь — PostgreSQL (app_*, estimate_calc_jobs) "
-        "при APP_DATABASE_URL"
+    pdf.subsection_title("Хранилище (internal/store)")
+    pdf.body("Предметные данные — PostgreSQL app_* при APP_DATABASE_URL:")
+    pdf.bullet("app_constructions, app_construction_objects, app_estimates, app_estimate_lines")
+    pdf.bullet("app_settings, outbox_events, calc_message_receipts (идемпотентность)")
+    pdf.bullet("estimate_calc_jobs — только при APP_QUEUE_MODE=db (legacy fallback)")
+    pdf.body(
+        "data/app.json — legacy snapshot настроек (если нет PG); учётки вынесены в auth.*."
     )
-    pdf.body("Целевая схема описана в db/schema.sql.")
 
     pdf.subsection_title("Модуль ГСН (internal/gsn)")
     pdf.body("Отдельное подключение APP_GSN_DATABASE_URL. Схема — db/gsn_schema.sql:")
     pdf.bullet("gsn.supplements, gsn.hierarchy, gsn.base_info — иерархия ГСН-2022")
     pdf.bullet("fgis_cs.* — наборы и строки ФГИС ЦС (цены по районам)")
-    pdf.bullet("Импорт — CLI import_regions, import_resource_codifier, import_fgis_cs и scripts/")
+    pdf.bullet("Импорт — CLI import_regions, import_resource_codifier, import_fgis_cs")
 
     pdf.subsection_title("Presence (internal/presence)")
-    pdf.bullet("EstimateLocks — эксклюзивная блокировка сметы при редактировании (TTL ~90 с)")
+    pdf.bullet("EstimateLocks — эксклюзивная блокировка сметы (TTL ~90 с)")
     pdf.bullet("LicenseSessions — учёт активных лицензий по подразделам ГСН (in-memory)")
 
     pdf.section_title("Асинхронный расчёт смет")
     pdf.body(
-        "Ключевая идея: источник истины — текстовая строка (raw_text), таблица — проекция, "
-        "очередь — транспорт для worker-ов."
+        "Источник истины — текстовая строка (raw_text). Таблица — проекция. "
+        "Основной транспорт — RabbitMQ (APP_QUEUE_MODE=rabbit)."
     )
     pdf.mono_block(
-        "1. UI -> PUT /api/estimates (parsed lines)\n"
-        "2. API -> app_estimate_lines (calc_status=queued) + estimate_calc_jobs\n"
-        "3. Calc worker -> ClaimEstimateCalcJob (FOR UPDATE SKIP LOCKED)\n"
-        "4. Worker -> gsn.GetRecordDetail(code, fgisSet, district)\n"
-        "5. Worker -> calc_json, calc_status=done\n"
+        "1. UI -> PUT /api/estimates\n"
+        "2. API -> app_estimate_lines (calc_status=queued) + outbox_events (TX)\n"
+        "3. Outbox publisher -> RabbitMQ exchange estimate.calc\n"
+        "4. Queue estimate.calc.main -> calc_worker (RunRabbit)\n"
+        "5. Worker -> GSN (GetRecordDetail) + app.* (calc_json, calc_status=done)\n"
         "6. UI polling GET calc-status -> обогащение таблицы"
     )
-    pdf.bullet("Очередь estimate_calc_jobs: queued | leased | done | failed | dead")
-    pdf.bullet("Lease ~45 с; retry с backoff; после max_attempts -> dead")
-    pdf.bullet("Worker не встроен в server — только calc_worker (1–16 goroutine по настройке)")
-    pdf.bullet("Парсинг объёма из raw_text — на backend (normalizeEstimateItem, quantity_expr.go)")
+    pdf.bullet("Идемпотентность: calc_message_receipts (estimate_id, line_id, revision)")
+    pdf.bullet("Очереди: main, retry (5s/30s/120s), DLQ; ops: purge/replay DLQ")
+    pdf.bullet("Consumer heartbeat в app_settings; healthz: pipelineReady, releaseReady")
+    pdf.bullet("Legacy: APP_QUEUE_MODE=db -> estimate_calc_jobs + FOR UPDATE SKIP LOCKED")
+    pdf.bullet("Worker: таймаут позиции 40 с, max 8 goroutine, GSN pool по числу worker-ов")
+    pdf.bullet("Парсинг объёма из raw_text — backend (quantity_expr.go, normalizeEstimateItem)")
 
     pdf.section_title("Frontend (web/)")
     pdf.body("SPA без фреймворка — vanilla JS + HTML + CSS.")
     pdf.bullet("index.html + app.js — основное приложение")
     pdf.bullet("admin.html + admin.js — админ-панель")
-    pdf.bullet("shared.js, login-draft.js, styles.css, regions.json")
     pdf.body("Разделы UI:")
     pdf.bullet("База -> ГСН-2022 (иерархия, поиск), позиции пользователя")
     pdf.bullet("Стройки -> иерархия Стройка -> Объект -> Смета")
-    pdf.bullet("Настройки (число worker-ов расчёта)")
+    pdf.bullet("Настройки (число worker-ов расчёта, 1–8)")
+    pdf.body("Админка (/admin): пользователи, лицензии, блокировки смет, мониторинг очереди.")
     pdf.body(
-        "Редактор сметы: текстовый режим (формат «Исходные данные») и табличный "
-        "(до расчёта — шифр + объём; после worker — полная строка из calc_json). "
-        "Состояние редактора — sessionStorage."
+        "Редактор сметы: текстовый и табличный режимы; до расчёта — шифр + объём; "
+        "после worker — полная строка из calc_json. Состояние — sessionStorage."
     )
 
     pdf.section_title("Базы данных")
     pdf.mono_block(
+        "APP_AUTH_DATABASE_URL:\n"
+        "  auth.companies, auth.users, auth.company_licenses\n"
         "APP_DATABASE_URL:\n"
-        "  app_constructions, app_construction_objects, app_estimates,\n"
-        "  app_estimate_lines, estimate_calc_jobs, app_settings\n"
+        "  app_*, outbox_events, calc_message_receipts, estimate_calc_jobs (legacy)\n"
         "APP_GSN_DATABASE_URL:\n"
-        "  gsn.supplements, gsn.hierarchy, gsn.base_info, fgis_cs.*"
+        "  gsn.*, fgis_cs.*"
     )
-    pdf.body(
-        "Переменные окружения: APP_ADDR, APP_WEB_DIR, APP_DATA_PATH, "
-        "APP_DATABASE_URL, APP_GSN_DATABASE_URL, APP_JWT_SECRET."
-    )
+
+    pdf.subsection_title("Переменные окружения")
+    pdf.bullet("APP_ADDR (:8090), APP_WEB_DIR, APP_DATA_PATH")
+    pdf.bullet("APP_DATABASE_URL, APP_AUTH_DATABASE_URL, APP_GSN_DATABASE_URL")
+    pdf.bullet("APP_JWT_SECRET (общий для auth и app)")
+    pdf.bullet("APP_QUEUE_MODE=rabbit, APP_RABBITMQ_URL, APP_RABBITMQ_EXCHANGE")
+    pdf.bullet("APP_RABBITMQ_PREFETCH, APP_OUTBOX_PUBLISH_BATCH, APP_OUTBOX_PUBLISH_INTERVAL")
 
     pdf.section_title("Вспомогательные инструменты")
-    pdf.bullet("scripts/import_gsn_*.py — импорт ГСН в PostgreSQL")
-    pdf.bullet("prep_gsn_books.py — подготовка книг ГСН")
-    pdf.bullet("tools/ — тестовые и отладочные скрипты")
-    pdf.bullet("backup-sources.ps1 — резервные копии исходников")
+    pdf.bullet("scripts/restart-{auth-server,calc-worker,nginx}.bat")
+    pdf.bullet("scripts/{smoke,load}-rabbit-calc.ps1, rabbit-queue-status.bat")
+    pdf.bullet("scripts/{purge,replay}-rabbit-dlq.bat, rollback-queue-db.bat")
+    pdf.bullet("scripts/import_gsn_*.py, backup-sources.ps1")
 
-    pdf.section_title("Текущее состояние и эволюция")
-    pdf.bullet("Сделано: PG для смет и очереди; отдельный calc worker; GSN-модуль; JWT; мультитенантность")
-    pdf.bullet("Частично: users/companies в JSON (app.json), схема PG есть в db/schema.sql")
-    pdf.bullet("Запланировано: полный переход store на PG; вынос auth; outbox/events; granular permissions")
+    pdf.section_title("Текущее состояние")
+    pdf.bullet("Реализовано: вынос auth в отдельный сервис + auth.* PG + nginx")
+    pdf.bullet("Реализовано: RabbitMQ + outbox + идемпотентность + мониторинг в админке")
+    pdf.bullet("Реализовано: calc worker отдельно; защита от зависания (таймаут, cap 8)")
     pdf.body(
-        "Архитектура MVP: один Go-бинарник + worker-процесс + статический frontend. "
-        "Очередь — таблица PostgreSQL с FOR UPDATE SKIP LOCKED, без message broker."
+        "Следующие шаги (опционально): оптимизация listRecordResources (N+1), "
+        "алерты при росте DLQ, Prometheus/Grafana поверх healthz."
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

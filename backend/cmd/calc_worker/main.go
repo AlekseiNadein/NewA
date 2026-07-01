@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"nav-saas-mvp/backend/internal/calcworker"
@@ -17,6 +19,10 @@ func main() {
 	dataPath := env("APP_DATA_PATH", filepath.Join("data", "app.json"))
 	treeDatabaseURL := env("APP_DATABASE_URL", "")
 	gsnDatabaseURL := env("APP_GSN_DATABASE_URL", treeDatabaseURL)
+	queueMode := strings.ToLower(strings.TrimSpace(env("APP_QUEUE_MODE", "db")))
+	rabbitURL := env("APP_RABBITMQ_URL", "")
+	rabbitExchange := env("APP_RABBITMQ_EXCHANGE", "estimate.calc")
+	rabbitPrefetch := calcworker.NormalizeRabbitPrefetch(envInt("APP_RABBITMQ_PREFETCH", 4))
 
 	fileStore, err := store.NewFileStore(dataPath, treeDatabaseURL)
 	if err != nil {
@@ -38,13 +44,45 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	slog.Info("starting estimate calc worker service", "dataPath", dataPath)
+	slog.Info("starting estimate calc worker service", "dataPath", dataPath, "queueMode", queueMode, "rabbitPrefetch", rabbitPrefetch)
+	if queueMode == "rabbit" {
+		worker := calcworker.New(fileStore, gsnService)
+		if strings.TrimSpace(rabbitURL) == "" {
+			slog.Error("APP_RABBITMQ_URL is required in rabbit mode")
+			os.Exit(1)
+		}
+		gsnService.SetMaxOpenConns(rabbitPrefetch + 4)
+		if err := worker.RunRabbit(ctx, calcworker.RabbitConfig{
+			URL:        rabbitURL,
+			Exchange:   rabbitExchange,
+			Prefetch:   rabbitPrefetch,
+		}); err != nil {
+			slog.Error("rabbit calc worker stopped", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if queueMode == "db" {
+		slog.Warn("calc worker uses legacy DB queue; set APP_QUEUE_MODE=rabbit for production")
+	}
 	calcworker.NewManager(fileStore, gsnService).Run(ctx)
 }
 
 func env(key string, fallback string) string {
 	value := os.Getenv(key)
 	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
 		return fallback
 	}
 	return value

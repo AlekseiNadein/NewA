@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"nav-saas-mvp/backend/internal/api"
 	"nav-saas-mvp/backend/internal/auth"
 	"nav-saas-mvp/backend/internal/authstore"
 	"nav-saas-mvp/backend/internal/gsn"
+	"nav-saas-mvp/backend/internal/outbox"
 	"nav-saas-mvp/backend/internal/store"
 )
 
@@ -24,6 +27,11 @@ func main() {
 	treeDatabaseURL := env("APP_DATABASE_URL", "")
 	authDatabaseURL := env("APP_AUTH_DATABASE_URL", treeDatabaseURL)
 	gsnDatabaseURL := env("APP_GSN_DATABASE_URL", treeDatabaseURL)
+	queueMode := strings.ToLower(strings.TrimSpace(env("APP_QUEUE_MODE", "db")))
+	rabbitURL := env("APP_RABBITMQ_URL", "")
+	rabbitExchange := env("APP_RABBITMQ_EXCHANGE", "estimate.calc")
+	outboxBatch := envInt("APP_OUTBOX_PUBLISH_BATCH", 100)
+	outboxInterval := envDuration("APP_OUTBOX_PUBLISH_INTERVAL", time.Second)
 
 	if strings.TrimSpace(authDatabaseURL) == "" {
 		slog.Error("APP_AUTH_DATABASE_URL is required")
@@ -65,8 +73,21 @@ func main() {
 	}
 
 	server := api.NewServer(fileStore, authStore, authService, gsnService, webDir)
+	if (queueMode == "dual" || queueMode == "rabbit") && strings.TrimSpace(rabbitURL) != "" {
+		go func() {
+			slog.Info("starting outbox publisher", "exchange", rabbitExchange, "batch", outboxBatch, "interval", outboxInterval.String())
+			if err := outbox.RunPublisher(ctx, fileStore, outbox.PublisherConfig{
+				RabbitURL: rabbitURL,
+				Exchange:  rabbitExchange,
+				BatchSize: outboxBatch,
+				Interval:  outboxInterval,
+			}); err != nil {
+				slog.Error("outbox publisher stopped", "error", err)
+			}
+		}()
+	}
 
-	slog.Info("starting SaaS MVP server", "addr", addr, "webDir", webDir, "dataPath", dataPath)
+	slog.Info("starting SaaS MVP server", "addr", addr, "webDir", webDir, "dataPath", dataPath, "queueMode", queueMode)
 	if err := http.ListenAndServe(addr, server.Routes()); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
@@ -89,4 +110,28 @@ func redactDatabaseURL(url string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }

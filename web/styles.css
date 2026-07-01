@@ -1961,6 +1961,51 @@ p {
   color: var(--text);
 }
 
+.admin-queue-stats {
+  margin-bottom: 1.25rem;
+}
+
+.admin-queue-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.75rem;
+}
+
+.admin-queue-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, var(--text) 6%);
+}
+
+.admin-queue-label {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.admin-queue-sub {
+  font-size: 0.75rem;
+}
+
+.admin-queue-ok {
+  color: #1a7f37;
+}
+
+.admin-queue-warn {
+  color: #b54708;
+}
+
+.admin-queue-alerts {
+  margin: 1rem 0 0;
+}
+
+.admin-table--queue {
+  max-width: 36rem;
+}
+
 .license-block {
   margin-top: 1rem;
   padding: 1.25rem 1rem;

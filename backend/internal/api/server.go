@@ -51,8 +51,10 @@ func NewServer(store *store.FileStore, authStore *authstore.Store, authService *
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/healthz", s.handleHealthz)
 	mux.Handle("/api/admin/estimate-locks", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLocks))))
 	mux.Handle("/api/admin/estimate-locks/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLockByID))))
+	mux.Handle("/api/admin/queue-stats", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminQueueStats))))
 	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))
 	mux.Handle("/api/constructions/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructionByID))))
 	mux.Handle("/api/objects", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjects))))
@@ -77,6 +79,22 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/", s.static)
 
 	return s.withCommonHeaders(mux)
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, buildQueueHealth(r.Context(), s.store, s.gsn != nil && s.gsn.Configured()))
+}
+
+func (s *Server) handleAdminQueueStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, buildQueueHealth(r.Context(), s.store, s.gsn != nil && s.gsn.Configured()))
 }
 
 func (s *Server) handleConstructions(w http.ResponseWriter, r *http.Request) {

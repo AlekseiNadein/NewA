@@ -2997,7 +2997,7 @@ function estimateLineCalcPricingReady(item) {
 
 function estimateCalcTerminalStatus(status) {
   const value = String(status || "").trim();
-  return value === "done" || value === "failed" || value === "dead" || value === "leased";
+  return value === "done" || value === "failed" || value === "dead";
 }
 
 function estimateCalcProgressDisplayErrors(target, displayed) {

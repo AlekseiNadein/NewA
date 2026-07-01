@@ -130,6 +130,74 @@ calc worker service (отдельный процесс)
 - Retry с backoff; после `max_attempts` → `dead`
 - Задачи создаются для GSN-позиций (`source=gsn`, непустой `code`) при `upsertEstimateDB`
 
+### RabbitMQ очередь (2026-06-30)
+
+Режим: `APP_QUEUE_MODE=rabbit` (текущий прод-контур).
+
+Идемпотентность (фаза 3):
+- Таблица `calc_message_receipts` (`estimate_id`, `line_id`, `revision`).
+- Consumer перед обработкой вызывает `ShouldSkipCalcDelivery` (receipt / stale revision / already done).
+- Receipt пишется в той же транзакции, что и `calc_status=done`.
+
+Поток:
+
+```text
+PUT /api/estimates
+  → outbox_events (в той же транзакции)
+  → outbox publisher → RabbitMQ exchange estimate.calc
+  → queue estimate.calc.main
+  → calc_worker (RunRabbit) → gsn.GetRecordDetail → app_estimate_lines.calc_*
+```
+
+Очереди: `estimate.calc.main`, `estimate.calc.retry.{5s,30s,120s}`, `estimate.calc.dlq`.
+
+**Health / метрики:** `GET /api/healthz` — mode, publisher/consumer status, counters, outbox backlog, queue depths, alerts, `pipelineReady`, `releaseReady`, блок `dlq` (current, growth10m, growthAlert), `history` (снимки очереди).
+
+**Админка:** раздел **«Очередь»** (`/admin` → «Очередь») — `GET /api/admin/queue-stats` (тот же payload, только для админов): DLQ/main/outbox, pipeline/release ready, publisher/consumer, алерты, таблица истории. Автообновление каждые 30 с. Кэш: `admin.js?v=20260630a`.
+
+**История DLQ:** ключ `app_settings.queue_stats_history` — до 120 точек, не чаще 1 раза в минуту (при опросе healthz / admin queue-stats). Рост DLQ за 10 мин → алерт `dlqGrowthHigh` при дельте ≥ 50.
+
+**Consumer heartbeat:** отдельный процесс `calc_worker` пишет `app_settings.rabbit_consumer_heartbeat`; healthz считает consumer connected, если возраст ≤ 45 с (in-process counters в API-процессе не используются).
+
+**Операции:**
+
+| Команда | Назначение |
+|---------|------------|
+| `scripts/rabbit-queue-status.bat` | depths + healthz snapshot |
+| `scripts/replay-rabbit-dlq.bat [limit]` | replay из DLQ в main (attempt=1) |
+| `scripts/purge-rabbit-dlq.bat` | очистка DLQ (poison messages, без replay) |
+| `scripts/wait-release-ready.ps1` | ожидание `releaseReady=true` в healthz |
+| `scripts/smoke-rabbit-calc.ps1` | smoke-тест API → Rabbit → calc-status |
+| `scripts/load-rabbit-calc.ps1 [N]` | лёгкий нагрузочный прогон (N PUT) |
+| `scripts/rollback-queue-db.bat` | откат на legacy DB queue |
+
+**Откат:** `APP_QUEUE_MODE=db` + `run.bat` (legacy DB worker).
+
+**Алерты в healthz:** `publisherDisconnected`, `consumerDisconnected`, `outboxBacklogHigh` (>100), `dlqNotEmpty`, `dlqGrowthHigh` (рост DLQ ≥50 за 10 мин).
+
+**releaseReady:** `pipelineReady && mode=rabbit && !dlqNotEmpty` — готовность к релизу при пустой DLQ.
+
+**Tuning (prod):**
+
+| Env | Рекомендация | Назначение |
+|-----|--------------|------------|
+| `APP_QUEUE_MODE` | `rabbit` | основной транспорт |
+| `APP_RABBITMQ_PREFETCH` | `4` (1–32) | параллелизм consumer |
+| `APP_OUTBOX_PUBLISH_BATCH` | `100` | batch publisher |
+| `APP_OUTBOX_PUBLISH_INTERVAL` | `1s` | частота publisher |
+
+**Release checklist:**
+
+1. `GET /api/healthz` → `pipelineReady=true`, `queue.mode=rabbit`.
+2. `scripts/smoke-rabbit-calc.ps1` → транспорт OK.
+3. `scripts/load-rabbit-calc.ps1 5` → publisher/consumer растут, `pipelineReady=true`.
+4. `scripts/rabbit-queue-status.bat` → `main` не копится, `dlq` под контролем.
+5. После релиза: мониторить `outboxPending`, `depths`, `consumer.duplicates`.
+
+**Откат одной командой:** `scripts/rollback-queue-db.bat` (переключает `APP_QUEUE_MODE=db` и перезапускает стек).
+
+**Legacy:** `estimate_calc_jobs` + DB Manager используются только при `APP_QUEUE_MODE=db` (fallback).
+
 ### Строки `app_estimate_lines` (расширение)
 
 `raw_text`, `parsed_json`, `calc_json`, `calc_status`, `calc_error`, `revision`, `calculated_at`
@@ -275,12 +343,15 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 ```
 web/app.js, web/index.html, web/styles.css
 web/admin.{html,js}
-backend/internal/{api,store,gsn,presence,calcworker}/
+backend/internal/{api,store,gsn,presence,calcworker,outbox,queue}/
+backend/internal/api/queue_health.go
 backend/internal/store/{quantity_expr,source_data_fields}*.go
-backend/cmd/{server,auth_server,calc_worker,migrate_auth}/
+backend/cmd/{server,auth_server,calc_worker,migrate_auth,purge_dlq,replay_dlq}/
 db/schema.sql, db/auth_schema.sql, db/gsn_schema.sql
 run.bat, run-auth.bat, run-calc-worker.bat
-scripts/restart-{auth-server,calc-worker}.bat
+scripts/restart-{auth-server,calc-worker,nginx}.bat
+scripts/{purge,replay}-rabbit-dlq.bat, rabbit-queue-status.bat, smoke-rabbit-calc.ps1, load-rabbit-calc.ps1, rollback-queue-db.bat, wait-release-ready.ps1
+RABBITMQ_MIGRATION_PLAN.md
 ```
 
 ## Админка (`/admin`)
@@ -290,7 +361,9 @@ scripts/restart-{auth-server,calc-worker}.bat
 | Раздел | Содержание |
 |--------|------------|
 | **Пользователи** | CRUD |
+| **Лицензии** | Квоты подразделов базы (суперадмин) |
 | **Сметы** | Активные lock-сессии, принудительное завершение |
+| **Очередь** | RabbitMQ: DLQ, рост за 10 мин, depths, pipeline/release, publisher/consumer, история (`/api/admin/queue-stats`) |
 
 **Блокировки смет** (`presence.EstimateLocks`, TTL 90 с): `PUT/DELETE /api/estimates/{id}/lock`.
 
@@ -307,9 +380,74 @@ scripts/restart-{auth-server,calc-worker}.bat
 - `recalculateEstimatePricing` в `web/app.js` оставлена, но **не вызывается**; расчёт только через worker + polling.
 - **Логин / sessionStorage:** битые `nav_editor_estimates` / `nav_editor_buffer` в `sessionStorage` роняли `app.js` до регистрации submit — кнопка «Войти» не работала. Чинится автоматически (`repairEditorSessionStorage` до `state`). Правило: `.cursor/rules/web-frontend.mdc`.
 - **После логина** не вызывать `loadApp()` — только `bootstrapAppData()`; иначе гонка с начальным `void loadApp()`.
+- **RabbitMQ:** без запущенного брокера (`APP_RABBITMQ_URL`) publisher disconnected, задачи копятся в `outbox_events`. DLQ растёт на poison messages (битые шифры ГСН) — `scripts/purge-rabbit-dlq.bat`, мониторинг в админке «Очередь».
 - **Комбо «Сметные цены и индексы»:** не делать полный `mountEditorContent` при polling calc-status и после `loadFGISSets` — только обновление таблицы/опций селекта; remount откладывать при фокусе в шапке.
 
-## Текущая сессия (2026-06-30)
+## Текущая сессия (2026-06-30, RabbitMQ + админка DLQ)
+
+Контекст: миграция очереди расчёта на RabbitMQ (фазы 1–4), мониторинг DLQ в админке. План: `RABBITMQ_MIGRATION_PLAN.md`.
+
+### RabbitMQ: реализовано
+
+| Фаза | Содержание |
+|------|------------|
+| **1** | `APP_QUEUE_MODE=rabbit` — без записи в `estimate_calc_jobs`; outbox в той же TX; permanent errors → DLQ без retry |
+| **2** | Outbox publisher + Rabbit consumer; метрики; `GET /api/healthz`; ops-скрипты; consumer heartbeat в `app_settings` |
+| **3** | `calc_message_receipts` — идемпотентность по `(estimate_id, line_id, revision)` |
+| **4** | `APP_RABBITMQ_PREFETCH=4`; `pipelineReady` / `releaseReady`; purge/replay DLQ; нагрузочный smoke |
+
+**Поток (prod):** `PUT /api/estimates` → `outbox_events` → publisher → `estimate.calc` → `estimate.calc.main` → `calc_worker` (RunRabbit) → GSN → `app_estimate_lines`.
+
+**Ключевые пути:** `backend/internal/outbox/`, `backend/internal/calcworker/rabbit.go`, `backend/internal/queue/rabbit_inspect.go`, `backend/internal/api/queue_health.go`, `backend/cmd/purge_dlq`, `backend/cmd/replay_dlq`.
+
+### Админка: мониторинг очереди
+
+- Раздел **«Очередь»** в `/admin` — карточки статуса + таблица истории.
+- API: `GET /api/admin/queue-stats` (admin only).
+- История: `app_settings.queue_stats_history` (120 точек, интервал ≥1 мин).
+- Алерт роста DLQ: `dlqGrowthHigh` при +50 за 10 мин.
+
+### DLQ: purge vs replay
+
+| Действие | Когда | Скрипт |
+|----------|-------|--------|
+| **Purge** | Poison messages (`record not found`, stale revision, хвост миграции) | `scripts/purge-rabbit-dlq.bat` |
+| **Replay** | Временные сбои после исправления инфраструктуры | `scripts/replay-rabbit-dlq.bat [limit]` |
+
+### Проверено
+
+- `GET /api/healthz` → `pipelineReady=true`, `releaseReady=true`, `dlq.current=0` после purge.
+- Админский endpoint отдаёт тот же payload с `history`.
+- `run.bat`: `APP_QUEUE_MODE=rabbit`, RabbitMQ URL, prefetch, outbox batch/interval.
+
+### Env (очередь, `run.bat`)
+
+| Переменная | Значение |
+|------------|----------|
+| `APP_QUEUE_MODE` | `rabbit` |
+| `APP_RABBITMQ_URL` | `amqp://guest:guest@127.0.0.1:5672/` |
+| `APP_RABBITMQ_EXCHANGE` | `estimate.calc` |
+| `APP_RABBITMQ_PREFETCH` | `4` |
+| `APP_OUTBOX_PUBLISH_BATCH` | `100` |
+| `APP_OUTBOX_PUBLISH_INTERVAL` | `1s` |
+
+### Откат
+
+`scripts/rollback-queue-db.bat` или `APP_QUEUE_MODE=db` + `run.bat` — legacy `estimate_calc_jobs` + DB worker.
+
+### Следующие шаги (опционально)
+
+1. Алерт/уведомление при `dlqGrowthHigh` (webhook, не только UI).
+2. Grafana/Prometheus поверх healthz (если понадобится вне админки).
+3. Коммит набора RabbitMQ + админка DLQ в git.
+
+### Незакоммиченные изменения (сессия)
+
+`run.bat`, `go.mod`, `go.sum`, `backend/internal/{api,store,calcworker,outbox,queue}/`, `backend/cmd/{server,calc_worker,purge_dlq,replay_dlq}/`, `web/admin.{html,js}`, `web/styles.css`, `scripts/*rabbit*`, `RABBITMQ_MIGRATION_PLAN.md`, `HANDOFF.md`
+
+---
+
+## Текущая сессия (2026-06-30, auth)
 
 Контекст: вынос auth в отдельный сервис + PG ([транскрипт сессии](38c90377-ea92-47e6-8587-fe20b20621b9)) и последующая стабилизация calc worker.
 

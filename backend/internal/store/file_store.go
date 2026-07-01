@@ -30,6 +30,7 @@ type FileStore struct {
 	mu            sync.RWMutex
 	path          string
 	treeDB        *pgxpool.Pool
+	queueMode     string
 	constructions map[string]domain.Construction
 	objects       map[string]domain.ConstructionObject
 	estimates     map[string]domain.Estimate
@@ -72,8 +73,10 @@ const (
 )
 
 func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
+	queueMode := normalizeQueueMode(os.Getenv("APP_QUEUE_MODE"))
 	store := &FileStore{
 		path:          path,
+		queueMode:     queueMode,
 		constructions: map[string]domain.Construction{},
 		objects:       map[string]domain.ConstructionObject{},
 		estimates:     map[string]domain.Estimate{},
@@ -112,6 +115,21 @@ func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 	}
 
 	return store, nil
+}
+
+func normalizeQueueMode(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "rabbit":
+		return "rabbit"
+	case "dual":
+		return "dual"
+	default:
+		return "db"
+	}
+}
+
+func (s *FileStore) QueueMode() string {
+	return s.queueMode
 }
 
 func (s *FileStore) ListConstructions(companyID string, includeAll bool) []domain.Construction {
@@ -803,6 +821,32 @@ CREATE INDEX IF NOT EXISTS idx_estimate_calc_jobs_ready
     WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_estimate_calc_jobs_estimate
     ON estimate_calc_jobs(estimate_id, line_id, revision);
+
+CREATE TABLE IF NOT EXISTS outbox_events (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    routing_key TEXT NOT NULL,
+    payload JSONB NOT NULL,
+    headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+    published_at TIMESTAMPTZ,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_unpublished
+    ON outbox_events(created_at)
+    WHERE published_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS calc_message_receipts (
+    id TEXT PRIMARY KEY,
+    estimate_id TEXT NOT NULL,
+    line_id TEXT NOT NULL,
+    revision BIGINT NOT NULL,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (estimate_id, line_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_calc_message_receipts_estimate
+    ON calc_message_receipts(estimate_id, line_id, revision);
 `
 
 	_, err := s.treeDB.Exec(ctx, sql)
@@ -1253,7 +1297,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 			return err
 		}
 		if shouldEnqueueEstimateLineCalc(line) {
-			if err := enqueueEstimateLineCalcJobTx(ctx, tx, item, line); err != nil {
+			if err := enqueueEstimateLineCalcJobTx(ctx, tx, item, line, s.queueMode); err != nil {
 				return err
 			}
 		}
@@ -1504,7 +1548,17 @@ WHERE estimate_id = $1 AND id = $2 AND revision = $3
 		status = "failed"
 		lastError = "stale line revision"
 	}
-	if _, err := tx.Exec(ctx, `
+	if status == "done" {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO calc_message_receipts (id, estimate_id, line_id, revision)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (estimate_id, line_id, revision) DO NOTHING
+`, job.ID, job.EstimateID, job.LineID, job.Revision); err != nil {
+			return err
+		}
+	}
+	if s.queueMode != "rabbit" {
+		if _, err := tx.Exec(ctx, `
 UPDATE estimate_calc_jobs
 SET status = $2,
     last_error = $3,
@@ -1513,7 +1567,8 @@ SET status = $2,
     updated_at = now()
 WHERE id = $1
 `, job.ID, status, lastError); err != nil {
-		return err
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -1544,7 +1599,8 @@ func (s *FileStore) FailEstimateCalcJob(ctx context.Context, job EstimateCalcJob
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx, `
+	if s.queueMode != "rabbit" {
+		if _, err := tx.Exec(ctx, `
 UPDATE estimate_calc_jobs
 SET status = $2,
     run_after = $3,
@@ -1554,7 +1610,8 @@ SET status = $2,
     updated_at = now()
 WHERE id = $1
 `, job.ID, nextStatus, time.Now().UTC().Add(backoff), message); err != nil {
-		return err
+			return err
+		}
 	}
 	lineStatus := "failed"
 	if nextStatus == "dead" {
@@ -1604,16 +1661,19 @@ WHERE l.estimate_id = $1`
 	return items, rows.Err()
 }
 
-func enqueueEstimateLineCalcJobTx(ctx context.Context, tx pgx.Tx, estimate domain.Estimate, line domain.EstimateItem) error {
+func enqueueEstimateLineCalcJobTx(ctx context.Context, tx pgx.Tx, estimate domain.Estimate, line domain.EstimateItem, queueMode string) error {
+	code := estimateRecordCode(line)
+	jobID := newID("calcjob")
 	payload, err := json.Marshal(map[string]any{
-		"code":      estimateRecordCode(line),
+		"code":      code,
 		"fgisSetId": estimate.FgisSetID,
 		"district":  estimate.District,
 	})
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `
+	if queueMode != "rabbit" {
+		_, err = tx.Exec(ctx, `
 INSERT INTO estimate_calc_jobs (id, company_id, estimate_id, line_id, revision, status, priority, payload)
 VALUES ($1, $2, $3, $4, $5, 'queued', 10, $6)
 ON CONFLICT (estimate_id, line_id, revision) DO UPDATE
@@ -1625,7 +1685,279 @@ SET status = CASE
     run_after = now(),
     last_error = '',
     updated_at = now()
-`, newID("calcjob"), estimate.CompanyID, estimate.ID, line.ID, line.Revision, payload)
+`, jobID, estimate.CompanyID, estimate.ID, line.ID, line.Revision, payload)
+		if err != nil {
+			return err
+		}
+	}
+	if queueMode != "dual" && queueMode != "rabbit" {
+		return nil
+	}
+	eventPayload, err := json.Marshal(map[string]any{
+		"messageVersion": 1,
+		"jobId":          jobID,
+		"companyId":      estimate.CompanyID,
+		"estimateId":     estimate.ID,
+		"lineId":         line.ID,
+		"revision":       line.Revision,
+		"code":           code,
+		"fgisSetId":      estimate.FgisSetID,
+		"district":       estimate.District,
+		"attempt":        1,
+		"maxAttempts":    5,
+		"createdAt":      time.Now().UTC(),
+	})
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO outbox_events (id, topic, routing_key, payload)
+VALUES ($1, $2, $3, $4)
+`, newID("outbox"), "estimate.calc", "estimate.calc", eventPayload)
+	return err
+}
+
+type OutboxEvent struct {
+	ID         string
+	RoutingKey string
+	Payload    []byte
+}
+
+func (s *FileStore) FetchPendingOutboxEvents(ctx context.Context, limit int) ([]OutboxEvent, error) {
+	if s.treeDB == nil {
+		return []OutboxEvent{}, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.treeDB.Query(ctx, `
+SELECT id, routing_key, payload::text
+FROM outbox_events
+WHERE published_at IS NULL
+ORDER BY created_at
+LIMIT $1
+`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]OutboxEvent, 0, limit)
+	for rows.Next() {
+		var item OutboxEvent
+		var payload string
+		if err := rows.Scan(&item.ID, &item.RoutingKey, &payload); err != nil {
+			return nil, err
+		}
+		item.Payload = []byte(payload)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *FileStore) ShouldSkipCalcDelivery(ctx context.Context, job EstimateCalcJob) (bool, string) {
+	if s.treeDB == nil {
+		return false, ""
+	}
+	var receiptCount int
+	if err := s.treeDB.QueryRow(ctx, `
+SELECT count(*)
+FROM calc_message_receipts
+WHERE estimate_id = $1 AND line_id = $2 AND revision = $3
+`, job.EstimateID, job.LineID, job.Revision).Scan(&receiptCount); err != nil {
+		return false, ""
+	}
+	var lineRevision int64
+	var lineStatus string
+	err := s.treeDB.QueryRow(ctx, `
+SELECT revision, calc_status
+FROM app_estimate_lines
+WHERE estimate_id = $1 AND id = $2
+`, job.EstimateID, job.LineID).Scan(&lineRevision, &lineStatus)
+	if err != nil {
+		return calcDeliverySkipReason(receiptCount, 0, "", job.Revision)
+	}
+	return calcDeliverySkipReason(receiptCount, lineRevision, lineStatus, job.Revision)
+}
+
+func calcDeliverySkipReason(receiptCount int, lineRevision int64, lineStatus string, jobRevision int64) (bool, string) {
+	if receiptCount > 0 {
+		return true, "receipt exists"
+	}
+	if lineRevision != jobRevision {
+		return true, "stale line revision"
+	}
+	if lineStatus == "done" {
+		return true, "line already done"
+	}
+	return false, ""
+}
+
+func (s *FileStore) CountPendingOutboxEvents(ctx context.Context) (int64, error) {
+	if s.treeDB == nil {
+		return 0, nil
+	}
+	var count int64
+	err := s.treeDB.QueryRow(ctx, `
+SELECT count(*)
+FROM outbox_events
+WHERE published_at IS NULL
+`).Scan(&count)
+	return count, err
+}
+
+type QueueStatsHistoryPoint struct {
+	At            time.Time `json:"at"`
+	DLQ           int       `json:"dlq"`
+	Main          int       `json:"main"`
+	OutboxPending int64     `json:"outboxPending"`
+}
+
+const (
+	queueStatsHistoryKey   = "queue_stats_history"
+	maxQueueStatsHistory   = 120
+	queueStatsMinInterval  = time.Minute
+)
+
+func (s *FileStore) RecordQueueStatsSample(ctx context.Context, dlq, main int, outboxPending int64) ([]QueueStatsHistoryPoint, error) {
+	if s.treeDB == nil {
+		return []QueueStatsHistoryPoint{}, nil
+	}
+	history, err := s.loadQueueStatsHistory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	if len(history) > 0 {
+		last := history[len(history)-1]
+		if now.Sub(last.At) < queueStatsMinInterval {
+			return history, nil
+		}
+	}
+	history = append(history, QueueStatsHistoryPoint{
+		At:            now,
+		DLQ:           dlq,
+		Main:          main,
+		OutboxPending: outboxPending,
+	})
+	if len(history) > maxQueueStatsHistory {
+		history = history[len(history)-maxQueueStatsHistory:]
+	}
+	if err := s.saveQueueStatsHistory(ctx, history); err != nil {
+		return history, err
+	}
+	return history, nil
+}
+
+func (s *FileStore) QueueDLQDelta(ctx context.Context, window time.Duration, currentDLQ int) (int, bool) {
+	if s.treeDB == nil || window <= 0 {
+		return 0, false
+	}
+	history, err := s.loadQueueStatsHistory(ctx)
+	if err != nil || len(history) == 0 {
+		return 0, false
+	}
+	cutoff := time.Now().UTC().Add(-window)
+	var baseline *QueueStatsHistoryPoint
+	for i := range history {
+		point := history[i]
+		if point.At.After(cutoff) {
+			break
+		}
+		baseline = &history[i]
+	}
+	if baseline == nil {
+		baseline = &history[0]
+	}
+	return currentDLQ - baseline.DLQ, true
+}
+
+func (s *FileStore) loadQueueStatsHistory(ctx context.Context) ([]QueueStatsHistoryPoint, error) {
+	var raw string
+	err := s.treeDB.QueryRow(ctx, `SELECT value FROM app_settings WHERE key = $1`, queueStatsHistoryKey).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return []QueueStatsHistoryPoint{}, nil
+		}
+		return nil, err
+	}
+	var history []QueueStatsHistoryPoint
+	if err := json.Unmarshal([]byte(raw), &history); err != nil {
+		return []QueueStatsHistoryPoint{}, nil
+	}
+	return history, nil
+}
+
+func (s *FileStore) saveQueueStatsHistory(ctx context.Context, history []QueueStatsHistoryPoint) error {
+	payload, err := json.Marshal(history)
+	if err != nil {
+		return err
+	}
+	_, err = s.treeDB.Exec(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`, queueStatsHistoryKey, string(payload))
+	return err
+}
+
+func (s *FileStore) TouchQueueConsumerHeartbeat(ctx context.Context) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	_, err := s.treeDB.Exec(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ('rabbit_consumer_heartbeat', $1, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`, strconv.FormatInt(time.Now().UTC().Unix(), 10))
+	return err
+}
+
+func (s *FileStore) QueueConsumerHeartbeatAge(ctx context.Context) (time.Duration, bool) {
+	if s.treeDB == nil {
+		return 0, false
+	}
+	var value string
+	err := s.treeDB.QueryRow(ctx, `
+SELECT value FROM app_settings WHERE key = 'rabbit_consumer_heartbeat'
+`).Scan(&value)
+	if err != nil {
+		return 0, false
+	}
+	ts, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || ts <= 0 {
+		return 0, false
+	}
+	beat := time.Unix(ts, 0).UTC()
+	return time.Since(beat), true
+}
+
+func (s *FileStore) MarkOutboxEventPublished(ctx context.Context, id string) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	_, err := s.treeDB.Exec(ctx, `
+UPDATE outbox_events
+SET published_at = now(),
+    last_error = ''
+WHERE id = $1
+`, id)
+	return err
+}
+
+func (s *FileStore) MarkOutboxEventFailed(ctx context.Context, id string, cause error) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	message := ""
+	if cause != nil {
+		message = cause.Error()
+	}
+	_, err := s.treeDB.Exec(ctx, `
+UPDATE outbox_events
+SET attempts = attempts + 1,
+    last_error = $2
+WHERE id = $1
+`, id, message)
 	return err
 }
 
