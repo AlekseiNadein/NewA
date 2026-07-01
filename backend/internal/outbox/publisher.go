@@ -9,6 +9,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
 
@@ -111,7 +112,9 @@ func runPublisherSession(ctx context.Context, fileStore *store.FileStore, cfg Pu
 	publisherConnected.Store(true)
 	publisherLastError.Store("")
 	publisherLastSuccessUnix.Store(time.Now().UTC().Unix())
+	observability.SetRabbitConnected("publisher", true)
 	defer publisherConnected.Store(false)
+	defer observability.SetRabbitConnected("publisher", false)
 	defer conn.Close()
 	ch, err := conn.Channel()
 	if err != nil {
@@ -194,6 +197,7 @@ func publishBatch(ctx context.Context, fileStore *store.FileStore, ch *amqp.Chan
 		})
 		if err != nil {
 			publisherFailed.Add(1)
+			observability.RecordOutboxFailed()
 			_ = fileStore.MarkOutboxEventFailed(ctx, evt.ID, err)
 			continue
 		}
@@ -203,6 +207,7 @@ func publishBatch(ctx context.Context, fileStore *store.FileStore, ch *amqp.Chan
 		case confirm := <-ackCh:
 			if !confirm.Ack {
 				publisherFailed.Add(1)
+				observability.RecordOutboxFailed()
 				_ = fileStore.MarkOutboxEventFailed(ctx, evt.ID, errors.New("rabbit publish was not acknowledged"))
 				continue
 			}
@@ -211,6 +216,7 @@ func publishBatch(ctx context.Context, fileStore *store.FileStore, ch *amqp.Chan
 			return err
 		}
 		publisherPublished.Add(1)
+		observability.RecordOutboxPublished()
 		publisherLastSuccessUnix.Store(time.Now().UTC().Unix())
 	}
 	return nil

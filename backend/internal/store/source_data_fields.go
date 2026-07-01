@@ -25,3 +25,12 @@ func quantityRawFromSourceDataLine(rawText string) string {
 func quantityFromSourceDataLine(rawText string) (float64, error) {
 	return ParseSourceDataQuantity(quantityRawFromSourceDataLine(rawText))
 }
+
+// ResolveEstimateLineQuantity returns the line volume used for pricing.
+// Stored quantity takes precedence; otherwise the second field of rawText is parsed.
+func ResolveEstimateLineQuantity(stored float64, rawText string) (float64, error) {
+	if stored > 0 {
+		return stored, nil
+	}
+	return quantityFromSourceDataLine(rawText)
+}

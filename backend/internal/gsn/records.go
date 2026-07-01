@@ -60,32 +60,39 @@ func parseNormListRefs(normList string) []string {
 }
 
 func (s *Service) lookupRecordDetail(ctx context.Context, code string) (RecordDetail, string, string, error) {
-	var detail RecordDetail
-	var recordKind, costIndicators string
-	err := s.db.QueryRowContext(ctx, `
+	for _, candidate := range recordLookupCandidates(code) {
+		var detail RecordDetail
+		var recordKind, costIndicators string
+		err := s.db.QueryRowContext(ctx, `
 		SELECT code, original_code, name, unit, record_kind, cost_indicators
 		FROM gsn.records
 		WHERE code = $1
-	`, code).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
-	if err == nil {
-		return detail, recordKind, costIndicators, nil
-	}
-	if err != sql.ErrNoRows {
-		return RecordDetail{}, "", "", fmt.Errorf("query gsn record: %w", err)
+	`, candidate).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
+		if err == nil {
+			return detail, recordKind, costIndicators, nil
+		}
+		if err != sql.ErrNoRows {
+			return RecordDetail{}, "", "", fmt.Errorf("query gsn record: %w", err)
+		}
 	}
 
-	err = s.db.QueryRowContext(ctx, `
+	for _, candidate := range recordLookupCandidates(code) {
+		var detail RecordDetail
+		var recordKind, costIndicators string
+		err := s.db.QueryRowContext(ctx, `
 		SELECT code, original_code, name, unit, record_kind, cost_indicators
 		FROM gsn.records
 		WHERE original_code = $1
-	`, code).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return RecordDetail{}, "", "", fmt.Errorf("record not found")
+	`, candidate).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
+		if err == nil {
+			return detail, recordKind, costIndicators, nil
 		}
-		return RecordDetail{}, "", "", fmt.Errorf("query gsn record by original code: %w", err)
+		if err != sql.ErrNoRows {
+			return RecordDetail{}, "", "", fmt.Errorf("query gsn record by original code: %w", err)
+		}
 	}
-	return detail, recordKind, costIndicators, nil
+
+	return RecordDetail{}, "", "", fmt.Errorf("record not found")
 }
 
 func (s *Service) applyRecordSelfPricing(ctx context.Context, code, fgisSetID, district, costIndicators string) (string, string, error) {

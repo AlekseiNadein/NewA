@@ -9,13 +9,17 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"nav-saas-mvp/backend/internal/calcworker"
 	"nav-saas-mvp/backend/internal/gsn"
+	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
 
 func main() {
+	observability.Init(observability.ConfigFromEnv("nav-calc-worker"))
+
 	dataPath := env("APP_DATA_PATH", filepath.Join("data", "app.json"))
 	treeDatabaseURL := env("APP_DATABASE_URL", "")
 	gsnDatabaseURL := env("APP_GSN_DATABASE_URL", treeDatabaseURL)
@@ -43,6 +47,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if strings.TrimSpace(rabbitURL) != "" {
+		go observability.RunQueueCollector(ctx, observability.QueueCollectorConfig{
+			RabbitURL: rabbitURL,
+			Interval:  30 * time.Second,
+		})
+	}
 
 	slog.Info("starting estimate calc worker service", "dataPath", dataPath, "queueMode", queueMode, "rabbitPrefetch", rabbitPrefetch)
 	if queueMode == "rabbit" {

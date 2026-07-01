@@ -30,6 +30,11 @@ set APP_RABBITMQ_EXCHANGE=estimate.calc
 set APP_RABBITMQ_PREFETCH=4
 set APP_OUTBOX_PUBLISH_BATCH=100
 set APP_OUTBOX_PUBLISH_INTERVAL=1s
+set APP_LOG_LEVEL=info
+set APP_LOG_FORMAT=json
+set APP_SERVICE_NAME=nav-api
+set APP_LOG_FILE=data\nav-server.log
+set APP_METRICS_ADDR=127.0.0.1:9090
 
 echo [server] starting on :8090 (public entry via nginx :8080)...
 data\nav-server.exe

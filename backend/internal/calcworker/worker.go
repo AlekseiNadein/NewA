@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
+	"nav-saas-mvp/backend/internal/estimatecalc"
 	"nav-saas-mvp/backend/internal/gsn"
+	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
 
@@ -57,6 +60,11 @@ func (w *Worker) Run(ctx context.Context, workerID string) {
 }
 
 func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) error {
+	started := time.Now()
+	defer func() {
+		observability.ObserveCalcDuration(time.Since(started).Seconds())
+	}()
+
 	code := job.Code
 	if code == "" {
 		return fmt.Errorf("record code is empty")
@@ -76,8 +84,21 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		return fmt.Errorf("read GSN record %q: %w", code, err)
 	}
 
+	quantity, err := w.resolveJobQuantity(ctx, job)
+	if err != nil {
+		return fmt.Errorf("resolve line quantity: %w", err)
+	}
+
+	pricing, err := estimatecalc.LinePricingFromRecord(record, quantity)
+	if err != nil {
+		return fmt.Errorf("price record %q: %w", code, err)
+	}
+
 	calcJSON, err := json.Marshal(map[string]any{
-		"record": record,
+		"record":    record,
+		"quantity":  pricing.Quantity,
+		"unitPrice": pricing.UnitPrice,
+		"total":     pricing.Total,
 	})
 	if err != nil {
 		return fmt.Errorf("encode calc result: %w", err)
@@ -88,8 +109,28 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		OriginalCode: record.OriginalCode,
 		Name:         record.Name,
 		Unit:         record.Unit,
+		Quantity:     pricing.Quantity,
+		UnitPrice:    pricing.UnitPrice,
+		Total:        pricing.Total,
 		CalcJSON:     calcJSON,
 	})
+}
+
+func (w *Worker) resolveJobQuantity(ctx context.Context, job store.EstimateCalcJob) (float64, error) {
+	storedQty := job.Quantity
+	rawText := job.RawText
+	if storedQty <= 0 && strings.TrimSpace(rawText) == "" {
+		lineQty, lineRaw, err := w.store.EstimateLineQuantityContext(ctx, job.EstimateID, job.LineID)
+		if err == nil {
+			if storedQty <= 0 {
+				storedQty = lineQty
+			}
+			if strings.TrimSpace(rawText) == "" {
+				rawText = lineRaw
+			}
+		}
+	}
+	return store.ResolveEstimateLineQuantity(storedQty, rawText)
 }
 
 type Manager struct {

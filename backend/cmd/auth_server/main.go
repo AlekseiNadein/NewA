@@ -11,10 +11,13 @@ import (
 	"nav-saas-mvp/backend/internal/auth"
 	"nav-saas-mvp/backend/internal/authapi"
 	"nav-saas-mvp/backend/internal/authstore"
+	"nav-saas-mvp/backend/internal/observability"
 )
 
 func main() {
 	ctx := context.Background()
+	observability.Init(observability.ConfigFromEnv("nav-auth"))
+
 	addr := env("APP_AUTH_ADDR", ":8081")
 	dataPath := env("APP_DATA_PATH", filepath.Join("data", "app.json"))
 	jwtSecret := env("APP_JWT_SECRET", "dev-secret-change-me")
@@ -38,7 +41,7 @@ func main() {
 	authService := auth.NewService(authStore, jwtSecret)
 	server := authapi.New(authStore, authService)
 
-	slog.Info("starting auth service", "addr", addr, "database", redactDatabaseURL(authDatabaseURL))
+	slog.Info("starting auth service", "addr", addr, "database", observability.RedactDatabaseURL(authDatabaseURL))
 	if err := http.ListenAndServe(addr, server.Routes()); err != nil {
 		slog.Error("auth service stopped", "error", err)
 		os.Exit(1)
@@ -53,12 +56,3 @@ func env(key, fallback string) string {
 	return value
 }
 
-func redactDatabaseURL(url string) string {
-	parts := strings.Fields(url)
-	for i, part := range parts {
-		if strings.HasPrefix(part, "password=") {
-			parts[i] = "password=***"
-		}
-	}
-	return strings.Join(parts, " ")
-}

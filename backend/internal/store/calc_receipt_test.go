@@ -12,7 +12,7 @@ func TestCalcDeliverySkipReason(t *testing.T) {
 		wantSkip     bool
 		wantReason   string
 	}{
-		{name: "receipt", receiptCount: 1, lineRevision: 2, lineStatus: "done", jobRevision: 2, wantSkip: true, wantReason: "receipt exists"},
+		{name: "receipt on queued line", receiptCount: 1, lineRevision: 2, lineStatus: "queued", jobRevision: 2, wantSkip: false},
 		{name: "stale revision", lineRevision: 3, lineStatus: "queued", jobRevision: 2, wantSkip: true, wantReason: "stale line revision"},
 		{name: "already done", lineRevision: 2, lineStatus: "done", jobRevision: 2, wantSkip: true, wantReason: "line already done"},
 		{name: "process", lineRevision: 2, lineStatus: "queued", jobRevision: 2, wantSkip: false},
@@ -26,17 +26,4 @@ func TestCalcDeliverySkipReason(t *testing.T) {
 			}
 		})
 	}
-}
-
-func calcDeliverySkipReason(receiptCount int, lineRevision int64, lineStatus string, jobRevision int64) (bool, string) {
-	if receiptCount > 0 {
-		return true, "receipt exists"
-	}
-	if lineRevision != jobRevision {
-		return true, "stale line revision"
-	}
-	if lineStatus == "done" {
-		return true, "line already done"
-	}
-	return false, ""
 }

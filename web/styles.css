@@ -1965,6 +1965,24 @@ p {
   margin-bottom: 1.25rem;
 }
 
+.admin-queue-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.admin-queue-purge-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 12rem;
+}
+
+.admin-queue-purge-field select {
+  min-width: 12rem;
+}
+
 .admin-queue-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));

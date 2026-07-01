@@ -14,6 +14,20 @@ var defaultQueues = []string{
 	"estimate.calc.retry.120s",
 }
 
+// CalcQueueNames returns RabbitMQ queue names used by the estimate calc pipeline.
+func CalcQueueNames() []string {
+	return append([]string(nil), defaultQueues...)
+}
+
+// CalcRetryQueueNames returns retry queue names for the estimate calc pipeline.
+func CalcRetryQueueNames() []string {
+	return []string{
+		"estimate.calc.retry.5s",
+		"estimate.calc.retry.30s",
+		"estimate.calc.retry.120s",
+	}
+}
+
 func InspectQueueDepths(rabbitURL string) (map[string]int, error) {
 	if strings.TrimSpace(rabbitURL) == "" {
 		return map[string]int{}, nil

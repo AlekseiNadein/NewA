@@ -9,6 +9,7 @@ import (
 	"nav-saas-mvp/backend/internal/auth"
 	"nav-saas-mvp/backend/internal/authstore"
 	"nav-saas-mvp/backend/internal/domain"
+	"nav-saas-mvp/backend/internal/observability"
 )
 
 type contextKey string
@@ -30,7 +31,7 @@ func New(accounts authstore.AccountStore, authService *auth.Service) *Server {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	s.RegisterRoutes(mux)
-	return withCommonHeaders(mux)
+	return observability.WrapHTTP(withCommonHeaders(mux))
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {

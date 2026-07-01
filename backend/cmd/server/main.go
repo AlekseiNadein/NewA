@@ -15,11 +15,14 @@ import (
 	"nav-saas-mvp/backend/internal/authstore"
 	"nav-saas-mvp/backend/internal/gsn"
 	"nav-saas-mvp/backend/internal/outbox"
+	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
 
 func main() {
 	ctx := context.Background()
+	observability.Init(observability.ConfigFromEnv("nav-api"))
+
 	addr := env("APP_ADDR", ":8090")
 	dataPath := env("APP_DATA_PATH", filepath.Join("data", "app.json"))
 	webDir := env("APP_WEB_DIR", "web")
@@ -53,7 +56,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer authStore.Close()
-	slog.Info("auth contour: PostgreSQL", "url", redactDatabaseURL(authDatabaseURL))
+	slog.Info("auth contour: PostgreSQL", "url", observability.RedactDatabaseURL(authDatabaseURL))
 
 	authService := auth.NewVerifier(jwtSecret)
 	slog.Info("auth API served by separate auth service (routed via nginx)")
@@ -73,6 +76,13 @@ func main() {
 	}
 
 	server := api.NewServer(fileStore, authStore, authService, gsnService, webDir)
+	if strings.TrimSpace(rabbitURL) != "" {
+		go observability.RunQueueCollector(ctx, observability.QueueCollectorConfig{
+			RabbitURL: rabbitURL,
+			Interval:  30 * time.Second,
+			Source:    fileStore,
+		})
+	}
 	if (queueMode == "dual" || queueMode == "rabbit") && strings.TrimSpace(rabbitURL) != "" {
 		go func() {
 			slog.Info("starting outbox publisher", "exchange", rabbitExchange, "batch", outboxBatch, "interval", outboxInterval.String())
@@ -100,16 +110,6 @@ func env(key string, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func redactDatabaseURL(url string) string {
-	parts := strings.Fields(url)
-	for i, part := range parts {
-		if strings.HasPrefix(part, "password=") {
-			parts[i] = "password=***"
-		}
-	}
-	return strings.Join(parts, " ")
 }
 
 func envInt(key string, fallback int) int {

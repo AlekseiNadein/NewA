@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -579,20 +580,15 @@ func buildEstimate(id string, companyID string, input EstimateInput, createdAt t
 	}
 
 	items := make([]domain.EstimateItem, 0, len(input.Items))
-	var computedTotal float64
 	for _, item := range input.Items {
-		normalized, itemTotal, err := normalizeEstimateItem(item)
+		normalized, _, err := normalizeEstimateItem(item)
 		if err != nil {
 			return domain.Estimate{}, err
 		}
-		computedTotal += itemTotal
 		items = append(items, normalized)
 	}
 
-	total := computedTotal
-	if input.Total != nil {
-		total = *input.Total
-	}
+	total := 0.0
 
 	return domain.Estimate{
 		ID:          id,
@@ -1274,9 +1270,9 @@ func (s *FileStore) upsertEstimateDB(ctx context.Context, item domain.Estimate) 
 	defer tx.Rollback(ctx)
 
 	_, err = tx.Exec(ctx, `INSERT INTO app_estimates (id, company_id, object_id, code, title, description, district, fgis_set_id, status, total, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.code, title = EXCLUDED.title, description = EXCLUDED.description, district = EXCLUDED.district, fgis_set_id = EXCLUDED.fgis_set_id, status = EXCLUDED.status, total = EXCLUDED.total, updated_at = EXCLUDED.updated_at`,
-		item.ID, item.CompanyID, item.ObjectID, item.Code, item.Title, item.Description, item.District, item.FgisSetID, item.Status, item.Total, item.CreatedAt, item.UpdatedAt)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, $10, $11)
+ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.code, title = EXCLUDED.title, description = EXCLUDED.description, district = EXCLUDED.district, fgis_set_id = EXCLUDED.fgis_set_id, status = EXCLUDED.status, total = 0, updated_at = EXCLUDED.updated_at`,
+		item.ID, item.CompanyID, item.ObjectID, item.Code, item.Title, item.Description, item.District, item.FgisSetID, item.Status, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -1286,20 +1282,13 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 	}
 	lines := ensureUniqueEstimateLineIDs(item.Items)
 	for i, line := range lines {
+		line = prepareEstimateLineForStorage(item, line)
 		line.Revision = estimateLineRevision(item, line)
-		if line.CalcStatus == "" && shouldEnqueueEstimateLineCalc(line) {
-			line.CalcStatus = "queued"
-		}
 		_, err = tx.Exec(ctx, `INSERT INTO app_estimate_lines (id, estimate_id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text, parsed_json, calc_json, calc_status, calc_error, revision, calculated_at, sort_order)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
 			line.ID, item.ID, estimateLineType(line.Type), estimateItemSource(line.Source), line.Code, line.OriginalCode, line.Name, line.Quantity, line.Unit, line.UnitPrice, line.Total, line.RawText, nullableJSON(line.ParsedJSON), nullableJSON(line.CalcJSON), line.CalcStatus, line.CalcError, line.Revision, line.CalculatedAt, i)
 		if err != nil {
 			return err
-		}
-		if shouldEnqueueEstimateLineCalc(line) {
-			if err := enqueueEstimateLineCalcJobTx(ctx, tx, item, line, s.queueMode); err != nil {
-				return err
-			}
 		}
 	}
 
@@ -1422,6 +1411,8 @@ type EstimateCalcJob struct {
 	Code        string
 	FgisSetID   string
 	District    string
+	Quantity    float64
+	RawText     string
 	Attempts    int
 	MaxAttempts int
 }
@@ -1431,6 +1422,9 @@ type EstimateLineCalcResult struct {
 	OriginalCode string
 	Name         string
 	Unit         string
+	Quantity     float64
+	UnitPrice    float64
+	Total        float64
 	CalcJSON     json.RawMessage
 }
 
@@ -1439,8 +1433,27 @@ type EstimateCalcStatus struct {
 	Revision     int64           `json:"revision"`
 	Status       string          `json:"status"`
 	Error        string          `json:"error,omitempty"`
+	Code         string          `json:"code,omitempty"`
+	OriginalCode string          `json:"originalCode,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Unit         string          `json:"unit,omitempty"`
+	Quantity     float64         `json:"quantity,omitempty"`
+	UnitPrice    float64         `json:"unitPrice,omitempty"`
+	Total        float64         `json:"total,omitempty"`
 	CalcJSON     json.RawMessage `json:"calcJson,omitempty"`
 	CalculatedAt *time.Time      `json:"calculatedAt,omitempty"`
+}
+
+func (s *FileStore) EstimateLineQuantityContext(ctx context.Context, estimateID, lineID string) (quantity float64, rawText string, err error) {
+	if s.treeDB == nil {
+		return 0, "", nil
+	}
+	err = s.treeDB.QueryRow(ctx, `
+SELECT quantity, COALESCE(raw_text, '')
+FROM app_estimate_lines
+WHERE estimate_id = $1 AND id = $2
+`, estimateID, lineID).Scan(&quantity, &rawText)
+	return quantity, rawText, err
 }
 
 func (s *FileStore) ClaimEstimateCalcJob(ctx context.Context, workerID string, lease time.Duration) (EstimateCalcJob, bool, error) {
@@ -1468,7 +1481,7 @@ WHERE id = (
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
-RETURNING id, company_id, estimate_id, line_id, revision, payload->>'code', payload->>'fgisSetId', payload->>'district', attempts, max_attempts
+RETURNING id, company_id, estimate_id, line_id, revision, payload->>'code', payload->>'fgisSetId', payload->>'district', COALESCE((payload->>'quantity')::double precision, 0), COALESCE(payload->>'rawText', ''), attempts, max_attempts
 `, time.Now().UTC().Add(lease), workerID).Scan(
 		&job.ID,
 		&job.CompanyID,
@@ -1478,6 +1491,8 @@ RETURNING id, company_id, estimate_id, line_id, revision, payload->>'code', payl
 		&job.Code,
 		&job.FgisSetID,
 		&job.District,
+		&job.Quantity,
+		&job.RawText,
 		&job.Attempts,
 		&job.MaxAttempts,
 	)
@@ -1532,12 +1547,15 @@ SET code = CASE WHEN $4 <> '' THEN $4 ELSE code END,
     original_code = CASE WHEN $5 <> '' THEN $5 ELSE original_code END,
     name = CASE WHEN $6 <> '' THEN $6 ELSE name END,
     unit = CASE WHEN $7 <> '' THEN $7 ELSE unit END,
-    calc_json = $8,
+    quantity = $8,
+    unit_price = $9,
+    total = $10,
+    calc_json = $11,
     calc_status = 'done',
     calc_error = '',
     calculated_at = now()
 WHERE estimate_id = $1 AND id = $2 AND revision = $3
-`, job.EstimateID, job.LineID, job.Revision, result.Code, result.OriginalCode, result.Name, result.Unit, nullableJSON(result.CalcJSON))
+`, job.EstimateID, job.LineID, job.Revision, result.Code, result.OriginalCode, result.Name, result.Unit, result.Quantity, result.UnitPrice, result.Total, nullableJSON(result.CalcJSON))
 	if err != nil {
 		return err
 	}
@@ -1628,15 +1646,19 @@ WHERE estimate_id = $1 AND id = $2 AND revision = $3
 	return tx.Commit(ctx)
 }
 
-func (s *FileStore) ListEstimateCalcStatuses(ctx context.Context, companyID, estimateID string, includeAll bool) ([]EstimateCalcStatus, error) {
+func (s *FileStore) ListEstimateCalcStatuses(ctx context.Context, companyID, estimateID string, includeAll bool, lite bool) ([]EstimateCalcStatus, error) {
 	if s.treeDB == nil {
 		return []EstimateCalcStatus{}, nil
 	}
-	query := `
-SELECT l.id, l.revision, l.calc_status, l.calc_error, l.calc_json, l.calculated_at
+	calcJSONExpr := "l.calc_json"
+	if lite {
+		calcJSONExpr = "NULL::jsonb"
+	}
+	query := fmt.Sprintf(`
+SELECT l.id, l.revision, l.calc_status, l.calc_error, l.code, l.original_code, l.name, l.unit, l.quantity, l.unit_price, l.total, %s, l.calculated_at
 FROM app_estimate_lines l
 JOIN app_estimates e ON e.id = l.estimate_id
-WHERE l.estimate_id = $1`
+WHERE l.estimate_id = $1`, calcJSONExpr)
 	args := []any{estimateID}
 	if !includeAll {
 		query += ` AND e.company_id = $2`
@@ -1653,7 +1675,7 @@ WHERE l.estimate_id = $1`
 	items := []EstimateCalcStatus{}
 	for rows.Next() {
 		var item EstimateCalcStatus
-		if err := rows.Scan(&item.LineID, &item.Revision, &item.Status, &item.Error, &item.CalcJSON, &item.CalculatedAt); err != nil {
+		if err := rows.Scan(&item.LineID, &item.Revision, &item.Status, &item.Error, &item.Code, &item.OriginalCode, &item.Name, &item.Unit, &item.Quantity, &item.UnitPrice, &item.Total, &item.CalcJSON, &item.CalculatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -1661,13 +1683,133 @@ WHERE l.estimate_id = $1`
 	return items, rows.Err()
 }
 
+func (s *FileStore) StartEstimateCalc(ctx context.Context, id, companyID string, includeAll bool) error {
+	if s.treeDB == nil {
+		return nil
+	}
+
+	var estimateCompanyID, district, fgisSetID string
+	err := s.treeDB.QueryRow(ctx, `
+SELECT company_id, district, fgis_set_id
+FROM app_estimates
+WHERE id = $1
+`, id).Scan(&estimateCompanyID, &district, &fgisSetID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !includeAll && estimateCompanyID != companyID {
+		return ErrForbidden
+	}
+
+	estimate := domain.Estimate{
+		ID:        id,
+		CompanyID: estimateCompanyID,
+		District:  district,
+		FgisSetID: fgisSetID,
+	}
+
+	tx, err := s.treeDB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM calc_message_receipts WHERE estimate_id = $1`, id); err != nil {
+		return err
+	}
+
+	rows, err := tx.Query(ctx, `
+SELECT id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text
+FROM app_estimate_lines
+WHERE estimate_id = $1
+ORDER BY sort_order, id
+`, id)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type lineRow struct {
+		line domain.EstimateItem
+	}
+	lines := make([]lineRow, 0)
+	for rows.Next() {
+		var line domain.EstimateItem
+		if err := rows.Scan(
+			&line.ID, &line.Type, &line.Source, &line.Code, &line.OriginalCode, &line.Name,
+			&line.Quantity, &line.Unit, &line.UnitPrice, &line.Total, &line.RawText,
+		); err != nil {
+			return err
+		}
+		lines = append(lines, lineRow{line: line})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, row := range lines {
+		line := prepareEstimateLineForStorage(estimate, row.line)
+		if !shouldEnqueueEstimateLineCalc(line) {
+			continue
+		}
+		line.Revision = estimateLineRevision(estimate, line)
+		if _, err := tx.Exec(ctx, `
+UPDATE app_estimate_lines
+SET calc_status = 'queued',
+    calc_error = '',
+    calc_json = NULL,
+    unit_price = 0,
+    total = 0,
+    calculated_at = NULL,
+    revision = $3
+WHERE estimate_id = $1 AND id = $2
+`, id, line.ID, line.Revision); err != nil {
+			return err
+		}
+		if err := enqueueEstimateLineCalcJobTx(ctx, tx, estimate, line, s.queueMode); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+func prepareEstimateLineForStorage(estimate domain.Estimate, line domain.EstimateItem) domain.EstimateItem {
+	normalized, _, err := normalizeEstimateItem(line)
+	if err != nil {
+		return line
+	}
+	line = normalized
+	if shouldEnqueueEstimateLineCalc(line) {
+		line.CalcJSON = nil
+		line.CalcStatus = ""
+		line.CalcError = ""
+		line.CalculatedAt = nil
+		line.UnitPrice = 0
+		line.Total = 0
+	}
+	_ = estimate
+	return line
+}
+
 func enqueueEstimateLineCalcJobTx(ctx context.Context, tx pgx.Tx, estimate domain.Estimate, line domain.EstimateItem, queueMode string) error {
 	code := estimateRecordCode(line)
+	if _, err := tx.Exec(ctx, `
+DELETE FROM calc_message_receipts
+WHERE estimate_id = $1 AND line_id = $2
+`, estimate.ID, line.ID); err != nil {
+		return err
+	}
 	jobID := newID("calcjob")
 	payload, err := json.Marshal(map[string]any{
 		"code":      code,
 		"fgisSetId": estimate.FgisSetID,
 		"district":  estimate.District,
+		"quantity":  line.Quantity,
+		"rawText":   line.RawText,
 	})
 	if err != nil {
 		return err
@@ -1703,6 +1845,8 @@ SET status = CASE
 		"code":           code,
 		"fgisSetId":      estimate.FgisSetID,
 		"district":       estimate.District,
+		"quantity":       line.Quantity,
+		"rawText":        line.RawText,
 		"attempt":        1,
 		"maxAttempts":    5,
 		"createdAt":      time.Now().UTC(),
@@ -1780,13 +1924,10 @@ WHERE estimate_id = $1 AND id = $2
 }
 
 func calcDeliverySkipReason(receiptCount int, lineRevision int64, lineStatus string, jobRevision int64) (bool, string) {
-	if receiptCount > 0 {
-		return true, "receipt exists"
-	}
 	if lineRevision != jobRevision {
 		return true, "stale line revision"
 	}
-	if lineStatus == "done" {
+	if strings.TrimSpace(lineStatus) == "done" {
 		return true, "line already done"
 	}
 	return false, ""
@@ -1900,6 +2041,17 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 	return err
 }
 
+const queueConsumerStatsKey = "rabbit_consumer_stats"
+
+type QueueConsumerStats struct {
+	Processed  int64     `json:"processed"`
+	Retried    int64     `json:"retried"`
+	Dead       int64     `json:"dead"`
+	Failed     int64     `json:"failed"`
+	Duplicates int64     `json:"duplicates"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
 func (s *FileStore) TouchQueueConsumerHeartbeat(ctx context.Context) error {
 	if s.treeDB == nil {
 		return nil
@@ -1909,6 +2061,66 @@ INSERT INTO app_settings (key, value, updated_at)
 VALUES ('rabbit_consumer_heartbeat', $1, now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 `, strconv.FormatInt(time.Now().UTC().Unix(), 10))
+	return err
+}
+
+func (s *FileStore) SaveQueueConsumerStats(ctx context.Context, stats QueueConsumerStats) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	stats.UpdatedAt = time.Now().UTC()
+	payload, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+	_, err = s.treeDB.Exec(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`, queueConsumerStatsKey, string(payload))
+	return err
+}
+
+func (s *FileStore) LoadQueueConsumerStats(ctx context.Context) (QueueConsumerStats, bool) {
+	if s.treeDB == nil {
+		return QueueConsumerStats{}, false
+	}
+	var raw string
+	err := s.treeDB.QueryRow(ctx, `
+SELECT value FROM app_settings WHERE key = $1
+`, queueConsumerStatsKey).Scan(&raw)
+	if err != nil {
+		return QueueConsumerStats{}, false
+	}
+	var stats QueueConsumerStats
+	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+		return QueueConsumerStats{}, false
+	}
+	return stats, true
+}
+
+// ReconcileCalcLineFromReceipt marks a line done when a calc receipt already exists
+// but calc_status was reset (for example after re-saving the estimate).
+func (s *FileStore) ReconcileCalcLineFromReceipt(ctx context.Context, job EstimateCalcJob) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	_, err := s.treeDB.Exec(ctx, `
+UPDATE app_estimate_lines l
+SET calc_status = 'done',
+    calc_error = '',
+    calculated_at = COALESCE(l.calculated_at, now())
+FROM calc_message_receipts r
+WHERE l.estimate_id = $1
+  AND l.id = $2
+  AND l.revision = $3
+  AND r.estimate_id = l.estimate_id
+  AND r.line_id = l.id
+  AND r.revision = l.revision
+  AND l.calc_status <> 'done'
+  AND l.calc_json IS NOT NULL
+  AND l.total > 0
+`, job.EstimateID, job.LineID, job.Revision)
 	return err
 }
 
@@ -2083,6 +2295,10 @@ func normalizeEstimateItem(item domain.EstimateItem) (domain.EstimateItem, float
 		item.Unit = ""
 		item.UnitPrice = 0
 		item.Total = 0
+		item.CalcJSON = nil
+		item.CalcStatus = ""
+		item.CalcError = ""
+		item.CalculatedAt = nil
 		return item, 0, nil
 	}
 

@@ -7,4 +7,9 @@ set APP_QUEUE_MODE=rabbit
 set APP_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
 set APP_RABBITMQ_EXCHANGE=estimate.calc
 set APP_RABBITMQ_PREFETCH=4
-data\nav-calc-worker.exe >> data\calc-worker.log 2>&1
+set APP_LOG_LEVEL=info
+set APP_LOG_FORMAT=json
+set APP_SERVICE_NAME=nav-calc-worker
+set APP_LOG_FILE=data\calc-worker.log
+set APP_METRICS_ADDR=127.0.0.1:9092
+data\nav-calc-worker.exe

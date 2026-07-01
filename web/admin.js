@@ -62,6 +62,8 @@ const els = {
   adminQueueStats: document.querySelector("#adminQueueStats"),
   adminQueueHistory: document.querySelector("#adminQueueHistory"),
   adminQueueHint: document.querySelector("#adminQueueHint"),
+  adminQueuePurgeTarget: document.querySelector("#adminQueuePurgeTarget"),
+  adminQueuePurgeButton: document.querySelector("#adminQueuePurgeButton"),
   refreshAdminQueueButton: document.querySelector("#refreshAdminQueueButton"),
 };
 
@@ -142,6 +144,39 @@ els.refreshAdminQueueButton?.addEventListener("click", async () => {
     showMessage("Статистика обновлена", "ok");
   } catch (error) {
     showMessage(error.message, "error");
+  }
+});
+
+const ADMIN_QUEUE_PURGE_LABELS = {
+  dlq: "DLQ (estimate.calc.dlq)",
+  main: "основную очередь (estimate.calc.main)",
+  retry: "retry-очереди",
+  all: "все очереди расчёта",
+};
+
+els.adminQueuePurgeButton?.addEventListener("click", async () => {
+  const target = String(els.adminQueuePurgeTarget?.value || "dlq").trim() || "dlq";
+  const targetLabel = ADMIN_QUEUE_PURGE_LABELS[target] || target;
+  const confirmed = window.confirm(
+    `Очистить ${targetLabel}?\n\nВсе сообщения в выбранной очереди будут безвозвратно удалены.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  els.adminQueuePurgeButton.disabled = true;
+  try {
+    const result = await api("/api/admin/queue-purge", {
+      method: "POST",
+      body: { target },
+    });
+    const total = Number(result.total || 0);
+    showMessage(`Очередь очищена: удалено ${total} сообщ.`, "ok");
+    await refreshAdminQueueStats();
+  } catch (error) {
+    showMessage(error.message, "error");
+  } finally {
+    els.adminQueuePurgeButton.disabled = false;
   }
 });
 
@@ -652,6 +687,14 @@ function queueBoolLabel(value) {
 
 function renderAdminQueue() {
   const stats = state.adminQueueStats;
+  const queueMode = stats?.queue?.mode || "";
+  const purgeEnabled = queueMode === "rabbit" || queueMode === "dual";
+  if (els.adminQueuePurgeButton) {
+    els.adminQueuePurgeButton.disabled = !purgeEnabled;
+  }
+  if (els.adminQueuePurgeTarget) {
+    els.adminQueuePurgeTarget.disabled = !purgeEnabled;
+  }
   if (!stats) {
     els.adminQueueStats.innerHTML = `<p class="muted">Загрузка…</p>`;
     els.adminQueueHistory.innerHTML = "";
@@ -673,7 +716,7 @@ function renderAdminQueue() {
 
   els.adminQueueHint.textContent =
     queue.mode === "rabbit"
-      ? "Режим RabbitMQ: мониторинг DLQ, outbox и подключений publisher/consumer."
+      ? "Режим RabbitMQ: мониторинг DLQ, outbox и подключений publisher/consumer. Очистка очереди доступна ниже."
       : `Режим «${queue.mode || "—"}»: статистика очереди в основном актуальна для rabbit.`;
 
   els.adminQueueStats.innerHTML = `

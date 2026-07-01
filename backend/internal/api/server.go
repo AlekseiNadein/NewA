@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -15,7 +16,9 @@ import (
 	"nav-saas-mvp/backend/internal/authstore"
 	"nav-saas-mvp/backend/internal/domain"
 	"nav-saas-mvp/backend/internal/gsn"
+	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/presence"
+	"nav-saas-mvp/backend/internal/queue"
 	"nav-saas-mvp/backend/internal/store"
 )
 
@@ -55,6 +58,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/admin/estimate-locks", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLocks))))
 	mux.Handle("/api/admin/estimate-locks/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLockByID))))
 	mux.Handle("/api/admin/queue-stats", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminQueueStats))))
+	mux.Handle("/api/admin/queue-purge", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminQueuePurge))))
 	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))
 	mux.Handle("/api/constructions/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructionByID))))
 	mux.Handle("/api/objects", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjects))))
@@ -78,7 +82,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/admin/", s.serveAdmin)
 	mux.Handle("/", s.static)
 
-	return s.withCommonHeaders(mux)
+	return observability.WrapHTTP(s.withCommonHeaders(mux))
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +99,70 @@ func (s *Server) handleAdminQueueStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, buildQueueHealth(r.Context(), s.store, s.gsn != nil && s.gsn.Configured()))
+}
+
+func (s *Server) handleAdminQueuePurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	mode := s.store.QueueMode()
+	if mode != "rabbit" && mode != "dual" {
+		writeError(w, http.StatusBadRequest, "очистка очереди доступна только в режиме rabbit")
+		return
+	}
+
+	var input struct {
+		Target string `json:"target"`
+	}
+	if err := readJSON(r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+
+	target := strings.ToLower(strings.TrimSpace(input.Target))
+	if target == "" {
+		target = "dlq"
+	}
+
+	var queueNames []string
+	switch target {
+	case "dlq":
+		queueNames = []string{"estimate.calc.dlq"}
+	case "main":
+		queueNames = []string{"estimate.calc.main"}
+	case "retry":
+		queueNames = queue.CalcRetryQueueNames()
+	case "all":
+		queueNames = queue.CalcQueueNames()
+	default:
+		writeError(w, http.StatusBadRequest, "unknown purge target")
+		return
+	}
+
+	rabbitURL := strings.TrimSpace(os.Getenv("APP_RABBITMQ_URL"))
+	if rabbitURL == "" {
+		writeError(w, http.StatusServiceUnavailable, "rabbitmq is not configured")
+		return
+	}
+
+	purged, err := queue.PurgeQueues(rabbitURL, queueNames)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	total := 0
+	for _, count := range purged {
+		total += count
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target": target,
+		"purged": purged,
+		"total":  total,
+	})
 }
 
 func (s *Server) handleConstructions(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +369,10 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 		s.handleEstimateCalcStatus(w, r, strings.TrimSuffix(id, "/calc-status"))
 		return
 	}
+	if strings.HasSuffix(id, "/calc") {
+		s.handleEstimateCalcStart(w, r, strings.TrimSuffix(id, "/calc"))
+		return
+	}
 
 	includeAll := claims.Role == domain.RoleSuperAdmin
 	switch r.Method {
@@ -348,7 +420,8 @@ func (s *Server) handleEstimateCalcStatus(w http.ResponseWriter, r *http.Request
 
 	claims := mustClaims(r)
 	includeAll := claims.Role == domain.RoleSuperAdmin
-	statuses, err := s.store.ListEstimateCalcStatuses(r.Context(), claims.CompanyID, estimateID, includeAll)
+	lite := r.URL.Query().Get("lite") == "1" || strings.EqualFold(r.URL.Query().Get("lite"), "true")
+	statuses, err := s.store.ListEstimateCalcStatuses(r.Context(), claims.CompanyID, estimateID, includeAll, lite)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -356,6 +429,25 @@ func (s *Server) handleEstimateCalcStatus(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": statuses,
 	})
+}
+
+func (s *Server) handleEstimateCalcStart(w http.ResponseWriter, r *http.Request, estimateID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	claims := mustClaims(r)
+	if !claims.Role.CanEditEstimates() {
+		writeError(w, http.StatusForbidden, "not enough permissions")
+		return
+	}
+
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	if err := s.store.StartEstimateCalc(r.Context(), estimateID, claims.CompanyID, includeAll); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {

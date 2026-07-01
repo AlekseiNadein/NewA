@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: nav-api
+    static_configs:
+      - targets: ["host.docker.internal:9090"]
+        labels:
+          service: nav-api
+
+  - job_name: nav-auth
+    static_configs:
+      - targets: ["host.docker.internal:9091"]
+        labels:
+          service: nav-auth
+
+  - job_name: nav-calc-worker
+    static_configs:
+      - targets: ["host.docker.internal:9092"]
+        labels:
+          service: nav-calc-worker

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
 
@@ -34,6 +35,8 @@ type rabbitJobMessage struct {
 	Code           string    `json:"code"`
 	FgisSetID      string    `json:"fgisSetId"`
 	District       string    `json:"district"`
+	Quantity       float64   `json:"quantity"`
+	RawText        string    `json:"rawText"`
 	Attempt        int       `json:"attempt"`
 	MaxAttempts    int       `json:"maxAttempts"`
 	CreatedAt      time.Time `json:"createdAt"`
@@ -156,7 +159,9 @@ func (w *Worker) runRabbitSession(ctx context.Context, cfg RabbitConfig) error {
 	consumerConnected.Store(true)
 	consumerLastError.Store("")
 	consumerLastMessageUnix.Store(time.Now().UTC().Unix())
+	observability.SetRabbitConnected("consumer", true)
 	defer consumerConnected.Store(false)
+	defer observability.SetRabbitConnected("consumer", false)
 	defer conn.Close()
 	ch, err := conn.Channel()
 	if err != nil {
@@ -182,6 +187,13 @@ func (w *Worker) runRabbitSession(ctx context.Context, cfg RabbitConfig) error {
 			return nil
 		case <-heartbeat.C:
 			_ = w.store.TouchQueueConsumerHeartbeat(ctx)
+			_ = w.store.SaveQueueConsumerStats(ctx, store.QueueConsumerStats{
+				Processed:  consumerProcessed.Load(),
+				Retried:    consumerRetried.Load(),
+				Dead:       consumerDead.Load(),
+				Failed:     consumerFailed.Load(),
+				Duplicates: consumerDuplicates.Load(),
+			})
 		case msg, ok := <-deliveries:
 			if !ok {
 				return amqp.ErrClosed
@@ -256,17 +268,26 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 		Code:        message.Code,
 		FgisSetID:   message.FgisSetID,
 		District:    message.District,
+		Quantity:    message.Quantity,
+		RawText:     message.RawText,
 		Attempts:    message.Attempt,
 		MaxAttempts: message.MaxAttempts,
 	}
 	if skip, reason := w.store.ShouldSkipCalcDelivery(ctx, job); skip {
 		consumerDuplicates.Add(1)
+		observability.RecordCalcProcessed("duplicate")
+		if reason == "receipt exists" {
+			if err := w.store.ReconcileCalcLineFromReceipt(ctx, job); err != nil {
+				slog.Warn("rabbit calc receipt reconcile failed", "job", job.ID, "estimate", job.EstimateID, "line", job.LineID, "error", err)
+			}
+		}
 		slog.Info("rabbit calc duplicate skipped", "job", job.ID, "estimate", job.EstimateID, "line", job.LineID, "reason", reason)
 		_ = delivery.Ack(false)
 		return
 	}
 	if err := w.processJob(ctx, job); err != nil {
 		consumerFailed.Add(1)
+		observability.RecordCalcProcessed("failed")
 		slog.Warn("rabbit calc processing failed", "job", job.ID, "error", err)
 		_ = w.store.FailEstimateCalcJob(ctx, job, err)
 		message.Attempt++
@@ -275,8 +296,10 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 		if !permanent && message.Attempt <= message.MaxAttempts {
 			routingKey = pickRetryRoutingKey(message.Attempt, cfg)
 			consumerRetried.Add(1)
+			observability.RecordCalcProcessed("retry")
 		} else {
 			consumerDead.Add(1)
+			observability.RecordCalcProcessed("dead")
 		}
 		body, marshalErr := json.Marshal(message)
 		if marshalErr != nil {
@@ -296,6 +319,7 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 		return
 	}
 	consumerProcessed.Add(1)
+	observability.RecordCalcProcessed("ok")
 	_ = delivery.Ack(false)
 }
 

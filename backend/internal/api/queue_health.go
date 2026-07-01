@@ -24,6 +24,13 @@ func buildQueueHealth(ctx context.Context, fileStore *store.FileStore, gsnConfig
 		} else {
 			consumer.Connected = false
 		}
+		if persisted, ok := fileStore.LoadQueueConsumerStats(ctx); ok {
+			consumer.Processed = persisted.Processed
+			consumer.Retried = persisted.Retried
+			consumer.Dead = persisted.Dead
+			consumer.Failed = persisted.Failed
+			consumer.Duplicates = persisted.Duplicates
+		}
 	}
 	outboxPending, _ := fileStore.CountPendingOutboxEvents(ctx)
 	queueDepths, queueErr := queue.InspectQueueDepths(os.Getenv("APP_RABBITMQ_URL"))
