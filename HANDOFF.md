@@ -36,6 +36,10 @@ run.bat
 | `run-calc-worker-exec.bat` | env + `nav-calc-worker.exe` → лог `data/calc-worker.log` |
 | `restart-nginx.bat` | stop → setup (если нужно) → фоновый старт nginx |
 | `setup-nginx.bat` | скачивание portable nginx в `tools/nginx/` |
+| `start-observability.bat` | Docker: Loki + Alloy + Prometheus + Grafana |
+| `stop-observability.bat` | остановка observability-стека |
+
+**Observability (отдельно от `run.bat`):** нужен **Docker Desktop** + `scripts\start-observability.bat`. Подробности — раздел [Observability](#observability-2026-07-01).
 
 **Проверка после `run.bat`:** четыре компонента — `nginx.exe` на `:8080`, `nav-auth-server.exe` на `:8081`, `nav-server.exe` на `:8090`, `nav-calc-worker.exe`; в логе worker нет `GSN database is not configured`.
 
@@ -50,6 +54,15 @@ run.bat
 | `APP_JWT_SECRET` | общий секрет JWT для app и auth (обязательно одинаковый при раздельных процессах) |
 | `APP_DATABASE_URL` | стройки, объекты, сметы, строки, очередь расчёта, `app_settings` |
 | `APP_GSN_DATABASE_URL` | `gsn.*`, `fgis_cs.*` |
+| `APP_LOG_LEVEL` | `info` / `debug` / `warn` / `error` (observability) |
+| `APP_LOG_FORMAT` | `json` (prod) или `text` (локальная отладка) |
+| `APP_SERVICE_NAME` | имя сервиса в логах: `nav-api`, `nav-auth`, `nav-calc-worker` |
+| `APP_LOG_FILE` | файл лога: `data\nav-server.log`, `data\nav-auth.log`, `data\calc-worker.log` |
+| `APP_METRICS_ADDR` | Prometheus scrape только localhost: `:9090` / `:9091` / `:9092` |
+| `APP_GRAFANA_URL` | ссылка в админке «Мониторинг» (default `http://localhost:3000`) |
+| `APP_PROMETHEUS_URL` | ссылка в админке (default `http://localhost:9093`) |
+| `APP_AUTH_METRICS_URL` | URL scrape auth metrics (default `http://127.0.0.1:9091/metrics`) |
+| `APP_WORKER_METRICS_URL` | URL scrape worker metrics (default `http://127.0.0.1:9092/metrics`) |
 
 Импорт справочников (не при старте): `import_regions`, `import_resource_codifier`, `import_fgis_cs`.  
 Принудительный импорт users/companies из JSON: `go run .\backend\cmd\migrate_auth` (нужен `APP_AUTH_DATABASE_URL`).
@@ -97,7 +110,7 @@ Auth **не участвует** в calc worker: worker не используе�
 2. **Табличный редактор** — проекция текста: до расчёта только **исходный шифр + объём**; после worker — полная строка.
 3. **Очередь** — транспорт задач для worker-ов (не для UI).
 4. **БД** — источник состояния строки и результата (`calc_json`, `calc_status`).
-5. **UI** — polling `GET /api/estimates/{id}/calc-status`, не подписка на очередь.
+5. **UI** — long-poll batch `GET /api/estimates/{id}/calc-batch` (основной путь с 2026-07-02); legacy polling `calc-status` отключён на frontend.
 
 ### Поток данных
 
@@ -117,11 +130,134 @@ calc worker service (отдельный процесс)
   → без запросов к /api/gsn/record
 
 Табличный редактор (после worker)
-  → polling calc-status → apply calcJson.record
+  → batch-listener calc-batch (long-poll) → apply calcJson по батчам
   → оригинальный шифр, наименование, ед. изм., ресурсы, стоимость
 ```
 
-### Очередь `estimate_calc_jobs`
+### Batch-протокол расчёта (2026-07-02 — 2026-07-03, актуально)
+
+**Контекст:** большие сметы (7500+ поз.) — polling `calc-status` перегружал UI и давал рассинхрон счётчика и суммы. Расчёт в очереди **не менялся** (Rabbit/outbox/worker); изменился только **транспорт результатов в UI**.
+
+#### Два размера батча (`app_settings`)
+
+| Ключ / UI | Env / API | Назначение | Default |
+|-----------|-----------|------------|---------|
+| `calc_start_batch_size` | «Батч постановки в очередь» | Сколько строк ставить в очередь за одну транзакцию при `POST .../calc` / `enqueueEstimateCalcBatches` | 50 |
+| `calc_client_batch_size` | «Батч ответа клиенту» | Сколько **терминальных** статусов отдавать за один ответ `calc-batch` | 50 |
+
+Размеры **независимы**: сервер может ставить в очередь по 50, клиент получать по 50 готовых.
+
+#### Поколение расчёта `calc_generation`
+
+- Колонка `app_estimates.calc_generation` (BIGINT, default 0).
+- Входит в `revision` строки (`estimateLineRevision`: estimate + line + code + qty + **fgisSetId** + **district** + **calc_generation**).
+- **`POST /api/estimates/{id}/calc/cancel`** — `calc_generation++`, сброс всех GSN-calc строк (status, calc_json, цены), dead jobs, pending outbox; возвращает `{ generation }`.
+- Клиент передаёт `generation` в каждый `calc-batch`; при рассинхроне — `{ reset: true, generation }`, cursor `applied=0`.
+
+**Важно (фикс 2026-07-03):** в `CancelEstimateCalc` нельзя `UPDATE` внутри `rows.Next()` — pgx `conn busy`. Сначала собрать строки, закрыть `rows`, затем обновлять.
+
+#### API batch (маршруты в `server.go` — **до** `/calc-status` и `/calc`)
+
+| Метод | Путь | Назначение |
+|-------|------|------------|
+| `GET` | `/api/estimates/{id}/calc-batch?applied=&generation=&wait=1` | Long-poll (~25 с): следующий батч терминальных статусов |
+| `POST` | `/api/estimates/{id}/calc/cancel` | Отмена in-flight расчёта, bump generation |
+| `POST` | `/api/estimates/{id}/calc` | Запуск enqueue (как раньше) |
+| `GET` | `/api/estimates/{id}/calc-status` | Legacy polling (на frontend **выключен**) |
+
+Ответ `calc-batch`: `generation`, `applied`, `total`, `processed`, `errors`, `grandTotal`, `done`, `items[]`, опционально `reset`.
+
+Логика готовности батча (`store/calc_batch.go`): отдать батч, когда накопилось ≥ `calc_client_batch_size` **новых** терминальных строк **или** смета полностью терминальна (хвост).
+
+#### Frontend (`web/app.js`)
+
+Флаги:
+
+```javascript
+const ENABLE_ESTIMATE_CALC_BATCH_LISTENER = true;
+const ENABLE_ESTIMATE_CALC_STATUS_POLLING = false;
+```
+
+**Контроллер** `estimateCalcBatchControllers`: `{ session, cursor: { applied, generation }, stopped, applying, listenerPromise }`.
+
+- **`session`** — инкремент при `abortEstimateCalcBatchSession`; старый listener игнорирует ответы после abort.
+- **`applied`** — курсор «сколько терминальных статусов клиент уже принял» (источник для счётчика «Обработано позиций»).
+- **`generation`** — синхрон с сервером после cancel / batch.reset.
+
+**Прогресс UI:**
+
+- Счётчик: `batch.applied` / `total` (`useProgressOnly` в `updateCalcProgressTarget`), **не** `batch.processed` и **не** локальный подсчёт `calcStatus=done`.
+- Сметная стоимость: инкремент `accumulateCalcGrandTotalFromPairs` по строкам текущего батча; база — не-ГСН строки.
+- Анимация: `displayed` догоняет `processed` через `startCalcProgressAnimation`.
+
+**Применение батча:** `applyEstimateCalcBatchResponse` → `applyEstimateCalcStatusPairs` (для large — `skipRecords` до `batch.done`) → обновление только **видимых** строк таблицы (`refreshEstimateTableRowsByIds`); полный remount — только при `batch.done`.
+
+**Цены с индексом:** ячейка «Стоимость ед.» — `innerHTML` (`formatEstimateUnitPrice` с `<br>`); между батчами — `applyEstimateCalcDisplayFromRecord`.
+
+#### Переключение текст → таблица (без изменений очереди)
+
+1. `applyEstimateTextToEstimate` + `prepareEstimateTableCalculationState` (сброс GSN-строк локально).
+2. `persistOpenEstimate` → `POST .../calc` → `startEstimateCalcBatchListener`.
+3. Batch-listener до `batch.done`.
+
+#### Смена сметного района / набора ФГИС **во время расчёта** (табличный режим)
+
+Единая точка: **`restartEstimateCalculationAfterContextChange(estimateId)`** — вызывается из `applyDistrictDialog` и `updateEstimateFgisSet`.
+
+```text
+1. abortEstimateCalcBatchSession     — stop listener, session++, await promise
+2. resetGsnLinesForTableCalculation  — локально: queued, обнулить цены/calcJson
+3. restartEstimateTableCalculation   — UI: 0/N, displayed=0, runningGrandTotal=base
+4. syncEstimateCalcDisplayAfterReset — немедленный refresh таблицы/шапки
+5. POST .../calc/cancel              — generation++, сброс строк в БД (retry ×3)
+6. PUT .../estimates                 — новый district / fgisSetId
+7. POST .../calc                   — enqueue (ждёт освобождения calcStartJob до 12 с)
+8. runEstimateCalcBatchListener      — applied=0, новая session
+```
+
+Ожидаемое UX: сразу **0/N** и **сметная стоимость = 0** (или база); затем рост по мере батчей.
+
+**Backend при cancel:** `unmarkEstimateCalcStartJob`; stale goroutine enqueue прерывается проверкой `calc_generation` в каждом батче enqueue.
+
+#### Восстановление редактора после F5 (2026-07-03)
+
+- `sessionStorage.nav_editor_estimates` может быть урезан (квота) → пустые `items`.
+- `rehydrateEmptyOpenEstimates()` после `refreshConstructionData` в `bootstrapAppData`.
+- `ensureOpenEstimateHydrated()` в `renderEditor` при пустых items.
+- Источник строк: `state.estimates` (полный список из `GET /api/estimates`).
+
+#### Закрытие сметы / текстовый режим
+
+- `cancelAndStopEstimateCalc` → abort session + `POST .../calc/cancel`.
+
+#### Ключевые файлы
+
+| Область | Путь |
+|---------|------|
+| Batch store/API | `backend/internal/store/calc_batch.go`, тесты `calc_batch_test.go` |
+| Cancel / generation | `calc_batch.go` → `CancelEstimateCalc` |
+| Enqueue | `file_store.go` → `enqueueEstimateCalcBatches`, `StartEstimateCalc` |
+| Routes | `backend/internal/api/server.go` |
+| Frontend batch | `web/app.js` — `runEstimateCalcBatchListener`, `restartEstimateCalculationAfterContextChange`, `abortEstimateCalcBatchSession` |
+| Настройки UI | `web/index.html` — поля батчей; `?v=20260703c` |
+
+#### Ловушки batch-режима
+
+- **Cancel `conn busy`** — если снова 500 на cancel, расчёт после смены ФГИС не стартует (сброс UI есть, роста нет). Проверять лог API.
+- **Не использовать `batch.processed` для счётчика** — это все terminal на сервере, клиент мог принять меньше.
+- **Не вызывать `refreshAllRenderedEstimateTableRows` на каждый батч** — моргание на 7500 строк; только visible IDs.
+- **Два listener'а** — всегда `abort` + await перед новым `runEstimateCalcBatchListener`.
+- **`markEstimateCalcStartJob`** — второй `POST /calc` без cancel/unmark молча не ставит очередь (теперь retry + unmark on cancel).
+
+### Поток данных (legacy polling — справочно)
+
+На frontend **отключено** (`ENABLE_ESTIMATE_CALC_STATUS_POLLING = false`). Раньше:
+
+```text
+Табличный редактор → polling GET .../calc-status → apply calcJson.record
+```
+
+### Очередь `estimate_calc_jobs` (режим `APP_QUEUE_MODE=db`)
 
 Статусы: `queued` | `leased` | `done` | `failed` | `dead`
 
@@ -257,7 +393,7 @@ SELECT count(*) FROM estimate_calc_jobs WHERE status='leased' AND leased_until <
 
 ## API (основное)
 
-Auth · CRUD строек/объектов/смет · `GET /api/estimates/{id}/calc-status` · `GET/PUT /api/settings`
+Auth · CRUD строек/объектов/смет · `GET /api/estimates/{id}/calc-batch` · `POST .../calc/cancel` · `POST .../calc` · legacy `GET .../calc-status` · `GET/PUT /api/settings`
 
 GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hierarchy-records`, `fgis-sets`, `fgis-rows`
 
@@ -265,9 +401,9 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 
 **Режимы:** текстовый (default) · табличный.
 
-**Переключение текст → таблица:** `applyEstimateTextToEstimate` (parse) → `restartEstimateTableCalculation` → `renderEditor` → `persistOpenEstimate` → enqueue jobs → `pollEstimateCalcStatus`. **Прямых запросов к ГСН нет** (`recalculateEstimatePricing` не вызывается).
+**Переключение текст → таблица:** `applyEstimateTextToEstimate` (parse) → `prepareEstimateTableCalculationState` → `restartEstimateTableCalculation` → `renderEditor` → `persistOpenEstimate` → `POST .../calc` → `startEstimateCalcBatchListener`. **Прямых запросов к ГСН нет** (`recalculateEstimatePricing` не вызывается).
 
-**Смена района / набора ФГИС в табличном режиме:** `clearGsnLineCalcEnrichment` → `restartEstimateTableCalculation` (счётчики и сметная стоимость с 0) → `renderEditor` → `persistOpenEstimate` → `pollEstimateCalcStatus` → анимация прогресса (как при text→table).
+**Смена района / набора ФГИС в табличном режиме (во время расчёта):** `restartEstimateCalculationAfterContextChange` — abort batch session → локальный сброс GSN-строк → UI 0/N → `POST .../calc/cancel` → persist → `POST .../calc` → новый batch-listener. См. раздел [Batch-протокол](#batch-протокол-расчёта-2026-07-02--2026-07-03-актуально).
 
 **Шапка:** шифр, наименование, сметный район (`district`, `14.3`), набор ФГИС (`fgisSetId`), сметная стоимость.
 
@@ -283,9 +419,12 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 - `estimateLineSourceCode` / `sourceCode` — исходный шифр из текста (не затирается при расчёте)
 - `estimateLineDisplayCode` — до calc: `sourceCode`; после calc: `originalCode`
 - `estimateLineShowsGsnPartial` — урезанный вид строки
-- `clearGsnLineCalcEnrichment` — сброс обогащения при смене района / набора ФГИС
-- `restartEstimateTableCalculation` — обнуление счётчиков прогресса (позиции, ошибки, сметная стоимость) и `markEstimateCalcAwaitingServer`; вызывается при text→table, смене района и смене набора ФГИС в табличном режиме
-- `startCalcProgressAnimation` / `estimateCalcProgressTargets` — анимация счётчиков от 0 до фактических значений по мере polling `calc-status`
+- `clearGsnLineCalcEnrichment` / `resetGsnLinesForTableCalculation` — сброс обогащения при смене района / набора ФГИС
+- `restartEstimateTableCalculation` — обнуление счётчиков прогресса (позиции, ошибки, сметная стоимость) и `markEstimateCalcAwaitingServer`
+- `restartEstimateCalculationAfterContextChange` — полный цикл cancel + restart при смене района/ФГИС **во время** batch-расчёта
+- `runEstimateCalcBatchListener` / `abortEstimateCalcBatchSession` — long-poll batch-listener и инвалидация сессии
+- `startCalcProgressAnimation` / `estimateCalcProgressTargets` — анимация счётчиков; источник прогресса — `batch.applied` из `calc-batch`, не legacy polling
+- `rehydrateEmptyOpenEstimates` / `ensureOpenEstimateHydrated` — восстановление строк после F5 при урезанном sessionStorage
 - `enrichEditorEstimateItems` — восстановление из `calc_json` при открытии сметы
 
 При каждом parse текста GSN-строки **сбрасываются** до шифра+объёма (обогащение не сохраняется из прошлого состояния).
@@ -382,6 +521,188 @@ RABBITMQ_MIGRATION_PLAN.md
 - **После логина** не вызывать `loadApp()` — только `bootstrapAppData()`; иначе гонка с начальным `void loadApp()`.
 - **RabbitMQ:** без запущенного брокера (`APP_RABBITMQ_URL`) publisher disconnected, задачи копятся в `outbox_events`. DLQ растёт на poison messages (битые шифры ГСН) — `scripts/purge-rabbit-dlq.bat`, мониторинг в админке «Очередь».
 - **Комбо «Сметные цены и индексы»:** не делать полный `mountEditorContent` при polling calc-status и после `loadFGISSets` — только обновление таблицы/опций селекта; remount откладывать при фокусе в шапке.
+- **Grafana/Prometheus в админке:** ссылки работают только после `scripts\start-observability.bat` (Docker). Без Docker — раздел «Мониторинг» в админке всё равно показывает метрики; внешние UI недоступны.
+- **Observability `/api/admin/monitoring`:** при падении scrape Prometheus-текста с auth/worker раньше был panic → nginx 502; исправлено (`expfmt.NewTextParser(model.UTF8Validation)`).
+
+## Observability (2026-07-01)
+
+Контекст: внедрение логирования, метрик и Docker-стека Grafana/Prometheus/Loki поверх существующего `healthz` и админки «Очередь». Приложение на Windows (`run.bat`), observability — в Docker на том же хосте.
+
+### Архитектура
+
+```
+Приложение (Windows, run.bat)          Docker (observability)
+─────────────────────────────          ───────────────────────
+nginx :8080
+nav-api :8090  ── metrics :9090 ──────► Prometheus :9093 ──► Grafana :3000
+nav-auth :8081 ── metrics :9091 ──┘         ▲
+calc_worker    ── metrics :9092 ──┘         │
+data/*.log ──────────────────────────► Alloy ──► Loki :3100 ──┘
+```
+
+Три столпа:
+
+| Столп | Реализовано | Где смотреть |
+|-------|-------------|--------------|
+| **Логи** | JSON slog, `request_id`, calc-поля (`estimate_id`, `line_id`, `code`) | `data/*.log`, Grafana → Loki (после Docker) |
+| **Метрики** | Prometheus `/metrics` на каждом процессе | Grafana «NAV Overview», админка «Мониторинг», `:9093` |
+| **Операционный health** | `healthz`, админка «Очередь» | `/api/healthz`, `/admin` → Очередь |
+
+**Не реализовано (следующий этап):** OpenTelemetry + Jaeger, `traceparent` в Rabbit, Grafana alerting.
+
+### Пакет `backend/internal/observability/`
+
+| Файл | Назначение |
+|------|------------|
+| `init.go` | slog (level/format/file), HTTP listener `/metrics` |
+| `middleware.go` | access log, `X-Request-ID`, HTTP Prometheus counters |
+| `metrics.go` | registry, метрики очереди/calc/HTTP |
+| `collector.go` | periodic gauge update: outbox pending, queue depths, consumer stats из БД |
+| `snapshot.go` | сбор snapshot для админки; scrape `:9091`/`:9092` |
+| `calc.go` | структурированные логи calc pipeline |
+| `context.go` | обёртка над `requestctx` |
+| `config.go` | `ConfigFromEnv` |
+
+Связанные пакеты: `backend/internal/requestctx/` (request_id без цикла импортов store↔observability), `backend/internal/store/observability.go` (`QueueMetricsBridge`).
+
+### Метрики Prometheus (`nav_*`)
+
+| Метрика | Описание |
+|---------|----------|
+| `nav_http_requests_total{method,route,status}` | HTTP RPS |
+| `nav_http_request_duration_seconds` | latency |
+| `nav_estimate_calc_start_total` | `POST .../calc` |
+| `nav_outbox_pending` | gauge |
+| `nav_outbox_published_total` / `nav_outbox_failed_total` | outbox publisher |
+| `nav_rabbit_connected{role}` | publisher / consumer |
+| `nav_rabbit_queue_depth{queue}` | DLQ, main, retry |
+| `nav_calc_processed_total{result}` | ok / retry / dead / duplicate / failed |
+| `nav_calc_errors_total{stage}` | gsn / gsn_timeout / quantity / pricing / … |
+| `nav_calc_duration_seconds` | полный calc |
+| `nav_calc_gsn_duration_seconds` | GSN lookup |
+| `nav_calc_pricing_duration_seconds` | `estimatecalc.LinePricingFromRecord` |
+| `nav_calc_consumer_*` | persisted counters + heartbeat age (на API через collector) |
+
+Scrape: `deploy/observability/prometheus.yml` → `host.docker.internal:9090|9091|9092`.
+
+### Логи
+
+| Процесс | Файл | Env |
+|---------|------|-----|
+| API | `data/nav-server.log` | `run.bat` |
+| Auth | `data/nav-auth.log` | `run-auth-server-exec.bat` |
+| Calc worker | `data/calc-worker.log` | `run-calc-worker-exec.bat` |
+
+Формат JSON (`APP_LOG_FORMAT=json`). Correlation: `request_id` в HTTP → outbox payload (`requestId`) → Rabbit message → логи worker.
+
+Пример поиска в Loki:
+```logql
+{job="nav"} | json | estimate_id="..."
+{job="nav"} | json | request_id="..."
+```
+
+### Docker-стек (`deploy/observability/`)
+
+| Сервис | Порт | Роль |
+|--------|------|------|
+| Grafana | `3000` | дашборды, логи (admin/admin) |
+| Prometheus | `9093` | scrape метрик |
+| Loki | `3100` | хранение логов |
+| Alloy | — | tail `data/*.log` → Loki |
+
+```bat
+scripts\start-observability.bat   REM после перезагрузки Windows — снова вручную
+scripts\stop-observability.bat
+run.bat                           REM приложение (обязательно для данных в метриках)
+```
+
+Проверка: http://localhost:9093/targets — jobs `nav-api`, `nav-auth`, `nav-calc-worker` в состоянии **UP**.  
+Дашборд: Grafana → папка **NAV** → **NAV Overview**.
+
+### Админка `/admin`
+
+| Раздел | API | Назначение |
+|--------|-----|------------|
+| **Очередь** | `GET /api/admin/queue-stats` | DLQ, outbox, pipeline/release ready, история, purge |
+| **Мониторинг** | `GET /api/admin/monitoring` | сводка Prometheus + ссылки Grafana/Prometheus |
+
+Мониторинг агрегирует: local metrics API + scrape auth/worker + данные очереди (consumer stats из `app_settings`, как в healthz). Автообновление 30 с.
+
+Публичный health (без auth): `GET /api/healthz`.
+
+### Запуск на Windows-сервере (чеклист)
+
+1. PostgreSQL, RabbitMQ — как обычно
+2. `run.bat` — приложение
+3. Docker Desktop — запущен
+4. `scripts\start-observability.bat` — Grafana/Prometheus/Loki
+5. Админка → **Мониторинг** или Grafana `:3000`
+
+### Известные проблемы / фиксы
+
+| Симптом | Причина | Решение |
+|---------|---------|---------|
+| Grafana/Prometheus «нет ответа» | Docker-стек не запущен | `start-observability.bat` |
+| Админка «Мониторинг» → 502 | panic при parse `/metrics` auth/worker | исправлено в `snapshot.go` (UTF8Validation) |
+| Targets DOWN в Prometheus | `run.bat` не запущен или metrics порты закрыты | проверить `:9090-9092` на localhost |
+| Auth/Worker metrics «нет» в карточках | процесс не слушает metrics | проверить `APP_METRICS_ADDR` в exec-скриптах |
+
+### Следующие шаги observability
+
+1. **OpenTelemetry + Jaeger** — distributed tracing (`OTEL_EXPORTER_OTLP_ENDPOINT`)
+2. **`traceparent` в Rabbit** — сквозной trace calc pipeline
+3. **Grafana alerting** — DLQ, outbox backlog, consumer down (правила поверх healthz-логики)
+4. Опционально: probe доступности Grafana в админке (показывать «Docker не запущен»)
+
+### Ключевые пути (git)
+
+`backend/internal/observability/`, `backend/internal/api/{monitoring.go,queue_health.go}`, `deploy/observability/`, `scripts/start-observability.bat`, `web/admin.{html,js}` (раздел «Мониторинг»).
+
+---
+
+## Текущая сессия (2026-07-03, batch calc — стабильное состояние)
+
+**Контекст:** batch-протокол доставки результатов расчёта в UI (см. [Batch-протокол](#batch-протокол-расчёта-2026-07-02--2026-07-03-актуально)). Очередь Rabbit/outbox/worker **без изменений**.
+
+### Реализовано и проверено
+
+| Область | Содержание |
+|---------|------------|
+| **Backend** | `calc_generation`, `calc_start_batch_size`, `calc_client_batch_size`; `GET calc-batch`, `POST calc/cancel`; cancel без `conn busy`; generation check в enqueue; `unmarkEstimateCalcStartJob` при cancel |
+| **Frontend** | Batch-listener (`ENABLE_ESTIMATE_CALC_BATCH_LISTENER=true`); polling выключен; прогресс по `batch.applied`; инкремент grand total; refresh только visible rows; rehydrate после F5 |
+| **Контекст mid-calc** | Смена района/ФГИС → reset UI → cancel → persist → calc → новый listener |
+| **Тесты** | `backend/internal/store/calc_batch_test.go` |
+
+### Стабильное поведение (acceptance)
+
+1. **Text → table:** счётчик 0→N, сметная стоимость растёт по батчам; индексы в цене (`<br>`) видны до завершения расчёта.
+2. **Большие сметы (~7500):** нет мгновенного 100%, нет моргания таблицы, сумма не «прыгает».
+3. **F5 с открытой сметой:** строки восстанавливаются из `state.estimates`, расчёт продолжается.
+4. **Смена ФГИС/района во время расчёта:** немедленно 0/N и базовая сумма → после cancel рост снова идёт.
+5. **Закрытие сметы:** cancel + stop listener.
+
+### Бэкапы сессии
+
+`backups/2026-07-02_17-10_calc-batch/`, `2026-07-03_11-00_rehydrate-calc-reset/`, `2026-07-03_11-15_calc-session-reset/`, `2026-07-03_11-25_cancel-conn-busy/`
+
+### Cache bust
+
+`web/app.js?v=20260703c`
+
+### Не делать без явной задачи
+
+- Включать `ENABLE_ESTIMATE_CALC_STATUS_POLLING` параллельно с batch-listener.
+- Использовать `batch.processed` или локальный `done`-count для UI-счётчика.
+- `refreshAllRenderedEstimateTableRows` на каждый batch.
+- `UPDATE` внутри `rows.Next()` в cancel.
+
+### Следующие шаги (опционально)
+
+1. Smoke/e2e: mid-calc FGIS change на смете 7500+ строк.
+2. Метрики batch-listener (latency, batch size) в observability.
+3. SSE вместо long-poll `calc-batch` (если понадобится снизить число HTTP-запросов).
+
+---
 
 ## Текущая сессия (2026-06-30, RabbitMQ + админка DLQ)
 
@@ -437,9 +758,9 @@ RABBITMQ_MIGRATION_PLAN.md
 
 ### Следующие шаги (опционально)
 
-1. Алерт/уведомление при `dlqGrowthHigh` (webhook, не только UI).
-2. Grafana/Prometheus поверх healthz (если понадобится вне админки).
-3. Коммит набора RabbitMQ + админка DLQ в git.
+1. Алерт/уведомление при `dlqGrowthHigh` (Grafana alerting или webhook).
+2. ~~Grafana/Prometheus поверх healthz~~ — **сделано**, см. [Observability](#observability-2026-07-01).
+3. OpenTelemetry + Jaeger (distributed tracing).
 
 ### Незакоммиченные изменения (сессия)
 

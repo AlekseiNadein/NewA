@@ -81,19 +81,20 @@ const (
 )
 
 type Estimate struct {
-	ID          string         `json:"id"`
-	CompanyID   string         `json:"companyId"`
-	ObjectID    string         `json:"objectId"`
-	Code        string         `json:"code"`
-	Title       string         `json:"title"`
-	Description string         `json:"description"`
-	District    string         `json:"district"`
-	FgisSetID   string         `json:"fgisSetId"`
-	Status      EstimateStatus `json:"status"`
-	Items       []EstimateItem `json:"items"`
-	Total       float64        `json:"total"`
-	CreatedAt   time.Time      `json:"createdAt"`
-	UpdatedAt   time.Time      `json:"updatedAt"`
+	ID              string         `json:"id"`
+	CompanyID       string         `json:"companyId"`
+	ObjectID        string         `json:"objectId"`
+	Code            string         `json:"code"`
+	Title           string         `json:"title"`
+	Description     string         `json:"description"`
+	District        string         `json:"district"`
+	FgisSetID       string         `json:"fgisSetId"`
+	CalcGeneration  int64          `json:"calcGeneration,omitempty"`
+	Status          EstimateStatus `json:"status"`
+	Items           []EstimateItem `json:"items"`
+	Total           float64        `json:"total"`
+	CreatedAt       time.Time      `json:"createdAt"`
+	UpdatedAt       time.Time      `json:"updatedAt"`
 }
 
 type EstimateLineType string
@@ -233,6 +234,8 @@ type CompanyLicensesView struct {
 }
 
 type AppSettings struct {
-	CalcWorkerCount int  `json:"calcWorkerCount"`
-	Editable        bool `json:"editable"`
+	CalcWorkerCount    int  `json:"calcWorkerCount"`
+	CalcStartBatchSize int  `json:"calcStartBatchSize"`
+	CalcClientBatchSize int `json:"calcClientBatchSize"`
+	Editable           bool `json:"editable"`
 }

@@ -22,6 +22,7 @@ const state = {
   adminLicenses: null,
   adminLicensesCompanyId: "",
   adminQueueStats: null,
+  adminMonitoring: null,
 };
 
 const showMessage = bindMessage(document.querySelector("#message"));
@@ -65,9 +66,15 @@ const els = {
   adminQueuePurgeTarget: document.querySelector("#adminQueuePurgeTarget"),
   adminQueuePurgeButton: document.querySelector("#adminQueuePurgeButton"),
   refreshAdminQueueButton: document.querySelector("#refreshAdminQueueButton"),
+  adminMonitoringSection: document.querySelector("#adminMonitoringSection"),
+  adminMonitoringStats: document.querySelector("#adminMonitoringStats"),
+  adminMonitoringLinks: document.querySelector("#adminMonitoringLinks"),
+  adminMonitoringHint: document.querySelector("#adminMonitoringHint"),
+  refreshAdminMonitoringButton: document.querySelector("#refreshAdminMonitoringButton"),
 };
 
 let adminQueuePollTimer = null;
+let adminMonitoringPollTimer = null;
 
 els.loginForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -142,6 +149,15 @@ els.refreshAdminQueueButton?.addEventListener("click", async () => {
   try {
     await refreshAdminQueueStats();
     showMessage("Статистика обновлена", "ok");
+  } catch (error) {
+    showMessage(error.message, "error");
+  }
+});
+
+els.refreshAdminMonitoringButton?.addEventListener("click", async () => {
+  try {
+    await refreshAdminMonitoring();
+    showMessage("Мониторинг обновлён", "ok");
   } catch (error) {
     showMessage(error.message, "error");
   }
@@ -296,6 +312,21 @@ async function refreshAdminEstimateLocks() {
   }
 }
 
+async function refreshAdminMonitoring() {
+  try {
+    state.adminMonitoring = await api("/api/admin/monitoring");
+    if (state.adminSection === "monitoring") {
+      renderAdminMonitoring();
+    }
+  } catch (error) {
+    if (state.adminSection === "monitoring") {
+      els.adminMonitoringStats.innerHTML = `<p class="admin-queue-alerts">Не удалось загрузить мониторинг: ${escapeHTML(error.message)}</p>`;
+      els.adminMonitoringLinks.innerHTML = "";
+    }
+    throw error;
+  }
+}
+
 async function refreshAdminQueueStats() {
   state.adminQueueStats = await api("/api/admin/queue-stats");
   if (state.adminSection === "queue") {
@@ -347,6 +378,7 @@ const adminSectionViews = {
   licenses: () => els.adminLicensesSection,
   estimates: () => els.adminEstimatesSection,
   queue: () => els.adminQueueSection,
+  monitoring: () => els.adminMonitoringSection,
 };
 
 function setActiveAdminSection(section) {
@@ -369,6 +401,7 @@ async function switchAdminSection(section) {
   renderAdminNav();
   setActiveAdminSection(section);
   stopAdminQueuePoll();
+  stopAdminMonitoringPoll();
 
   if (section === "users") {
     await refreshAdminUsers();
@@ -383,6 +416,12 @@ async function switchAdminSection(section) {
   if (section === "queue") {
     await refreshAdminQueueStats();
     startAdminQueuePoll();
+    return;
+  }
+
+  if (section === "monitoring") {
+    await refreshAdminMonitoring();
+    startAdminMonitoringPoll();
     return;
   }
 
@@ -424,6 +463,9 @@ function renderShell() {
     } else if (state.adminSection === "queue") {
       renderAdminQueue();
       startAdminQueuePoll();
+    } else if (state.adminSection === "monitoring") {
+      renderAdminMonitoring();
+      startAdminMonitoringPoll();
     } else {
       renderAdminUsers();
     }
@@ -798,6 +840,145 @@ function renderAdminQueue() {
       </tbody>
     </table>
   `;
+}
+
+function monitoringNumber(value, fractionDigits = 0) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "—";
+  }
+  return number.toLocaleString("ru-RU", {
+    maximumFractionDigits: fractionDigits,
+    minimumFractionDigits: fractionDigits,
+  });
+}
+
+function monitoringMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    return "—";
+  }
+  return `${monitoringNumber(number, number >= 100 ? 0 : 1)} мс`;
+}
+
+function renderAdminMonitoring() {
+  const data = state.adminMonitoring;
+  if (!data) {
+    els.adminMonitoringStats.innerHTML = `<p class="muted">Загрузка…</p>`;
+    els.adminMonitoringLinks.innerHTML = "";
+    return;
+  }
+
+  const services = data.services || {};
+  const http = data.http || {};
+  const calc = data.calc || {};
+  const queue = data.queue || {};
+  const links = data.links || {};
+  const alerts = queue.alerts || {};
+  const activeAlerts = Object.entries(alerts)
+    .filter(([, active]) => active)
+    .map(([key]) => key);
+  const errorsByStage = Object.entries(calc.errorsByStage || {}).filter(([, count]) => Number(count) > 0);
+  const collectedAt = data.collectedAt ? formatAdminDateTime(data.collectedAt) : "—";
+
+  els.adminMonitoringHint.textContent = `Обновлено: ${collectedAt}. Детальная очередь — в разделе «Очередь».`;
+
+  els.adminMonitoringStats.innerHTML = `
+    <div class="admin-queue-grid">
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">API metrics</span>
+        <strong class="${queueStatusClass(services.api, true)}">${queueBoolLabel(services.api)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Auth metrics</span>
+        <strong class="${queueStatusClass(services.auth, true)}">${queueBoolLabel(services.auth)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Calc worker metrics</span>
+        <strong class="${queueStatusClass(services.worker, true)}">${queueBoolLabel(services.worker)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">HTTP запросов</span>
+        <strong>${monitoringNumber(http.requestsTotal)}</strong>
+        <span class="muted admin-queue-sub">5xx: ${monitoringNumber(http.errorsTotal)}</span>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Запусков расчёта</span>
+        <strong>${monitoringNumber(calc.startsTotal)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Обработано строк</span>
+        <strong>${monitoringNumber(calc.consumerProcessed)}</strong>
+        <span class="muted admin-queue-sub">дубликаты: ${monitoringNumber(calc.consumerDuplicates)}</span>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Ошибки calc</span>
+        <strong class="${(calc.consumerFailed ?? 0) > 0 ? "admin-queue-warn" : ""}">${monitoringNumber(calc.consumerFailed)}</strong>
+        <span class="muted admin-queue-sub">dead: ${monitoringNumber(calc.consumerDead)} · retry: ${monitoringNumber(calc.consumerRetried)}</span>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Среднее время calc</span>
+        <strong>${monitoringMs(calc.avgDurationMs)}</strong>
+        <span class="muted admin-queue-sub">GSN ${monitoringMs(calc.avgGsnMs)} · pricing ${monitoringMs(calc.avgPricingMs)}</span>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">DLQ / Outbox</span>
+        <strong class="${(queue.dlq ?? 0) > 0 ? "admin-queue-warn" : ""}">${monitoringNumber(queue.dlq)} / ${monitoringNumber(queue.outboxPending)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Pipeline ready</span>
+        <strong class="${queueStatusClass(queue.pipelineReady, true)}">${queueBoolLabel(queue.pipelineReady)}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Consumer heartbeat</span>
+        <strong class="${(queue.consumerAgeSec ?? -1) > 45 ? "admin-queue-warn" : "admin-queue-ok"}">${queue.consumerAgeSec >= 0 ? `${monitoringNumber(queue.consumerAgeSec, 1)} с` : "—"}</strong>
+      </div>
+      <div class="admin-queue-card">
+        <span class="admin-queue-label">Publisher / Consumer</span>
+        <strong class="${queueStatusClass(queue.publisherOnline, true)}">${queueBoolLabel(queue.publisherOnline)} / ${queueBoolLabel(queue.consumerOnline)}</strong>
+      </div>
+    </div>
+    ${
+      errorsByStage.length
+        ? `<p class="admin-queue-alerts"><strong>Ошибки по этапам:</strong> ${errorsByStage.map(([stage, count]) => `${escapeHTML(stage)}=${monitoringNumber(count)}`).join(", ")}</p>`
+        : ""
+    }
+    ${
+      activeAlerts.length
+        ? `<p class="admin-queue-alerts"><strong>Алерты очереди:</strong> ${activeAlerts.map((key) => escapeHTML(key)).join(", ")}</p>`
+        : `<p class="muted admin-queue-alerts">Активных алертов очереди нет.</p>`
+    }
+  `;
+
+  const linkItems = [
+    links.grafana ? { href: links.grafana, label: "Grafana" } : null,
+    links.prometheus ? { href: links.prometheus, label: "Prometheus" } : null,
+    links.healthz ? { href: links.healthz, label: "Healthz JSON" } : null,
+  ].filter(Boolean);
+
+  els.adminMonitoringLinks.innerHTML = linkItems.length
+    ? `<div class="admin-monitoring-links-grid">${linkItems
+        .map(
+          (item) => `
+            <a class="secondary button-link" href="${escapeHTML(item.href)}" target="_blank" rel="noopener noreferrer">${escapeHTML(item.label)}</a>
+          `,
+        )
+        .join("")}</div>`
+    : "";
+}
+
+function startAdminMonitoringPoll() {
+  stopAdminMonitoringPoll();
+  adminMonitoringPollTimer = window.setInterval(() => {
+    void refreshAdminMonitoring().catch(() => {});
+  }, 30000);
+}
+
+function stopAdminMonitoringPoll() {
+  if (adminMonitoringPollTimer != null) {
+    window.clearInterval(adminMonitoringPollTimer);
+    adminMonitoringPollTimer = null;
+  }
 }
 
 function startAdminQueuePoll() {

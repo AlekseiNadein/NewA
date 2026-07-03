@@ -37,6 +37,7 @@ type rabbitJobMessage struct {
 	District       string    `json:"district"`
 	Quantity       float64   `json:"quantity"`
 	RawText        string    `json:"rawText"`
+	RequestID      string    `json:"requestId"`
 	Attempt        int       `json:"attempt"`
 	MaxAttempts    int       `json:"maxAttempts"`
 	CreatedAt      time.Time `json:"createdAt"`
@@ -270,26 +271,28 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 		District:    message.District,
 		Quantity:    message.Quantity,
 		RawText:     message.RawText,
+		RequestID:   message.RequestID,
 		Attempts:    message.Attempt,
 		MaxAttempts: message.MaxAttempts,
 	}
-	if skip, reason := w.store.ShouldSkipCalcDelivery(ctx, job); skip {
+	logCtx := observability.WithRequestID(ctx, message.RequestID)
+	if skip, reason := w.store.ShouldSkipCalcDelivery(logCtx, job); skip {
 		consumerDuplicates.Add(1)
 		observability.RecordCalcProcessed("duplicate")
 		if reason == "receipt exists" {
-			if err := w.store.ReconcileCalcLineFromReceipt(ctx, job); err != nil {
-				slog.Warn("rabbit calc receipt reconcile failed", "job", job.ID, "estimate", job.EstimateID, "line", job.LineID, "error", err)
+			if err := w.store.ReconcileCalcLineFromReceipt(logCtx, job); err != nil {
+				observability.LogCalcWarn(logCtx, "rabbit calc receipt reconcile failed", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID, "error", err)
 			}
 		}
-		slog.Info("rabbit calc duplicate skipped", "job", job.ID, "estimate", job.EstimateID, "line", job.LineID, "reason", reason)
+		observability.LogCalcInfo(logCtx, "rabbit calc duplicate skipped", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID, "reason", reason)
 		_ = delivery.Ack(false)
 		return
 	}
-	if err := w.processJob(ctx, job); err != nil {
+	if err := w.processJob(logCtx, job); err != nil {
 		consumerFailed.Add(1)
 		observability.RecordCalcProcessed("failed")
-		slog.Warn("rabbit calc processing failed", "job", job.ID, "error", err)
-		_ = w.store.FailEstimateCalcJob(ctx, job, err)
+		observability.LogCalcWarn(logCtx, "rabbit calc processing failed", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID, "error", err)
+		_ = w.store.FailEstimateCalcJob(logCtx, job, err)
 		message.Attempt++
 		routingKey := cfg.DeadRoutingKey
 		permanent := isPermanentCalcError(err)
@@ -320,6 +323,7 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 	}
 	consumerProcessed.Add(1)
 	observability.RecordCalcProcessed("ok")
+	observability.LogCalcInfo(logCtx, "rabbit calc completed", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID)
 	_ = delivery.Ack(false)
 }
 

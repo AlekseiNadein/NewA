@@ -61,36 +61,47 @@ func (w *Worker) Run(ctx context.Context, workerID string) {
 
 func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) error {
 	started := time.Now()
+	logCtx := observability.WithRequestID(ctx, job.RequestID)
 	defer func() {
 		observability.ObserveCalcDuration(time.Since(started).Seconds())
 	}()
 
 	code := job.Code
 	if code == "" {
+		observability.RecordCalcError("validate")
 		return fmt.Errorf("record code is empty")
 	}
 
-	jobCtx, cancel := context.WithTimeout(ctx, jobProcessTimeout)
+	jobCtx, cancel := context.WithTimeout(logCtx, jobProcessTimeout)
 	defer cancel()
 
+	gsnStarted := time.Now()
 	record, err := w.gsn.GetRecordDetail(jobCtx, code, job.FgisSetID, job.District)
+	observability.ObserveCalcGSNDuration(time.Since(gsnStarted).Seconds())
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(jobCtx.Err(), context.DeadlineExceeded) {
+			observability.RecordCalcError("gsn_timeout")
 			return fmt.Errorf("GSN lookup timed out after %s", jobProcessTimeout)
 		}
 		if errors.Is(err, gsn.ErrNotConfigured) {
+			observability.RecordCalcError("gsn_config")
 			return err
 		}
+		observability.RecordCalcError("gsn")
 		return fmt.Errorf("read GSN record %q: %w", code, err)
 	}
 
-	quantity, err := w.resolveJobQuantity(ctx, job)
+	quantity, err := w.resolveJobQuantity(jobCtx, job)
 	if err != nil {
+		observability.RecordCalcError("quantity")
 		return fmt.Errorf("resolve line quantity: %w", err)
 	}
 
+	pricingStarted := time.Now()
 	pricing, err := estimatecalc.LinePricingFromRecord(record, quantity)
+	observability.ObserveCalcPricingDuration(time.Since(pricingStarted).Seconds())
 	if err != nil {
+		observability.RecordCalcError("pricing")
 		return fmt.Errorf("price record %q: %w", code, err)
 	}
 
@@ -104,7 +115,7 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		return fmt.Errorf("encode calc result: %w", err)
 	}
 
-	return w.store.CompleteEstimateCalcJob(ctx, job, store.EstimateLineCalcResult{
+	return w.store.CompleteEstimateCalcJob(logCtx, job, store.EstimateLineCalcResult{
 		Code:         record.Code,
 		OriginalCode: record.OriginalCode,
 		Name:         record.Name,

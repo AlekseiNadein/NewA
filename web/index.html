@@ -324,6 +324,14 @@
                 Worker-ов расчета
                 <input id="calcWorkerCountInput" name="calcWorkerCount" type="number" min="1" max="16" step="1" />
               </label>
+              <label>
+                Пачка на расчёт
+                <input id="calcStartBatchSizeInput" name="calcStartBatchSize" type="number" min="1" max="500" step="1" />
+              </label>
+              <label>
+                Пачка для клиента
+                <input id="calcClientBatchSizeInput" name="calcClientBatchSize" type="number" min="1" max="500" step="1" />
+              </label>
               <div class="dialog-actions">
                 <button id="saveAppSettingsButton" type="submit">Сохранить настройки</button>
               </div>
@@ -338,6 +346,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
     <script src="/login-draft.js?v=20260629c"></script>
-    <script src="/app.js?v=20260701d"></script>
+    <script src="/app.js?v=20260703c"></script>
   </body>
 </html>

@@ -229,6 +229,8 @@ const ESTIMATE_LOCK_HEARTBEAT_MS = 30000;
 const LICENSE_SESSION_HEARTBEAT_MS = 30000;
 const ESTIMATE_CALC_STATUS_POLL_MS = 800;
 const ESTIMATE_CALC_APPLY_CHUNK = 80;
+const ENABLE_ESTIMATE_CALC_STATUS_POLLING = false;
+const ENABLE_ESTIMATE_CALC_BATCH_LISTENER = true;
 let estimateLockPollTimer = 0;
 let estimateLockHeartbeatTimer = 0;
 let licenseSessionHeartbeatTimer = 0;
@@ -238,12 +240,15 @@ let pendingEditorRemountEstimateId = null;
 let editorOpeningEstimateId = null;
 let estimateCalcAwaitingServer = new Set();
 const estimateCalcProgressTargets = new Map();
+let estimateCalcBatchControllers = new Map();
 let estimateCalcApplyToken = 0;
 let estimateCalcProgressAnimFrame = 0;
 let editorTableInteractionEnabled = false;
 let editorTableBodyReady = false;
 let editorTableBodyRenderToken = 0;
 let editorTableRowRefreshFrame = 0;
+let editorTableVisibleRefreshFrame = 0;
+const estimateTableRowRefreshPendingIds = new Map();
 const LARGE_ESTIMATE_CALC_LINE_THRESHOLD = 250;
 const LARGE_ESTIMATE_CALC_STATUS_POLL_MS = 2000;
 const LARGE_ESTIMATE_CALC_APPLY_CHUNK = 120;
@@ -321,6 +326,8 @@ const els = {
   showHierarchyCodeToggle: document.querySelector("#showHierarchyCodeToggle"),
   appSettingsForm: document.querySelector("#appSettingsForm"),
   calcWorkerCountInput: document.querySelector("#calcWorkerCountInput"),
+  calcStartBatchSizeInput: document.querySelector("#calcStartBatchSizeInput"),
+  calcClientBatchSizeInput: document.querySelector("#calcClientBatchSizeInput"),
   saveAppSettingsButton: document.querySelector("#saveAppSettingsButton"),
   appSettingsHint: document.querySelector("#appSettingsHint"),
   constructionTree: document.querySelector("#constructionTree"),
@@ -554,11 +561,15 @@ els.appSettingsForm?.addEventListener("submit", async (event) => {
     return;
   }
   const calcWorkerCount = Number(els.calcWorkerCountInput?.value || 0);
+  const calcStartBatchSize = Number(els.calcStartBatchSizeInput?.value || 0);
+  const calcClientBatchSize = Number(els.calcClientBatchSizeInput?.value || 0);
   try {
     const settings = await api("/api/settings", {
       method: "PUT",
       body: {
         calcWorkerCount,
+        calcStartBatchSize,
+        calcClientBatchSize,
       },
     });
     state.appSettings = settings;
@@ -843,6 +854,7 @@ els.editorContent.addEventListener(
     const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, state.editorTab));
     if (estimate) {
       maybeFlushEditorTableBodyOnScroll(scrollEl, estimate);
+      maybeRefreshVisibleEstimateTableRowsOnScroll(estimate);
     }
   },
   { passive: true, capture: true },
@@ -979,6 +991,7 @@ async function bootstrapAppData(existingRequestId) {
     if (requestId !== loadAppRequestId) {
       return;
     }
+    rehydrateEmptyOpenEstimates();
     await restoreOpenEstimateLocks();
     if (requestId !== loadAppRequestId) {
       return;
@@ -1410,7 +1423,12 @@ async function loadAppSettings({ force = false } = {}) {
 }
 
 function renderSettings() {
-  const settings = state.appSettings || { calcWorkerCount: 2, editable: false };
+  const settings = state.appSettings || {
+    calcWorkerCount: 2,
+    calcStartBatchSize: 50,
+    calcClientBatchSize: 50,
+    editable: false,
+  };
   if (els.showHierarchyCodeToggle) {
     els.showHierarchyCodeToggle.checked = state.showHierarchyCode;
   }
@@ -1418,13 +1436,21 @@ function renderSettings() {
     els.calcWorkerCountInput.value = String(settings.calcWorkerCount || 2);
     els.calcWorkerCountInput.disabled = !settings.editable;
   }
+  if (els.calcStartBatchSizeInput) {
+    els.calcStartBatchSizeInput.value = String(settings.calcStartBatchSize || 50);
+    els.calcStartBatchSizeInput.disabled = !settings.editable;
+  }
+  if (els.calcClientBatchSizeInput) {
+    els.calcClientBatchSizeInput.value = String(settings.calcClientBatchSize || 50);
+    els.calcClientBatchSizeInput.disabled = !settings.editable;
+  }
   if (els.saveAppSettingsButton) {
     els.saveAppSettingsButton.disabled = !settings.editable;
   }
   if (els.appSettingsHint) {
     els.appSettingsHint.textContent = settings.editable
-      ? "Изменение применится сервисом расчета автоматически в течение нескольких секунд."
-      : "Изменять количество worker-ов может только администратор.";
+      ? "Изменения параметров расчета применяются автоматически в течение нескольких секунд."
+      : "Изменять параметры расчета может только администратор.";
   }
 }
 
@@ -2368,6 +2394,26 @@ function renderEditor() {
     els.editorContent.innerHTML = `<p class="muted">Выберите смету для редактирования.</p>`;
     return;
   }
+  if (
+    isPersistedEstimateId(estimate.id) &&
+    (!Array.isArray(estimate.items) || estimate.items.length === 0)
+  ) {
+    els.editorEyebrow.textContent = "Редактор сметы";
+    els.editorTitle.classList.add("hidden");
+    els.editorDescription.classList.add("hidden");
+    renderEditorEstimateViewModes(estimate);
+    els.editorContent.innerHTML = `<p class="muted">Загрузка сметы…</p>`;
+    syncEstimateCalcStatusPolling();
+    void ensureOpenEstimateHydrated(estimate.id).then((hydrated) => {
+      if (!hydrated) {
+        return;
+      }
+      if (state.section === "editor" && sameEstimateId(state.editorTab, estimate.id)) {
+        renderEditor();
+      }
+    });
+    return;
+  }
   if (editorOpeningEstimateId && sameEstimateId(editorOpeningEstimateId, estimate.id)) {
     els.editorEyebrow.textContent = "Редактор сметы";
     els.editorTitle.classList.add("hidden");
@@ -2909,8 +2955,13 @@ async function applyDistrictDialog() {
   els.districtDialog.close();
 
   if (estimate.district !== previousDistrict) {
-    (estimate.items || []).forEach(clearGsnLineCalcEnrichment);
     showMessage("Сметный район обновлён", "ok");
+    saveEditorState();
+    renderEditor();
+    if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
+      await restartEstimateCalculationAfterContextChange(estimateID);
+      return;
+    }
   }
 
   saveEditorState();
@@ -3126,6 +3177,19 @@ function applyEstimateCalcPricingFromJson(item, calcJson) {
   }
 }
 
+function applyEstimateCalcDisplayFromRecord(item, calcJson) {
+  const record = parseEstimateCalcJsonRecord({ calcJson });
+  if (!record) {
+    return false;
+  }
+  item.isWork = record.isWork !== false;
+  if (!item.isWork) {
+    item.unitPriceText = record.unitPriceText || "";
+    item.unitPriceIndex = record.unitPriceIndex || "";
+  }
+  return true;
+}
+
 function applyEstimateCalcLineResult(item, status) {
   if (!item || !status) {
     return;
@@ -3196,6 +3260,8 @@ function initCalcProgressGrandTotalTarget() {
   return {
     runningGrandTotal: 0,
     countedDoneLineIds: new Set(),
+    lineTotals: new Map(),
+    baseGrandTotal: 0,
   };
 }
 
@@ -3332,23 +3398,44 @@ function accumulateCalcGrandTotalFromItems(estimateId, items) {
   if (!target.countedDoneLineIds) {
     Object.assign(target, initCalcProgressGrandTotalTarget());
   }
-  let added = 0;
-  (items || []).forEach((item) => {
+  accumulateCalcGrandTotalFromPairs(estimateId, items, items);
+}
+
+function accumulateCalcGrandTotalFromPairs(estimateId, pairsItems, allItems = null) {
+  const key = estimateCalcTargetKey(estimateId);
+  const target = estimateCalcProgressTargets.get(key);
+  if (!target) {
+    return;
+  }
+  if (!target.countedDoneLineIds) {
+    Object.assign(target, initCalcProgressGrandTotalTarget());
+  }
+  if (!target.lineTotals) {
+    target.lineTotals = new Map();
+  }
+  const items = allItems || pairsItems || [];
+  if (!target.baseGrandTotal && items.length) {
+    target.baseGrandTotal = estimateCalcProgressBaseGrandTotal(items);
+  }
+  let delta = 0;
+  (pairsItems || []).forEach((item) => {
     if (!item || !estimateLineNeedsGsnCalc(item) || item.calcStatus !== "done") {
-      return;
-    }
-    const lineKey = item.id;
-    if (target.countedDoneLineIds.has(lineKey)) {
       return;
     }
     if (estimateCalcRecordNeedsApply(item)) {
       applyEstimateCalcRecord(item, item.calcJson);
     }
-    target.countedDoneLineIds.add(lineKey);
-    added += estimateGsnLineCalcGrandTotal(item);
+    const lineTotal = estimateGsnLineCalcGrandTotal(item);
+    const prev = target.lineTotals.get(item.id) ?? 0;
+    if (prev === lineTotal && target.countedDoneLineIds.has(item.id)) {
+      return;
+    }
+    delta += lineTotal - prev;
+    target.lineTotals.set(item.id, lineTotal);
+    target.countedDoneLineIds.add(item.id);
   });
-  if (added) {
-    target.runningGrandTotal = (target.runningGrandTotal ?? 0) + added;
+  if (delta) {
+    target.runningGrandTotal = (target.runningGrandTotal ?? target.baseGrandTotal ?? 0) + delta;
   }
 }
 
@@ -3419,16 +3506,18 @@ function ensureEstimateCalcProgressTarget(estimateId, estimate = null) {
   if (!itemTotal) {
     return previous || null;
   }
-  const fromItems = estimateCalcProgress(resolved.items, key);
 
   if (!previous) {
+    const baseGrandTotal = estimateCalcProgressBaseGrandTotal(resolved.items);
     estimateCalcProgressTargets.set(key, {
       total: itemTotal,
-      processed: fromItems.processed,
-      errors: fromItems.errors,
+      processed: 0,
+      errors: 0,
       displayed: 0,
       largeEstimate: itemTotal > LARGE_ESTIMATE_CALC_LINE_THRESHOLD,
       ...initCalcProgressGrandTotalTarget(),
+      baseGrandTotal,
+      runningGrandTotal: baseGrandTotal,
     });
     return estimateCalcProgressTargets.get(key);
   }
@@ -3436,10 +3525,10 @@ function ensureEstimateCalcProgressTarget(estimateId, estimate = null) {
   estimateCalcProgressTargets.set(key, {
     ...previous,
     total: Math.max(itemTotal, previous.total ?? 0),
-    processed: Math.max(previous.processed ?? 0, fromItems.processed),
-    errors: Math.max(previous.errors ?? 0, fromItems.errors),
     countedDoneLineIds: previous.countedDoneLineIds ?? new Set(),
-    runningGrandTotal: previous.runningGrandTotal ?? 0,
+    lineTotals: previous.lineTotals ?? new Map(),
+    baseGrandTotal: previous.baseGrandTotal ?? estimateCalcProgressBaseGrandTotal(resolved.items),
+    runningGrandTotal: previous.runningGrandTotal ?? previous.baseGrandTotal ?? 0,
   });
   return estimateCalcProgressTargets.get(key);
 }
@@ -3463,7 +3552,10 @@ function restartEstimateTableCalculation(estimateId, estimate = null) {
   }
   const calcTotal = estimateCalcProgressTotal(resolved.items);
   if (calcTotal > 0) {
+    const baseGrandTotal = estimateCalcProgressBaseGrandTotal(resolved.items);
     const grand = initCalcProgressGrandTotalTarget();
+    grand.baseGrandTotal = baseGrandTotal;
+    grand.runningGrandTotal = baseGrandTotal;
     estimateCalcProgressTargets.set(key, {
       total: calcTotal,
       processed: 0,
@@ -3571,6 +3663,43 @@ function calcProgressFromStatusPayload(estimate, statuses, resolveItem) {
   return { total, processed, errors };
 }
 
+function applyServerCalcSummary(estimateId, estimate, summary) {
+  const key = estimateCalcTargetKey(estimateId);
+  if (!key || !summary) {
+    return;
+  }
+  const total = Number(summary.total) || 0;
+  if (!total) {
+    return;
+  }
+  const processed = Number(summary.processed) || 0;
+  const errors = Number(summary.errors) || 0;
+  const previous = estimateCalcProgressTargets.get(key);
+  const baseGrandTotal = estimateCalcProgressBaseGrandTotal(estimate?.items || []);
+  estimateCalcProgressTargets.set(key, {
+    total,
+    processed,
+    errors,
+    displayed: processed,
+    largeEstimate: true,
+    runningGrandTotal: baseGrandTotal + (Number(summary.grandTotal) || 0),
+    countedDoneLineIds: previous?.countedDoneLineIds ?? new Set(),
+  });
+  if (processed >= total) {
+    clearEstimateCalcAwaitingServer(estimateId);
+  }
+}
+
+function estimateCalcItemsNeedServerSync(estimate) {
+  const itemProgress = estimateCalcProgress(estimate?.items || [], estimate?.id || "");
+  return itemProgress.total > 0 && itemProgress.processed < itemProgress.total;
+}
+
+function refreshLargeEstimateCalcUI(estimate) {
+  updateEditorCalcProgressDom(estimate);
+  updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: true });
+}
+
 function getEstimateCalcProgressDisplay(estimateId, items) {
   const key = estimateCalcTargetKey(estimateId);
   const target = estimateCalcProgressTargets.get(key);
@@ -3596,7 +3725,7 @@ function getEstimateCalcProgressDisplay(estimateId, items) {
   };
 }
 
-function updateCalcProgressTarget(estimateId, progress, estimate = null) {
+function updateCalcProgressTarget(estimateId, progress, estimate = null, { useProgressOnly = false } = {}) {
   const key = estimateCalcTargetKey(estimateId);
   const previous = estimateCalcProgressTargets.get(key);
   const itemTotal = estimate ? estimateCalcProgressTotal(estimate.items) : 0;
@@ -3608,29 +3737,35 @@ function updateCalcProgressTarget(estimateId, progress, estimate = null) {
   const fromItems = estimate ? estimateCalcProgress(estimate.items, key) : progress;
   let processed = fromItems.processed ?? 0;
   let errors = fromItems.errors ?? 0;
-  if (!awaiting) {
+  if (useProgressOnly || awaiting) {
+    processed = progress.processed ?? 0;
+    errors = progress.errors ?? 0;
+  } else if (!awaiting) {
     processed = Math.max(progress.processed ?? 0, processed, previous?.processed ?? 0);
     errors = Math.max(progress.errors ?? 0, errors, previous?.errors ?? 0);
   }
   if (!total) {
     return;
   }
-  const done = processed >= total;
+  const done = Boolean(progress.done) || processed >= total;
+  const prevDisplayed = previous?.displayed ?? 0;
+  const displayed =
+    done || prevDisplayed >= processed ? processed : Math.min(processed, prevDisplayed);
   estimateCalcProgressTargets.set(key, {
     total,
     processed,
     errors,
-    displayed: processed,
+    displayed,
     largeEstimate: previous?.largeEstimate,
     runningGrandTotal:
       done && estimate
         ? estimateGrandTotalForDisplay(estimate.items)
-        : awaiting
-          ? (previous?.runningGrandTotal ?? 0)
-          : (previous?.runningGrandTotal ?? 0),
+        : (previous?.runningGrandTotal ?? previous?.baseGrandTotal ?? 0),
     countedDoneLineIds: previous?.countedDoneLineIds ?? new Set(),
+    lineTotals: previous?.lineTotals ?? new Map(),
+    baseGrandTotal: previous?.baseGrandTotal ?? (estimate ? estimateCalcProgressBaseGrandTotal(estimate.items) : 0),
   });
-  if (done) {
+  if (progress.done) {
     clearEstimateCalcAwaitingServer(estimateId);
   }
 }
@@ -4789,8 +4924,9 @@ function applyEstimateCalcStatusPairs(estimate, pairs, { skipRecords = false } =
         if (applyEstimateCalcRecord(item, status.calcJson)) {
           changed = true;
         }
-      } else {
+      } else if (status.calcJson) {
         applyEstimateCalcPricingFromJson(item, status.calcJson);
+        applyEstimateCalcDisplayFromRecord(item, status.calcJson);
       }
     }
   });
@@ -4806,15 +4942,15 @@ function refreshEstimateTableRowFromItem(row, item) {
     codeEl.innerHTML = formatBreakableCode(estimateLineDisplayCode(item));
   }
   const isPartialGsn = estimateLineShowsGsnPartial(item);
+  const displayName = estimateLineDisplayName(item);
+  const displayUnit = estimateLineDisplayUnit(item);
   const nameCell = row.querySelector(".editor-estimate-name-cell");
   if (nameCell) {
-    nameCell.innerHTML = isPartialGsn
-      ? renderEstimateCalcStatusBadge(item)
-      : `${escapeHTML(item.name || "")}${renderEstimateCalcStatusBadge(item)}`;
+    nameCell.innerHTML = `${escapeHTML(displayName)}${renderEstimateCalcStatusBadge(item)}`;
   }
   const unitCell = row.querySelector(".editor-estimate-unit-cell");
   if (unitCell) {
-    unitCell.textContent = isPartialGsn ? "" : item.unit || "";
+    unitCell.textContent = displayUnit;
   }
   const quantityCell = row.querySelector(".editor-estimate-quantity-cell");
   if (quantityCell) {
@@ -4822,12 +4958,108 @@ function refreshEstimateTableRowFromItem(row, item) {
   }
   const priceCell = row.querySelector(".editor-estimate-price-cell");
   if (priceCell) {
-    priceCell.textContent = isPartialGsn ? "" : formatEstimateUnitPrice(item);
+    priceCell.innerHTML = isPartialGsn ? "" : formatEstimateUnitPrice(item);
   }
   const totalCell = row.querySelector(".editor-estimate-total-cell");
   if (totalCell) {
     totalCell.textContent = isPartialGsn ? "" : formatEstimateMoney(estimateLineTotal(item));
   }
+}
+
+function refreshEstimateTableRowsByIds(estimate, lineIds) {
+  if (!estimate || !lineIds?.length) {
+    return 0;
+  }
+  if (
+    state.section !== "editor" ||
+    !sameEstimateId(state.editorTab, estimate.id) ||
+    state.estimateViewMode !== "table" ||
+    !isEditorContentMountedForEstimate(estimate.id)
+  ) {
+    return 0;
+  }
+  const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
+  if (!tbody) {
+    return 0;
+  }
+  const idSet = new Set(lineIds);
+  const itemsById = new Map((estimate.items || []).map((item) => [item.id, item]));
+  const scrollEl = tbody.closest(".editor-estimate-table-body-scroll");
+  const scrollRect = scrollEl?.getBoundingClientRect();
+  const buffer = 120;
+  let refreshed = 0;
+  tbody.querySelectorAll(`[data-editor-line-edit="${CSS.escape(estimate.id)}"]`).forEach((button) => {
+    const lineId = button.dataset.editorLineId;
+    if (!idSet.has(lineId)) {
+      return;
+    }
+    const row = button.closest("tr");
+    const item = itemsById.get(lineId);
+    if (!row || !item) {
+      return;
+    }
+    if (scrollRect) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom < scrollRect.top - buffer || rect.top > scrollRect.bottom + buffer) {
+        return;
+      }
+    }
+    refreshEstimateTableRowFromItem(row, item);
+    refreshed += 1;
+  });
+  return refreshed;
+}
+
+function refreshVisibleEstimateTableRows(estimate) {
+  if (
+    state.section !== "editor" ||
+    !sameEstimateId(state.editorTab, estimate.id) ||
+    state.estimateViewMode !== "table" ||
+    !isEditorContentMountedForEstimate(estimate.id)
+  ) {
+    return 0;
+  }
+  const tbody = els.editorContent?.querySelector(".editor-estimate-table tbody");
+  if (!tbody) {
+    return 0;
+  }
+  const itemsById = new Map((estimate.items || []).map((item) => [item.id, item]));
+  const scrollEl = tbody.closest(".editor-estimate-table-body-scroll");
+  const scrollRect = scrollEl?.getBoundingClientRect();
+  const buffer = 160;
+  let refreshed = 0;
+  tbody.querySelectorAll(`[data-editor-line-edit="${CSS.escape(estimate.id)}"]`).forEach((button) => {
+    const item = itemsById.get(button.dataset.editorLineId);
+    const row = button.closest("tr");
+    if (!item || !row || !estimateLineCalcDone(item)) {
+      return;
+    }
+    if (scrollRect) {
+      const rect = row.getBoundingClientRect();
+      if (rect.bottom < scrollRect.top - buffer || rect.top > scrollRect.bottom + buffer) {
+        return;
+      }
+    }
+    refreshEstimateTableRowFromItem(row, item);
+    refreshed += 1;
+  });
+  return refreshed;
+}
+
+function maybeRefreshVisibleEstimateTableRowsOnScroll(estimate) {
+  if (!estimate || !estimateCalcInProgress(estimate.id, estimate.items)) {
+    return;
+  }
+  if (editorTableVisibleRefreshFrame) {
+    return;
+  }
+  editorTableVisibleRefreshFrame = requestAnimationFrame(() => {
+    editorTableVisibleRefreshFrame = 0;
+    const live = state.openEstimates.find((item) => sameEstimateId(item.id, estimate.id));
+    if (live) {
+      refreshVisibleEstimateTableRows(live);
+    }
+  });
 }
 
 function refreshAllRenderedEstimateTableRows(estimate) {
@@ -4991,6 +5223,292 @@ async function finalizeEstimateCalcIfComplete(estimate, statuses) {
   }
 }
 
+function getEstimateCalcBatchController(estimateId) {
+  let ctrl = estimateCalcBatchControllers.get(estimateId);
+  if (!ctrl) {
+    ctrl = {
+      stopped: true,
+      applying: false,
+      listenerPromise: null,
+      session: 0,
+      cursor: { applied: 0, generation: 0 },
+    };
+    estimateCalcBatchControllers.set(estimateId, ctrl);
+  }
+  return ctrl;
+}
+
+function resetEstimateCalcBatchCursor(estimateId, generation = 0) {
+  const ctrl = getEstimateCalcBatchController(estimateId);
+  ctrl.cursor = { applied: 0, generation: Number(generation || 0) };
+}
+
+async function abortEstimateCalcBatchSession(estimateId) {
+  const ctrl = getEstimateCalcBatchController(estimateId);
+  ctrl.session += 1;
+  ctrl.stopped = true;
+  stopCalcProgressAnimation();
+  estimateTableRowRefreshPendingIds.delete(estimateId);
+  const pending = ctrl.listenerPromise;
+  if (pending) {
+    await pending.catch(() => {});
+  }
+}
+
+function syncEstimateCalcDisplayAfterReset(estimate) {
+  if (
+    state.section !== "editor" ||
+    !sameEstimateId(state.editorTab, estimate.id) ||
+    state.estimateViewMode !== "table"
+  ) {
+    return;
+  }
+  updateEditorCalcProgressDom(estimate);
+  updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: isLargeEstimateForCalc(estimate) });
+  if (isLargeEstimateForCalc(estimate)) {
+    refreshAllRenderedEstimateTableRows(estimate);
+  } else if (isEditorContentMountedForEstimate(estimate.id)) {
+    updateEditorTableContent(estimate, { refreshBody: true });
+  }
+}
+
+async function cancelEstimateCalculation(estimateId, { retries = 3 } = {}) {
+  if (!isPersistedEstimateId(estimateId)) {
+    return null;
+  }
+  let lastError = null;
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      const response = await api(`/api/estimates/${estimateId}/calc/cancel`, { method: "POST" });
+      resetEstimateCalcBatchCursor(estimateId, response?.generation || 0);
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError || new Error("Не удалось отменить расчёт сметы");
+}
+
+async function stopEstimateCalcBatchListener(estimateId) {
+  await abortEstimateCalcBatchSession(estimateId);
+}
+
+async function cancelAndStopEstimateCalc(estimateId) {
+  await abortEstimateCalcBatchSession(estimateId);
+  try {
+    return await cancelEstimateCalculation(estimateId);
+  } catch {
+    return null;
+  }
+}
+
+async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGeneration = null } = {}) {
+  if (!estimate || !batch) {
+    return false;
+  }
+  const batchGeneration = Number(batch.generation ?? 0);
+  if (expectedGeneration != null && batchGeneration !== Number(expectedGeneration)) {
+    return false;
+  }
+
+  const pairs = matchCalcStatusesToItems(estimate.items || [], batch.items || []).filter(({ item, status }) =>
+    calcStatusNeedsApply(item, status),
+  );
+  const appliedCount = Number(batch.applied ?? 0);
+  const batchProgress = {
+    total: Number(batch.total || 0),
+    processed: appliedCount,
+    errors: Number(batch.errors || 0),
+    done: Boolean(batch.done),
+  };
+
+  if (!pairs.length) {
+    ensureEstimateCalcProgressTarget(estimate.id, estimate);
+    updateCalcProgressTarget(estimate.id, batchProgress, estimate, { useProgressOnly: true });
+    if (
+      state.section === "editor" &&
+      sameEstimateId(state.editorTab, estimate.id) &&
+      state.estimateViewMode === "table"
+    ) {
+      updateEditorCalcProgressDom(estimate);
+    }
+    return true;
+  }
+
+  const large = isLargeEstimateForCalc(estimate);
+  applyEstimateCalcStatusPairs(estimate, pairs, { skipRecords: large && !batch.done });
+  enrichEditorEstimateItems(estimate.items);
+  ensureEstimateCalcProgressTarget(estimate.id, estimate);
+  accumulateCalcGrandTotalFromPairs(
+    estimate.id,
+    pairs.map(({ item }) => item),
+    estimate.items,
+  );
+  updateCalcProgressTarget(estimate.id, batchProgress, estimate, { useProgressOnly: true });
+
+  if (
+    state.section !== "editor" ||
+    !sameEstimateId(state.editorTab, estimate.id) ||
+    state.estimateViewMode !== "table"
+  ) {
+    return true;
+  }
+
+  const changedLineIds = pairs.map(({ item }) => item.id).filter(Boolean);
+  startCalcProgressAnimation(estimate.id);
+  updateEditorCalcProgressDom(estimate);
+  updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: large });
+  if (large) {
+    scheduleEstimateTableRowRefresh(estimate, changedLineIds);
+    if (batch.done) {
+      syncLargeEstimateTableRows(estimate);
+    }
+  } else {
+    refreshEstimateTableRowsByIds(estimate, changedLineIds);
+    if (batch.done) {
+      updateEditorTableContent(estimate, { refreshBody: true });
+    }
+  }
+  return true;
+}
+
+async function runEstimateCalcBatchListener(estimateId, listenSession) {
+  const ctrl = getEstimateCalcBatchController(estimateId);
+  const session = listenSession ?? ctrl.session;
+
+  const run = (async () => {
+    while (!ctrl.stopped && ctrl.session === session) {
+      if (ctrl.applying) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        continue;
+      }
+
+      const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+      if (
+        !estimate ||
+        state.section !== "editor" ||
+        state.estimateViewMode !== "table" ||
+        !sameEstimateId(state.editorTab, estimateId)
+      ) {
+        break;
+      }
+
+      try {
+        const params = new URLSearchParams({
+          applied: String(ctrl.cursor.applied || 0),
+          generation: String(ctrl.cursor.generation || 0),
+          wait: "1",
+        });
+        const batch = await api(`/api/estimates/${estimateId}/calc-batch?${params.toString()}`);
+        if (ctrl.stopped || ctrl.session !== session) {
+          break;
+        }
+
+        if (batch.reset) {
+          resetEstimateCalcBatchCursor(estimateId, batch.generation || 0);
+          continue;
+        }
+
+        ctrl.cursor.generation = Number(batch.generation || ctrl.cursor.generation || 0);
+        const expectedGeneration = ctrl.cursor.generation;
+
+        if (batch.items?.length || batch.done || Number(batch.applied ?? 0) !== Number(ctrl.cursor.applied ?? 0)) {
+          ctrl.applying = true;
+          try {
+            await applyEstimateCalcBatchResponse(estimate, batch, { expectedGeneration });
+            ctrl.cursor.applied = Number(batch.applied ?? ctrl.cursor.applied ?? 0);
+            if (Number(batch.processed || 0) > 0) {
+              saveEditorState();
+            }
+          } finally {
+            ctrl.applying = false;
+          }
+        }
+
+        if (ctrl.stopped || ctrl.session !== session) {
+          break;
+        }
+
+        if (batch.done) {
+          ctrl.cursor.applied = Number(batch.applied ?? ctrl.cursor.applied ?? 0);
+          updateEditorCalcProgressDom(estimate);
+          saveEditorState();
+          break;
+        }
+      } catch {
+        if (ctrl.stopped || ctrl.session !== session) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+  })();
+
+  ctrl.listenerPromise = run;
+  try {
+    await run;
+  } finally {
+    if (ctrl.listenerPromise === run) {
+      ctrl.listenerPromise = null;
+    }
+  }
+}
+
+async function startEstimateCalcBatchListener(estimateId) {
+  if (!ENABLE_ESTIMATE_CALC_BATCH_LISTENER || !isPersistedEstimateId(estimateId)) {
+    return;
+  }
+  stopEstimateCalcStatusPolling();
+  const ctrl = getEstimateCalcBatchController(estimateId);
+  ctrl.stopped = false;
+  void runEstimateCalcBatchListener(estimateId, ctrl.session);
+}
+
+async function restartEstimateCalculationAfterContextChange(estimateId) {
+  const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+  if (!estimate || state.estimateViewMode !== "table") {
+    return;
+  }
+
+  await abortEstimateCalcBatchSession(estimateId);
+  resetGsnLinesForTableCalculation(estimate.items);
+  restartEstimateTableCalculation(estimateId, estimate);
+  resetEstimateCalcBatchCursor(estimateId, 0);
+  markEstimateCalcAwaitingServer(estimateId);
+  syncEstimateCalcDisplayAfterReset(estimate);
+
+  try {
+    await cancelEstimateCalculation(estimateId);
+  } catch (error) {
+    clearEstimateCalcAwaitingServer(estimateId);
+    showMessage(error.message || "Не удалось отменить расчёт сметы", "error");
+    return;
+  }
+
+  try {
+    await persistOpenEstimate(estimateId, { requireSave: true });
+    await startEstimateCalculation(estimateId);
+    estimateCalcPollBlockedByPersist.delete(estimateId);
+    const ctrl = getEstimateCalcBatchController(estimateId);
+    ctrl.stopped = false;
+    void runEstimateCalcBatchListener(estimateId, ctrl.session);
+    startCalcProgressAnimation(estimateId);
+    syncEstimateCalcDisplayAfterReset(estimate);
+  } catch (error) {
+    clearEstimateCalcAwaitingServer(estimateId);
+    showMessage(error.message || "Не удалось перезапустить расчёт сметы", "error");
+    // Попытка поднять listener даже при ошибке старта — batch может догнать уже идущий расчёт.
+    const ctrl = getEstimateCalcBatchController(estimateId);
+    if (!ctrl.listenerPromise) {
+      ctrl.stopped = false;
+      void runEstimateCalcBatchListener(estimateId, ctrl.session);
+    }
+  }
+}
+
 async function pollEstimateCalcStatus(estimateId) {
   if (!state.me || !isPersistedEstimateId(estimateId) || estimateCalcStatusPollInflight === estimateId) {
     return;
@@ -5002,16 +5520,70 @@ async function pollEstimateCalcStatus(estimateId) {
 
   const key = estimateCalcTargetKey(estimateId);
   const calcInFlight = estimateHasInFlightGsnCalc(estimate.items);
+  const large = isLargeEstimateForCalc(estimate);
 
   estimateCalcStatusPollInflight = estimateId;
   try {
-    const large = isLargeEstimateForCalc(estimate);
-    if (!large && !calcInFlight) {
+    if (large) {
+      const summary = await api(`/api/estimates/${estimateId}/calc-status?summary=1`);
+      applyServerCalcSummary(estimateId, estimate, summary);
+      if (
+        state.section === "editor" &&
+        sameEstimateId(state.editorTab, estimateId) &&
+        state.estimateViewMode === "table"
+      ) {
+        refreshLargeEstimateCalcUI(estimate);
+      }
+
+      const total = Number(summary?.total) || 0;
+      const processed = Number(summary?.processed) || 0;
+      if (total > 0 && processed < total) {
+        return;
+      }
+      if (!estimateCalcItemsNeedServerSync(estimate)) {
+        return;
+      }
+
+      const response = await api(`/api/estimates/${estimateId}/calc-status?lite=1`);
+      const statuses = response.items || [];
+      enrichEditorEstimateItems(estimate.items);
+      await applyIncrementalEstimateCalcUpdates(estimate, statuses);
+
+      if (
+        state.section === "editor" &&
+        sameEstimateId(state.editorTab, estimateId) &&
+        state.estimateViewMode === "table"
+      ) {
+        ensureEditorTableBodyComplete(estimate);
+      }
+
+      ensureEstimateCalcProgressTarget(estimateId, estimate);
+      updateCalcProgressTarget(estimateId, estimateCalcProgress(estimate.items, estimateId), estimate);
+
+      const progress = estimateCalcProgress(estimate.items, estimateId);
+      if (
+        state.section === "editor" &&
+        sameEstimateId(state.editorTab, estimateId) &&
+        state.estimateViewMode === "table"
+      ) {
+        refreshLargeEstimateCalcUI(estimate);
+        if (progress.total > 0 && progress.processed >= progress.total) {
+          syncLargeEstimateTableRows(estimate);
+        }
+      }
+
+      if (progress.total > 0 && progress.processed >= progress.total) {
+        await finalizeEstimateCalcIfComplete(estimate, statuses);
+      } else if (progress.processed > 0) {
+        saveEditorState();
+      }
+      return;
+    }
+
+    if (!calcInFlight) {
       syncOpenEstimateCalcJsonFromSource(estimateId);
     }
-    const response = await api(
-      `/api/estimates/${estimateId}/calc-status${large ? "?lite=1" : ""}`,
-    );
+    const response = await api(`/api/estimates/${estimateId}/calc-status`);
     const statuses = response.items || [];
     if (estimateCalcStatusPollInflight === estimateId) {
       estimateCalcStatusPollInflight = null;
@@ -5167,9 +5739,16 @@ function stopEstimateCalcStatusPolling() {
   }
   stopCalcProgressAnimation();
   estimateCalcApplyToken += 1;
+  if (state.editorTab && state.editorTab !== "buffer") {
+    stopEstimateCalcBatchListener(state.editorTab);
+  }
 }
 
 function restartEstimateCalcStatusPolling() {
+  if (!ENABLE_ESTIMATE_CALC_STATUS_POLLING) {
+    stopEstimateCalcStatusPolling();
+    return;
+  }
   if (estimateCalcStatusPollTimer) {
     window.clearInterval(estimateCalcStatusPollTimer);
     estimateCalcStatusPollTimer = 0;
@@ -5203,6 +5782,23 @@ function restartEstimateCalcStatusPolling() {
 }
 
 function syncEstimateCalcStatusPolling() {
+  if (ENABLE_ESTIMATE_CALC_BATCH_LISTENER) {
+    const estimateId = state.section === "editor" && state.estimateViewMode === "table" ? state.editorTab : "";
+    if (!estimateId || estimateId === "buffer" || !isPersistedEstimateId(estimateId)) {
+      stopEstimateCalcStatusPolling();
+      return;
+    }
+    if (persistEstimateInflight.has(estimateId) || estimateCalcPollBlockedByPersist.has(estimateId)) {
+      return;
+    }
+    const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+    if (estimate) {
+      ensureEstimateCalcProgressTarget(estimateId, estimate);
+      updateEditorCalcProgressDom(estimate);
+    }
+    startEstimateCalcBatchListener(estimateId);
+    return;
+  }
   restartEstimateCalcStatusPolling();
 }
 
@@ -5371,14 +5967,16 @@ function renderEstimateTableRow(options) {
   const isChild = rowKind === "child";
   const isStructural = estimateLineIsStructural(item);
   const isPartialGsn = estimateLineShowsGsnPartial(item);
+  const displayName = estimateLineDisplayName(item);
+  const displayUnit = estimateLineDisplayUnit(item);
   const lineTotal = estimateLineTotal(item, parentItem);
   const quantityCell = isStructural ? "" : formatNumber(item.quantity);
   return `
     <tr class="${estimateTableRowClass(item, rowKind)}">
       <td class="editor-estimate-index-cell">${escapeHTML(indexLabel)}</td>
       ${renderEstimateCodeCell(estimateId, item, { rowKind, hasResources, isExpanded })}
-      <td class="editor-estimate-name-cell${isChild ? " editor-estimate-name-cell-child" : ""}">${isPartialGsn ? renderEstimateCalcStatusBadge(item) : `${escapeHTML(item.name || "")}${renderEstimateCalcStatusBadge(item)}`}</td>
-      <td class="editor-estimate-unit-cell">${isPartialGsn ? "" : escapeHTML(item.unit || "")}</td>
+      <td class="editor-estimate-name-cell${isChild ? " editor-estimate-name-cell-child" : ""}">${escapeHTML(displayName)}${renderEstimateCalcStatusBadge(item)}</td>
+      <td class="editor-estimate-unit-cell">${escapeHTML(displayUnit)}</td>
       <td class="editor-estimate-quantity-cell">${quantityCell}</td>
       <td class="editor-estimate-price-cell">${isPartialGsn ? "" : formatEstimateUnitPrice(item)}</td>
       <td class="editor-estimate-total-cell">${isPartialGsn ? "" : formatEstimateMoney(lineTotal)}</td>
@@ -5571,6 +6169,11 @@ function ensureEditorTableBodyComplete(estimate) {
     return true;
   }
 
+  if (items.length > LARGE_ESTIMATE_CALC_LINE_THRESHOLD) {
+    mountEditorTableBody(estimate, tbody);
+    return false;
+  }
+
   editorTableBodyReady = false;
   cancelEditorTableBodyRender();
   const scrollEl = tbody.closest(".editor-estimate-table-body-scroll");
@@ -5597,23 +6200,37 @@ function maybeFlushEditorTableBodyOnScroll(scrollEl, estimate) {
   ensureEditorTableBodyComplete(estimate);
 }
 
-function scheduleEstimateTableRowRefresh(estimate) {
-  const estimateId = estimate.id;
+function scheduleEstimateTableRowRefresh(estimate, lineIds = []) {
+  const estimateId = estimate?.id;
+  if (!estimateId) {
+    return;
+  }
+  const pending = estimateTableRowRefreshPendingIds.get(estimateId) || new Set();
+  (lineIds || []).forEach((lineId) => {
+    if (lineId) {
+      pending.add(lineId);
+    }
+  });
+  estimateTableRowRefreshPendingIds.set(estimateId, pending);
   if (editorTableRowRefreshFrame) {
     return;
   }
   editorTableRowRefreshFrame = requestAnimationFrame(() => {
     editorTableRowRefreshFrame = 0;
-    const live = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
-    if (
-      live &&
-      state.section === "editor" &&
-      sameEstimateId(state.editorTab, estimateId) &&
-      state.estimateViewMode === "table"
-    ) {
-      ensureEditorTableBodyComplete(live);
-      refreshAllRenderedEstimateTableRows(live);
-    }
+    const entries = [...estimateTableRowRefreshPendingIds.entries()];
+    estimateTableRowRefreshPendingIds.clear();
+    entries.forEach(([id, ids]) => {
+      const live = state.openEstimates.find((item) => sameEstimateId(item.id, id));
+      if (
+        !live ||
+        state.section !== "editor" ||
+        !sameEstimateId(state.editorTab, id) ||
+        state.estimateViewMode !== "table"
+      ) {
+        return;
+      }
+      refreshEstimateTableRowsByIds(live, [...ids]);
+    });
   });
 }
 
@@ -5628,8 +6245,46 @@ function mountEditorTableBody(estimate, tbody) {
 
   cancelEditorTableBodyRender();
   editorTableBodyReady = false;
-  tbody.innerHTML = buildEstimateTableRows(estimate).join("");
-  markEditorTableBodyReady();
+
+  if (items.length <= LARGE_ESTIMATE_CALC_LINE_THRESHOLD) {
+    tbody.innerHTML = buildEstimateTableRows(estimate).join("");
+    markEditorTableBodyReady();
+    return;
+  }
+
+  const token = ++editorTableBodyRenderToken;
+  const chunk = 150;
+  let start = 0;
+  tbody.innerHTML = `<tr data-table-mount-progress><td colspan="8" class="muted">Загрузка таблицы: 0/${items.length}</td></tr>`;
+
+  const step = () => {
+    if (token !== editorTableBodyRenderToken) {
+      return;
+    }
+    const end = Math.min(start + chunk, items.length);
+    const html = buildEstimateTableRows(estimate, {
+      start,
+      end,
+      positionNumberStart: countEstimateTablePositionNumberBefore(items, start),
+    }).join("");
+    if (start === 0) {
+      tbody.innerHTML = html;
+    } else {
+      tbody.insertAdjacentHTML("beforeend", html);
+    }
+    start = end;
+    if (start < items.length) {
+      const progressRow = tbody.querySelector("[data-table-mount-progress]");
+      if (progressRow) {
+        progressRow.querySelector("td").textContent = `Загрузка таблицы: ${start}/${items.length}`;
+      }
+      requestAnimationFrame(step);
+      return;
+    }
+    markEditorTableBodyReady();
+  };
+
+  requestAnimationFrame(step);
 }
 
 function renderEstimateViewModeTabs(estimate) {
@@ -6031,6 +6686,7 @@ function clearGsnLineCalcEnrichment(item) {
 
 function enrichEditorEstimateItems(items) {
   (items || []).forEach((item) => {
+    hydrateEstimateItemFromSourceDataRawText(item);
     if (estimateCalcRecordNeedsApply(item)) {
       applyEstimateCalcRecord(item, item.calcJson);
     }
@@ -6260,6 +6916,20 @@ function estimateSourceDataPositionSerializedFields(item) {
     total = parsed.total;
   }
   return { name, unit, total };
+}
+
+function estimateLineDisplayName(item) {
+  if (estimateLineIsStructural(item)) {
+    return String(item?.name || "").trim();
+  }
+  return estimateSourceDataPositionSerializedFields(item).name;
+}
+
+function estimateLineDisplayUnit(item) {
+  if (estimateLineIsStructural(item)) {
+    return "";
+  }
+  return estimateSourceDataPositionSerializedFields(item).unit;
 }
 
 function serializeSourceDataPositionLine(item) {
@@ -6996,6 +7666,7 @@ async function runEstimateTableCalculation(estimateId, options = {}) {
 
   const fgisSetId = options.fgisSetId ?? estimate.fgisSetId ?? "";
   if (!options.skipStatePrep) {
+    await abortEstimateCalcBatchSession(estimateId);
     prepareEstimateTableCalculationState(estimateId, estimate);
   } else {
     markEstimateCalcAwaitingServer(estimateId);
@@ -7033,10 +7704,11 @@ async function runEstimateTableCalculation(estimateId, options = {}) {
 
     setSectionLicenseBlocked("editor", false);
     startLicenseSessionSync();
+    resetEstimateCalcBatchCursor(estimateId, 0);
     await persistOpenEstimate(estimateId, { requireSave: true });
     await startEstimateCalculation(estimateId);
     estimateCalcPollBlockedByPersist.delete(estimateId);
-    syncEstimateCalcStatusPolling();
+    startEstimateCalcBatchListener(estimateId);
 
     if (
       state.section === "editor" &&
@@ -7058,10 +7730,9 @@ async function runEstimateTableCalculation(estimateId, options = {}) {
     if (
       state.section === "editor" &&
       sameEstimateId(state.editorTab, estimateId) &&
-      state.estimateViewMode === "table" &&
-      !estimateCalcStatusPollTimer
+      state.estimateViewMode === "table"
     ) {
-      syncEstimateCalcStatusPolling();
+      startEstimateCalcBatchListener(estimateId);
     }
   }
 }
@@ -7135,6 +7806,7 @@ async function setEstimateViewMode(estimateId, mode) {
     readEstimateHeaderFieldsFromDom(estimateId);
     writeEstimateTextDraftFromState(estimateId);
     saveEditorState();
+    await cancelAndStopEstimateCalc(estimateId);
     stopEstimateCalcStatusPolling();
     stopLicenseSessionSync();
     void releaseLicenseSessions();
@@ -7548,6 +8220,70 @@ async function addBufferToEstimate(estimateId) {
 
 function findCachedSourceEstimate(estimateId) {
   return state.estimates.find((item) => sameEstimateId(item.id, estimateId)) || null;
+}
+
+function rehydrateOpenEstimateFromSource(estimate, sourceEstimate) {
+  if (!estimate || !sourceEstimate) {
+    return null;
+  }
+  const hydrated = buildEditorEstimateFromSource(sourceEstimate, estimate);
+  hydrated.id = normalizeEstimateId(hydrated.id);
+  hydrateEstimateSourceDataFgisSet(hydrated);
+  return hydrated;
+}
+
+function rehydrateEmptyOpenEstimates() {
+  let changed = false;
+  state.openEstimates.forEach((estimate, index) => {
+    if (!isPersistedEstimateId(estimate.id)) {
+      return;
+    }
+    if (Array.isArray(estimate.items) && estimate.items.length > 0) {
+      return;
+    }
+    const sourceEstimate = findCachedSourceEstimate(estimate.id);
+    if (!sourceEstimate) {
+      return;
+    }
+    const hydrated = rehydrateOpenEstimateFromSource(estimate, sourceEstimate);
+    if (hydrated) {
+      state.openEstimates[index] = hydrated;
+      changed = true;
+    }
+  });
+  if (changed) {
+    saveEditorState();
+  }
+  return changed;
+}
+
+async function ensureOpenEstimateHydrated(estimateId) {
+  const index = state.openEstimates.findIndex((item) => sameEstimateId(item.id, estimateId));
+  if (index < 0) {
+    return false;
+  }
+  const estimate = state.openEstimates[index];
+  if (!isPersistedEstimateId(estimate.id)) {
+    return false;
+  }
+  if (Array.isArray(estimate.items) && estimate.items.length > 0) {
+    return false;
+  }
+  let sourceEstimate = findCachedSourceEstimate(estimateId);
+  if (!sourceEstimate) {
+    await refreshConstructionData();
+    sourceEstimate = findCachedSourceEstimate(estimateId);
+  }
+  if (!sourceEstimate) {
+    return false;
+  }
+  const hydrated = rehydrateOpenEstimateFromSource(estimate, sourceEstimate);
+  if (!hydrated) {
+    return false;
+  }
+  state.openEstimates[index] = hydrated;
+  saveEditorState();
+  return true;
 }
 
 function mergeEditorEstimateFromExisting(editorEstimate, existingEstimate) {
@@ -8625,16 +9361,15 @@ async function updateEstimateFgisSet(estimateID, value) {
   }
 
   setSectionLicenseBlocked("editor", false);
-  (estimate.items || []).forEach(clearGsnLineCalcEnrichment);
-  if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
-    restartEstimateTableCalculation(estimateID, estimate);
-  }
 
   try {
     renderEditor();
     startLicenseSessionSync();
-    await persistOpenEstimate(estimateID, { skipTextDraftSync: true });
-    void pollEstimateCalcStatus(estimateID);
+    if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
+      await restartEstimateCalculationAfterContextChange(estimateID);
+    } else {
+      await persistOpenEstimate(estimateID, { skipTextDraftSync: true });
+    }
     showMessage("Набор сметных цен обновлён, позиции поставлены в очередь на пересчёт", "ok");
   } catch (error) {
     estimate.fgisSetId = previousFgisSetId;
@@ -8801,6 +9536,12 @@ async function closeEstimateFromEditor(estimateID) {
 
   await flushPersistOpenEstimate(estimateID);
 
+  if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
+    await cancelAndStopEstimateCalc(estimateID);
+  } else {
+    stopEstimateCalcBatchListener(estimateID);
+  }
+
   state.openEstimates.splice(index, 1);
   invalidateEstimateTextDraft(estimateID);
   await releaseEstimateLock(estimateID);
@@ -8854,10 +9595,10 @@ async function openEstimateInEditor(estimateID) {
         sourceEstimate = findCachedSourceEstimate(estimateId);
       }
       if (sourceEstimate) {
-        const hydratedEstimate = buildEditorEstimateFromSource(sourceEstimate, existingEstimate);
-        hydratedEstimate.id = normalizeEstimateId(hydratedEstimate.id);
-        hydrateEstimateSourceDataFgisSet(hydratedEstimate);
-        state.openEstimates[existingIndex] = hydratedEstimate;
+        const hydratedEstimate = rehydrateOpenEstimateFromSource(existingEstimate, sourceEstimate);
+        if (hydratedEstimate) {
+          state.openEstimates[existingIndex] = hydratedEstimate;
+        }
       }
     }
     state.estimateViewMode = "text";

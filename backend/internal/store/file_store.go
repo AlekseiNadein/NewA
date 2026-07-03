@@ -33,6 +33,7 @@ type FileStore struct {
 	path          string
 	treeDB        *pgxpool.Pool
 	queueMode     string
+	disableCalcEnqueue bool
 	calcStartMu   sync.Mutex
 	calcStartJobs map[string]struct{}
 	constructions map[string]domain.Construction
@@ -78,9 +79,11 @@ const (
 
 func NewFileStore(path string, treeDatabaseURL string) (*FileStore, error) {
 	queueMode := normalizeQueueMode(os.Getenv("APP_QUEUE_MODE"))
+	disableCalcEnqueue := envBool("APP_DISABLE_ESTIMATE_CALC_ENQUEUE")
 	store := &FileStore{
 		path:          path,
 		queueMode:     queueMode,
+		disableCalcEnqueue: disableCalcEnqueue,
 		calcStartJobs: map[string]struct{}{},
 		constructions: map[string]domain.Construction{},
 		objects:       map[string]domain.ConstructionObject{},
@@ -761,6 +764,7 @@ CREATE INDEX IF NOT EXISTS idx_app_estimates_object_id ON app_estimates(object_i
 
 ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS district TEXT NOT NULL DEFAULT '';
 ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS fgis_set_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE app_estimates ADD COLUMN IF NOT EXISTS calc_generation BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS app_estimate_lines (
     id TEXT PRIMARY KEY,
@@ -1284,6 +1288,11 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 	if _, err := tx.Exec(ctx, `DELETE FROM app_estimate_lines WHERE estimate_id = $1`, item.ID); err != nil {
 		return err
 	}
+	var calcGeneration int64
+	if err := tx.QueryRow(ctx, `SELECT calc_generation FROM app_estimates WHERE id = $1`, item.ID).Scan(&calcGeneration); err != nil {
+		return err
+	}
+	item.CalcGeneration = calcGeneration
 	lines := ensureUniqueEstimateLineIDs(item.Items)
 	for i, line := range lines {
 		line = prepareEstimateLineForStorage(item, line)
@@ -1317,12 +1326,16 @@ func (s *FileStore) deleteEstimateDB(ctx context.Context, id, companyID string, 
 }
 
 type UpdateAppSettingsInput struct {
-	CalcWorkerCount int `json:"calcWorkerCount"`
+	CalcWorkerCount     int `json:"calcWorkerCount"`
+	CalcStartBatchSize  int `json:"calcStartBatchSize"`
+	CalcClientBatchSize int `json:"calcClientBatchSize"`
 }
 
 func defaultAppSettings() domain.AppSettings {
 	return domain.AppSettings{
-		CalcWorkerCount: 2,
+		CalcWorkerCount:     2,
+		CalcStartBatchSize:  50,
+		CalcClientBatchSize: 50,
 	}
 }
 
@@ -1336,11 +1349,39 @@ func NormalizeCalcWorkerCount(value int) int {
 	return value
 }
 
+func NormalizeCalcStartBatchSize(value int) int {
+	if value < 1 {
+		return 1
+	}
+	if value > 500 {
+		return 500
+	}
+	return value
+}
+
+func NormalizeCalcClientBatchSize(value int) int {
+	if value < 1 {
+		return 1
+	}
+	if value > 500 {
+		return 500
+	}
+	return value
+}
+
 func normalizeAppSettings(settings domain.AppSettings) domain.AppSettings {
 	if settings.CalcWorkerCount == 0 {
 		settings.CalcWorkerCount = defaultAppSettings().CalcWorkerCount
 	}
+	if settings.CalcStartBatchSize == 0 {
+		settings.CalcStartBatchSize = defaultAppSettings().CalcStartBatchSize
+	}
+	if settings.CalcClientBatchSize == 0 {
+		settings.CalcClientBatchSize = defaultAppSettings().CalcClientBatchSize
+	}
 	settings.CalcWorkerCount = NormalizeCalcWorkerCount(settings.CalcWorkerCount)
+	settings.CalcStartBatchSize = NormalizeCalcStartBatchSize(settings.CalcStartBatchSize)
+	settings.CalcClientBatchSize = NormalizeCalcClientBatchSize(settings.CalcClientBatchSize)
 	return settings
 }
 
@@ -1356,7 +1397,9 @@ func (s *FileStore) GetAppSettings() (domain.AppSettings, error) {
 
 func (s *FileStore) UpdateAppSettings(input UpdateAppSettingsInput) (domain.AppSettings, error) {
 	settings := domain.AppSettings{
-		CalcWorkerCount: NormalizeCalcWorkerCount(input.CalcWorkerCount),
+		CalcWorkerCount:     NormalizeCalcWorkerCount(input.CalcWorkerCount),
+		CalcStartBatchSize:  NormalizeCalcStartBatchSize(input.CalcStartBatchSize),
+		CalcClientBatchSize: NormalizeCalcClientBatchSize(input.CalcClientBatchSize),
 	}
 	if s.treeDB != nil {
 		return s.updateAppSettingsDB(context.Background(), settings)
@@ -1370,7 +1413,7 @@ func (s *FileStore) UpdateAppSettings(input UpdateAppSettingsInput) (domain.AppS
 
 func (s *FileStore) getAppSettingsDB(ctx context.Context) (domain.AppSettings, error) {
 	settings := defaultAppSettings()
-	rows, err := s.treeDB.Query(ctx, `SELECT key, value FROM app_settings WHERE key = 'calc_worker_count'`)
+	rows, err := s.treeDB.Query(ctx, `SELECT key, value FROM app_settings WHERE key IN ('calc_worker_count', 'calc_start_batch_size', 'calc_client_batch_size')`)
 	if err != nil {
 		return domain.AppSettings{}, err
 	}
@@ -1384,6 +1427,16 @@ func (s *FileStore) getAppSettingsDB(ctx context.Context) (domain.AppSettings, e
 		if key == "calc_worker_count" {
 			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
 				settings.CalcWorkerCount = parsed
+			}
+		}
+		if key == "calc_start_batch_size" {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				settings.CalcStartBatchSize = parsed
+			}
+		}
+		if key == "calc_client_batch_size" {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(value)); err == nil {
+				settings.CalcClientBatchSize = parsed
 			}
 		}
 	}
@@ -1403,6 +1456,22 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
 	if err != nil {
 		return domain.AppSettings{}, err
 	}
+	_, err = s.treeDB.Exec(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ('calc_start_batch_size', $1, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`, strconv.Itoa(settings.CalcStartBatchSize))
+	if err != nil {
+		return domain.AppSettings{}, err
+	}
+	_, err = s.treeDB.Exec(ctx, `
+INSERT INTO app_settings (key, value, updated_at)
+VALUES ('calc_client_batch_size', $1, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+`, strconv.Itoa(settings.CalcClientBatchSize))
+	if err != nil {
+		return domain.AppSettings{}, err
+	}
 	return settings, nil
 }
 
@@ -1419,6 +1488,7 @@ type EstimateCalcJob struct {
 	RawText     string
 	Attempts    int
 	MaxAttempts int
+	RequestID   string
 }
 
 type EstimateLineCalcResult struct {
@@ -1446,6 +1516,14 @@ type EstimateCalcStatus struct {
 	Total        float64         `json:"total,omitempty"`
 	CalcJSON     json.RawMessage `json:"calcJson,omitempty"`
 	CalculatedAt *time.Time      `json:"calculatedAt,omitempty"`
+}
+
+// EstimateCalcSummary is a compact aggregate for progress polling on large estimates.
+type EstimateCalcSummary struct {
+	Total      int     `json:"total"`
+	Processed  int     `json:"processed"`
+	Errors     int     `json:"errors"`
+	GrandTotal float64 `json:"grandTotal"`
 }
 
 func (s *FileStore) EstimateLineQuantityContext(ctx context.Context, estimateID, lineID string) (quantity float64, rawText string, err error) {
@@ -1687,17 +1765,52 @@ WHERE l.estimate_id = $1`, calcJSONExpr)
 	return items, rows.Err()
 }
 
+func (s *FileStore) SummarizeEstimateCalcStatus(ctx context.Context, companyID, estimateID string, includeAll bool) (EstimateCalcSummary, error) {
+	if s.treeDB == nil {
+		return EstimateCalcSummary{}, nil
+	}
+	query := `
+SELECT
+    COUNT(*)::int,
+    COUNT(*) FILTER (WHERE l.calc_status IN ('done', 'failed', 'dead'))::int,
+    COUNT(*) FILTER (WHERE l.calc_status IN ('failed', 'dead'))::int,
+    COALESCE(SUM(l.total) FILTER (WHERE l.calc_status = 'done'), 0)
+FROM app_estimate_lines l
+JOIN app_estimates e ON e.id = l.estimate_id
+WHERE l.estimate_id = $1
+    AND l.line_type = $2
+    AND l.source = 'gsn'
+    AND COALESCE(NULLIF(TRIM(l.code), ''), NULLIF(TRIM(l.original_code), '')) IS NOT NULL`
+	args := []any{estimateID, string(domain.EstimateLinePosition)}
+	if !includeAll {
+		query += ` AND e.company_id = $3`
+		args = append(args, companyID)
+	}
+	var summary EstimateCalcSummary
+	err := s.treeDB.QueryRow(ctx, query, args...).Scan(
+		&summary.Total,
+		&summary.Processed,
+		&summary.Errors,
+		&summary.GrandTotal,
+	)
+	return summary, err
+}
+
 func (s *FileStore) StartEstimateCalc(ctx context.Context, id, companyID string, includeAll bool) error {
 	if s.treeDB == nil {
 		return nil
 	}
+	if s.disableCalcEnqueue {
+		return nil
+	}
 
 	var estimateCompanyID, district, fgisSetID string
+	var calcGeneration int64
 	err := s.treeDB.QueryRow(ctx, `
-SELECT company_id, district, fgis_set_id
+SELECT company_id, district, fgis_set_id, calc_generation
 FROM app_estimates
 WHERE id = $1
-`, id).Scan(&estimateCompanyID, &district, &fgisSetID)
+`, id).Scan(&estimateCompanyID, &district, &fgisSetID, &calcGeneration)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
@@ -1709,21 +1822,33 @@ WHERE id = $1
 	}
 
 	estimate := domain.Estimate{
-		ID:        id,
-		CompanyID: estimateCompanyID,
-		District:  district,
-		FgisSetID: fgisSetID,
+		ID:             id,
+		CompanyID:      estimateCompanyID,
+		District:       district,
+		FgisSetID:      fgisSetID,
+		CalcGeneration: calcGeneration,
 	}
-	if !s.markEstimateCalcStartJob(id) {
-		return nil
+	settings, err := s.GetAppSettings()
+	if err != nil {
+		return err
 	}
-	go s.runEstimateCalcStart(context.Background(), estimate)
-	return nil
+	for attempt := 0; attempt < 120; attempt++ {
+		if s.markEstimateCalcStartJob(id) {
+			go s.runEstimateCalcStart(context.Background(), estimate, settings.CalcStartBatchSize)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("estimate calc start already in progress")
 }
 
-func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate) {
+func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate, batchSize int) {
 	defer s.unmarkEstimateCalcStartJob(estimate.ID)
-	if err := s.enqueueEstimateCalcBatches(ctx, estimate); err != nil {
+	if err := s.enqueueEstimateCalcBatches(ctx, estimate, batchSize); err != nil {
 		slog.Warn("estimate calc enqueue failed", "estimate", estimate.ID, "error", err)
 	}
 }
@@ -1748,9 +1873,13 @@ type estimateCalcStartLine struct {
 	line domain.EstimateItem
 }
 
-const estimateCalcStartBatchSize = 200
-
-func (s *FileStore) enqueueEstimateCalcBatches(ctx context.Context, estimate domain.Estimate) error {
+func (s *FileStore) enqueueEstimateCalcBatches(ctx context.Context, estimate domain.Estimate, batchSize int) error {
+	if s.disableCalcEnqueue {
+		return nil
+	}
+	if batchSize <= 0 {
+		batchSize = defaultAppSettings().CalcStartBatchSize
+	}
 	rows, err := s.treeDB.Query(ctx, `
 SELECT id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text
 FROM app_estimate_lines
@@ -1777,8 +1906,16 @@ ORDER BY sort_order, id
 		return err
 	}
 
-	for batchStart := 0; batchStart < len(lines); batchStart += estimateCalcStartBatchSize {
-		batchEnd := batchStart + estimateCalcStartBatchSize
+	for batchStart := 0; batchStart < len(lines); batchStart += batchSize {
+		var currentGeneration int64
+		if err := s.treeDB.QueryRow(ctx, `SELECT calc_generation FROM app_estimates WHERE id = $1`, estimate.ID).Scan(&currentGeneration); err != nil {
+			return err
+		}
+		if currentGeneration != estimate.CalcGeneration {
+			return nil
+		}
+
+		batchEnd := batchStart + batchSize
 		if batchEnd > len(lines) {
 			batchEnd = len(lines)
 		}
@@ -1822,6 +1959,19 @@ WHERE estimate_id = $1 AND id = $2
 		}
 	}
 	return nil
+}
+
+func envBool(key string) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return false
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func prepareEstimateLineForStorage(estimate domain.Estimate, line domain.EstimateItem) domain.EstimateItem {
@@ -2281,6 +2431,8 @@ func estimateLineRevision(estimate domain.Estimate, line domain.EstimateItem) in
 	_, _ = hash.Write([]byte(estimate.FgisSetID))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(estimate.District))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(strconv.FormatInt(estimate.CalcGeneration, 10)))
 	value := int64(hash.Sum64() & 0x7fffffffffffffff)
 	if value == 0 {
 		return 1
@@ -2338,8 +2490,8 @@ func normalizeEstimateItem(item domain.EstimateItem) (domain.EstimateItem, float
 			item.Quantity = quantity
 		}
 		item.OriginalCode = ""
-		item.Name = ""
-		item.Unit = ""
+		item.Name = nameFromSourceDataLine(item.RawText)
+		item.Unit = unitFromSourceDataLine(item.RawText)
 		item.UnitPrice = 0
 		item.Total = 0
 		item.CalcJSON = nil

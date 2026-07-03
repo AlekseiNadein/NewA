@@ -29,7 +29,8 @@ alwaysApply: false
 - Полный **`mountEditorContent`** (через `innerHTML`) закрывает открытый `<select>` («Сметные цены и индексы»).
 - Пока фокус в **`.editor-estimate-header`** и редактор уже смонтирован — откладывать remount (`pendingEditorRemountEstimateId`, `flushPendingEditorRemount` на `focusout`).
 - После **`loadFGISSets`**: обновлять только опции селекта (`refreshEditorFgisSetSelect`), не пересоздавать весь редактор.
-- Опрос calc-status: **`updateEditorTableContent`**, не полный remount шапки.
+- Batch-listener `calc-batch` (основной путь): **`updateEditorTableContent`** / **`refreshEstimateTableRowsByIds`** (только видимые строки), не полный remount шапки.
+- Legacy polling `calc-status` на frontend **выключен** (`ENABLE_ESTIMATE_CALC_STATUS_POLLING = false`).
 
 ## Учётные данные
 

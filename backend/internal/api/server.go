@@ -365,6 +365,14 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 		s.handleEstimateLock(w, r, strings.TrimSuffix(id, "/lock"))
 		return
 	}
+	if strings.HasSuffix(id, "/calc-batch") {
+		s.handleEstimateCalcBatch(w, r, strings.TrimSuffix(id, "/calc-batch"))
+		return
+	}
+	if strings.HasSuffix(id, "/calc/cancel") {
+		s.handleEstimateCalcCancel(w, r, strings.TrimSuffix(id, "/calc/cancel"))
+		return
+	}
 	if strings.HasSuffix(id, "/calc-status") {
 		s.handleEstimateCalcStatus(w, r, strings.TrimSuffix(id, "/calc-status"))
 		return
@@ -420,6 +428,16 @@ func (s *Server) handleEstimateCalcStatus(w http.ResponseWriter, r *http.Request
 
 	claims := mustClaims(r)
 	includeAll := claims.Role == domain.RoleSuperAdmin
+	summary := r.URL.Query().Get("summary") == "1" || strings.EqualFold(r.URL.Query().Get("summary"), "true")
+	if summary {
+		calcSummary, err := s.store.SummarizeEstimateCalcStatus(r.Context(), claims.CompanyID, estimateID, includeAll)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, calcSummary)
+		return
+	}
 	lite := r.URL.Query().Get("lite") == "1" || strings.EqualFold(r.URL.Query().Get("lite"), "true")
 	statuses, err := s.store.ListEstimateCalcStatuses(r.Context(), claims.CompanyID, estimateID, includeAll, lite)
 	if err != nil {
@@ -448,6 +466,49 @@ func (s *Server) handleEstimateCalcStart(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) handleEstimateCalcBatch(w http.ResponseWriter, r *http.Request, estimateID string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims := mustClaims(r)
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	applied, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("applied")))
+	generation, _ := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("generation")), 10, 64)
+	wait := r.URL.Query().Get("wait") == "1" || strings.EqualFold(r.URL.Query().Get("wait"), "true")
+
+	batch, err := s.store.FetchEstimateCalcBatch(r.Context(), claims.CompanyID, estimateID, includeAll, applied, generation, wait, 25*time.Second)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, batch)
+}
+
+func (s *Server) handleEstimateCalcCancel(w http.ResponseWriter, r *http.Request, estimateID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	claims := mustClaims(r)
+	if !claims.Role.CanEditEstimates() {
+		writeError(w, http.StatusForbidden, "not enough permissions")
+		return
+	}
+
+	includeAll := claims.Role == domain.RoleSuperAdmin
+	generation, err := s.store.CancelEstimateCalc(r.Context(), claims.CompanyID, estimateID, includeAll)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"generation": generation,
+	})
 }
 
 func (s *Server) handleLicenseSessions(w http.ResponseWriter, r *http.Request) {

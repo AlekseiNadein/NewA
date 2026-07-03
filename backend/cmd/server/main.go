@@ -81,6 +81,7 @@ func main() {
 			RabbitURL: rabbitURL,
 			Interval:  30 * time.Second,
 			Source:    fileStore,
+			Consumer:  store.QueueMetricsBridge{Store: fileStore},
 		})
 	}
 	if (queueMode == "dual" || queueMode == "rabbit") && strings.TrimSpace(rabbitURL) != "" {

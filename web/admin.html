@@ -72,6 +72,7 @@
             <button class="nav-link" data-admin-section="licenses" type="button">Лицензии</button>
             <button class="nav-link" data-admin-section="estimates" type="button">Сметы</button>
             <button class="nav-link" data-admin-section="queue" type="button">Очередь</button>
+            <button class="nav-link" data-admin-section="monitoring" type="button">Мониторинг</button>
           </nav>
         </aside>
 
@@ -225,6 +226,21 @@
             <div id="adminQueueHistory" class="admin-table-wrap"></div>
           </section>
         </div>
+
+        <div id="adminMonitoringSection" class="admin-section-view hidden">
+          <section class="card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Observability</p>
+                <h2>Мониторинг системы</h2>
+                <p id="adminMonitoringHint" class="muted">Сводка метрик Prometheus и состояния сервисов. Подробные графики — в Grafana.</p>
+              </div>
+              <button id="refreshAdminMonitoringButton" class="secondary" type="button">Обновить</button>
+            </div>
+            <div id="adminMonitoringStats" class="admin-queue-stats"></div>
+            <div id="adminMonitoringLinks" class="admin-monitoring-links"></div>
+          </section>
+        </div>
         </section>
       </section>
 
@@ -232,6 +248,6 @@
     </main>
 
     <script src="/admin-login-draft.js?v=20260622h"></script>
-    <script type="module" src="/admin.js?v=20260701a"></script>
+    <script type="module" src="/admin.js?v=20260701c"></script>
   </body>
 </html>

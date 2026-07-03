@@ -58,9 +58,10 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
       "id": 5,
       "targets": [
-        { "expr": "nav_rabbit_connected", "legendFormat": "{{role}}" }
+        { "expr": "nav_rabbit_connected", "legendFormat": "{{role}}" },
+        { "expr": "nav_calc_consumer_heartbeat_age_seconds", "legendFormat": "heartbeat age" }
       ],
-      "title": "Rabbit Connected",
+      "title": "Rabbit / Consumer Health",
       "type": "timeseries"
     },
     {
@@ -83,11 +84,81 @@
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(nav_calc_duration_seconds_bucket[5m])) by (le))",
-          "legendFormat": "p95"
+          "legendFormat": "total p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nav_calc_gsn_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "gsn p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nav_calc_pricing_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "pricing p95"
         }
       ],
       "title": "Calc Duration p95",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum(rate(nav_calc_errors_total[5m])) by (stage)",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "title": "Calc Errors by Stage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 9,
+      "targets": [
+        { "expr": "nav_calc_consumer_processed", "legendFormat": "processed" },
+        { "expr": "nav_calc_consumer_failed", "legendFormat": "failed" },
+        { "expr": "nav_calc_consumer_duplicates", "legendFormat": "duplicates" },
+        { "expr": "rate(nav_estimate_calc_start_total[5m])", "legendFormat": "calc starts/s" }
+      ],
+      "title": "Calc Pipeline Counters",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 36 },
+      "id": 10,
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"nav\"} | json | level=~\"WARN|ERROR\"",
+          "legendFormat": ""
+        }
+      ],
+      "title": "Recent Warnings and Errors",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 46 },
+      "id": 11,
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"nav\"} | json | msg=~\"rabbit calc.*\"",
+          "legendFormat": ""
+        }
+      ],
+      "title": "Calc Worker Logs",
+      "type": "logs"
     }
   ],
   "refresh": "30s",
@@ -97,5 +168,5 @@
   "time": { "from": "now-1h", "to": "now" },
   "title": "NAV Overview",
   "uid": "nav-overview",
-  "version": 1
+  "version": 2
 }

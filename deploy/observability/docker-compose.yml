@@ -1,4 +1,25 @@
 services:
+  loki:
+    image: grafana/loki:3.4.2
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.6.1
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ../../data:/var/log/nav:ro
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v3.2.1
     ports:
@@ -22,4 +43,5 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+      - loki
     restart: unless-stopped

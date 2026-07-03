@@ -1,0 +1,40 @@
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+local.file_match "nav_logs" {
+  path_targets = [{
+    __path__ = "/var/log/nav/*.log",
+    job      = "nav",
+  }]
+}
+
+loki.source.file "nav_files" {
+  targets    = local.file_match.nav_logs.targets
+  forward_to = [loki.process.nav_logs.receiver]
+}
+
+loki.process "nav_logs" {
+  stage.json {
+    expressions = {
+      level       = "level",
+      service     = "service",
+      msg         = "msg",
+      request_id  = "request_id",
+      estimate_id = "estimate_id",
+      line_id     = "line_id",
+      code        = "code",
+    }
+  }
+
+  stage.labels {
+    values = {
+      service = "",
+      level   = "",
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
