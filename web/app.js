@@ -4871,34 +4871,28 @@ function calcStatusNeedsApply(item, status) {
 }
 
 function matchCalcStatusesToItems(items, statuses) {
-  const gsnItems = (items || []).filter(estimateLineNeedsGsnCalc);
-  const gsnStatuses = (statuses || []).filter((status) => String(status?.code || "").trim());
-  const statusByLineId = new Map();
-  gsnStatuses.forEach((status) => {
-    if (status?.lineId) {
-      statusByLineId.set(status.lineId, status);
+  const itemsById = new Map();
+  (items || []).forEach((item) => {
+    if (item?.id) {
+      itemsById.set(item.id, item);
     }
   });
 
   const pairs = [];
-  const matchedStatusIds = new Set();
-  const unmatchedItems = [];
-
-  gsnItems.forEach((item) => {
-    const status = statusByLineId.get(item.id);
-    if (status) {
-      pairs.push({ item, status });
-      matchedStatusIds.add(status.lineId);
+  (statuses || []).forEach((status) => {
+    if (!String(status?.code || "").trim()) {
       return;
     }
-    unmatchedItems.push(item);
+    const lineId = String(status?.lineId || "").trim();
+    if (!lineId) {
+      return;
+    }
+    const item = itemsById.get(lineId);
+    if (!item || !estimateLineNeedsGsnCalc(item)) {
+      return;
+    }
+    pairs.push({ item, status });
   });
-
-  const unmatchedStatuses = gsnStatuses.filter((status) => !matchedStatusIds.has(status.lineId));
-  const zipCount = Math.min(unmatchedItems.length, unmatchedStatuses.length);
-  for (let index = 0; index < zipCount; index += 1) {
-    pairs.push({ item: unmatchedItems[index], status: unmatchedStatuses[index] });
-  }
   return pairs;
 }
 
@@ -5320,13 +5314,14 @@ async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGenerat
   const appliedCount = Number(batch.applied ?? 0);
   const batchProgress = {
     total: Number(batch.total || 0),
-    processed: appliedCount,
+    processed: Number(batch.processed ?? appliedCount),
     errors: Number(batch.errors || 0),
     done: Boolean(batch.done),
   };
 
   if (!pairs.length) {
     ensureEstimateCalcProgressTarget(estimate.id, estimate);
+    syncRunningGrandTotalFromBatch(estimate.id, estimate, batch);
     updateCalcProgressTarget(estimate.id, batchProgress, estimate, { useProgressOnly: true });
     if (
       state.section === "editor" &&
@@ -5347,6 +5342,7 @@ async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGenerat
     pairs.map(({ item }) => item),
     estimate.items,
   );
+  syncRunningGrandTotalFromBatch(estimate.id, estimate, batch);
   updateCalcProgressTarget(estimate.id, batchProgress, estimate, { useProgressOnly: true });
 
   if (
@@ -5378,6 +5374,7 @@ async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGenerat
 async function runEstimateCalcBatchListener(estimateId, listenSession) {
   const ctrl = getEstimateCalcBatchController(estimateId);
   const session = listenSession ?? ctrl.session;
+  let lastBatchDone = false;
 
   const run = (async () => {
     while (!ctrl.stopped && ctrl.session === session) {
@@ -5433,6 +5430,7 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
         }
 
         if (batch.done) {
+          lastBatchDone = true;
           ctrl.cursor.applied = Number(batch.applied ?? ctrl.cursor.applied ?? 0);
           updateEditorCalcProgressDom(estimate);
           saveEditorState();
@@ -5453,6 +5451,24 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
   } finally {
     if (ctrl.listenerPromise === run) {
       ctrl.listenerPromise = null;
+    }
+    if (
+      !lastBatchDone &&
+      !ctrl.stopped &&
+      ctrl.session === session &&
+      state.section === "editor" &&
+      state.estimateViewMode === "table" &&
+      sameEstimateId(state.editorTab, estimateId)
+    ) {
+      const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+      const progress = estimate ? estimateCalcProgress(estimate.items, estimateId) : null;
+      if (progress?.total > 0 && progress.processed < progress.total) {
+        window.setTimeout(() => {
+          if (!ctrl.stopped && ctrl.session === session) {
+            void runEstimateCalcBatchListener(estimateId, session);
+          }
+        }, 1500);
+      }
     }
   }
 }
@@ -9083,6 +9099,78 @@ function estimateLineSyncKey(item) {
   ].join("|");
 }
 
+function syncRunningGrandTotalFromBatch(estimateId, estimate, batch) {
+  if (batch?.grandTotal == null || !Number.isFinite(Number(batch.grandTotal))) {
+    return;
+  }
+  const key = estimateCalcTargetKey(estimateId);
+  const target = estimateCalcProgressTargets.get(key);
+  if (!target) {
+    return;
+  }
+  const base = target.baseGrandTotal ?? estimateCalcProgressBaseGrandTotal(estimate?.items || []);
+  target.runningGrandTotal = base + Number(batch.grandTotal);
+}
+
+function syncEstimateLineIdsFromSaved(localItems, savedItems) {
+  const changes = new Map();
+  if (!Array.isArray(localItems) || !Array.isArray(savedItems) || !localItems.length || !savedItems.length) {
+    return changes;
+  }
+
+  const savedPools = new Map();
+  savedItems.forEach((saved, index) => {
+    const key = estimateLineSyncKey(saved) || `__idx__${index}`;
+    const pool = savedPools.get(key);
+    if (pool) {
+      pool.push(saved);
+    } else {
+      savedPools.set(key, [saved]);
+    }
+  });
+
+  localItems.forEach((local, index) => {
+    const key = estimateLineSyncKey(local) || `__idx__${index}`;
+    const pool = savedPools.get(key);
+    const saved = pool?.length ? pool.shift() : savedItems[index];
+    const savedId = String(saved?.id || "").trim();
+    if (!local || !savedId || local.id === savedId) {
+      return;
+    }
+    changes.set(local.id, savedId);
+    local.id = savedId;
+  });
+  return changes;
+}
+
+function remapEstimateTableLineIds(estimate, idChanges) {
+  if (!estimate?.id || !idChanges?.size) {
+    return;
+  }
+  if (
+    state.section !== "editor" ||
+    !sameEstimateId(state.editorTab, estimate.id) ||
+    state.estimateViewMode !== "table" ||
+    !isEditorContentMountedForEstimate(estimate.id)
+  ) {
+    return;
+  }
+  const selector = `[data-editor-line-edit="${CSS.escape(estimate.id)}"]`;
+  els.editorContent?.querySelectorAll(selector).forEach((button) => {
+    const oldId = button.dataset.editorLineId;
+    const newId = idChanges.get(oldId);
+    if (!newId) {
+      return;
+    }
+    const row = button.closest("tr");
+    row?.querySelectorAll("[data-editor-line-id]").forEach((element) => {
+      if (element.dataset.editorLineId === oldId) {
+        element.dataset.editorLineId = newId;
+      }
+    });
+  });
+}
+
 async function persistOpenEstimate(estimateId, options = {}) {
   if (!state.me || !isPersistedEstimateId(estimateId)) {
     return;
@@ -9153,7 +9241,12 @@ async function persistOpenEstimate(estimateId, options = {}) {
           applyFgisSetToEstimateSourceData(editorEstimate, editorEstimate.fgisSetId);
         }
       }
-      if (Array.isArray(updated.items) && state.estimateViewMode !== "table") {
+      if (Array.isArray(updated.items) && state.estimateViewMode === "table") {
+        const idChanges = syncEstimateLineIdsFromSaved(editorEstimate.items, updated.items);
+        if (idChanges.size) {
+          remapEstimateTableLineIds(editorEstimate, idChanges);
+        }
+      } else if (Array.isArray(updated.items)) {
         const localItems = editorEstimate.items || [];
         const localById = new Map(localItems.map((item) => [item.id, item]));
         const localByKey = new Map();

@@ -3,6 +3,7 @@ package calcworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync/atomic"
@@ -38,6 +39,7 @@ type rabbitJobMessage struct {
 	Quantity       float64   `json:"quantity"`
 	RawText        string    `json:"rawText"`
 	RequestID      string    `json:"requestId"`
+	Traceparent    string    `json:"traceparent"`
 	Attempt        int       `json:"attempt"`
 	MaxAttempts    int       `json:"maxAttempts"`
 	CreatedAt      time.Time `json:"createdAt"`
@@ -276,6 +278,8 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 		MaxAttempts: message.MaxAttempts,
 	}
 	logCtx := observability.WithRequestID(ctx, message.RequestID)
+	logCtx = observability.ExtractAMQPHeaders(logCtx, delivery.Headers)
+	logCtx = observability.ContextWithTraceParent(logCtx, message.Traceparent)
 	if skip, reason := w.store.ShouldSkipCalcDelivery(logCtx, job); skip {
 		consumerDuplicates.Add(1)
 		observability.RecordCalcProcessed("duplicate")
@@ -283,12 +287,16 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 			if err := w.store.ReconcileCalcLineFromReceipt(logCtx, job); err != nil {
 				observability.LogCalcWarn(logCtx, "rabbit calc receipt reconcile failed", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID, "error", err)
 			}
+		} else if reason == "stale line revision" {
+			_ = w.store.FailEstimateCalcJob(logCtx, job, errors.New("stale line revision"))
 		}
 		observability.LogCalcInfo(logCtx, "rabbit calc duplicate skipped", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID, "reason", reason)
 		_ = delivery.Ack(false)
 		return
 	}
-	if err := w.processJob(logCtx, job); err != nil {
+	if err := observability.RunCalcSpan(logCtx, job.EstimateID, job.LineID, job.ID, job.RequestID, message.Traceparent, func(spanCtx context.Context) error {
+		return w.processJob(spanCtx, job)
+	}); err != nil {
 		consumerFailed.Add(1)
 		observability.RecordCalcProcessed("failed")
 		observability.LogCalcWarn(logCtx, "rabbit calc processing failed", job.EstimateID, job.LineID, job.Code, job.ID, job.RequestID, "error", err)

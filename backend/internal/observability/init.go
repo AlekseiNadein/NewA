@@ -8,10 +8,18 @@ import (
 	"strings"
 )
 
-// Init configures structured logging and optionally starts a Prometheus listener.
+// Init configures structured logging, tracing, and optionally starts a Prometheus listener.
 func Init(cfg Config) {
-	handler := buildLogHandler(cfg)
+	handler := TraceLogHandler{Handler: buildLogHandler(cfg)}
 	slog.SetDefault(slog.New(handler))
+
+	shutdownTracer, err := InitTracer(cfg)
+	if err != nil {
+		slog.Error("failed to initialize tracing", "error", err)
+	} else if cfg.OTLPEndpoint != "" {
+		slog.Info("tracing initialized", "endpoint", cfg.OTLPEndpoint, "sample_ratio", cfg.TraceSampleRatio)
+		_ = shutdownTracer // process exit does not flush traces in dev
+	}
 
 	if cfg.MetricsAddr == "" {
 		slog.Info("observability initialized", "service", cfg.ServiceName, "metrics", "disabled")

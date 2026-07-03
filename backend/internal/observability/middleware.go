@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"nav-saas-mvp/backend/internal/requestctx"
 )
 
 type statusWriter struct {
@@ -18,9 +20,9 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-// WrapHTTP adds request IDs, access logging, and HTTP metrics.
+// WrapHTTP adds tracing, request IDs, access logging, and HTTP metrics.
 func WrapHTTP(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	instrumented := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
@@ -33,6 +35,9 @@ func WrapHTTP(next http.Handler) http.Handler {
 		w.Header().Set("X-Request-ID", requestID)
 
 		ctx := WithRequestID(r.Context(), requestID)
+		if traceparent := TraceParentFromContext(ctx); traceparent != "" {
+			ctx = requestctx.WithTraceParent(ctx, traceparent)
+		}
 		r = r.WithContext(ctx)
 
 		started := time.Now()
@@ -60,6 +65,7 @@ func WrapHTTP(next http.Handler) http.Handler {
 			)
 		}
 	})
+	return WrapHTTPTracing(instrumented)
 }
 
 func shouldAccessLog(path string) bool {

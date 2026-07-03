@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"nav-saas-mvp/backend/internal/domain"
+	"nav-saas-mvp/backend/internal/observability"
+	"nav-saas-mvp/backend/internal/requestctx"
 )
 
 var (
@@ -1647,6 +1649,14 @@ WHERE estimate_id = $1 AND id = $2 AND revision = $3
 	if tag.RowsAffected() == 0 {
 		status = "failed"
 		lastError = "stale line revision"
+		if _, err := tx.Exec(ctx, `
+UPDATE app_estimate_lines
+SET calc_status = 'failed',
+    calc_error = $3
+WHERE estimate_id = $1 AND id = $2
+`, job.EstimateID, job.LineID, lastError); err != nil {
+			return err
+		}
 	}
 	if status == "done" {
 		if _, err := tx.Exec(ctx, `
@@ -1717,13 +1727,24 @@ WHERE id = $1
 	if nextStatus == "dead" {
 		lineStatus = "dead"
 	}
-	if _, err := tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 UPDATE app_estimate_lines
 SET calc_status = $4,
     calc_error = $5
 WHERE estimate_id = $1 AND id = $2 AND revision = $3
-`, job.EstimateID, job.LineID, job.Revision, lineStatus, message); err != nil {
+`, job.EstimateID, job.LineID, job.Revision, lineStatus, message)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		if _, err := tx.Exec(ctx, `
+UPDATE app_estimate_lines
+SET calc_status = $3,
+    calc_error = $4
+WHERE estimate_id = $1 AND id = $2
+`, job.EstimateID, job.LineID, lineStatus, message); err != nil {
+			return err
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -1834,7 +1855,7 @@ WHERE id = $1
 	}
 	for attempt := 0; attempt < 120; attempt++ {
 		if s.markEstimateCalcStartJob(id) {
-			go s.runEstimateCalcStart(context.Background(), estimate, settings.CalcStartBatchSize)
+			go s.runEstimateCalcStart(observability.DetachCorrelation(ctx), estimate, settings.CalcStartBatchSize)
 			return nil
 		}
 		select {
@@ -1848,6 +1869,8 @@ WHERE id = $1
 
 func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate, batchSize int) {
 	defer s.unmarkEstimateCalcStartJob(estimate.ID)
+	ctx, endSpan := observability.StartEstimateEnqueueSpan(ctx, estimate.ID)
+	defer endSpan()
 	if err := s.enqueueEstimateCalcBatches(ctx, estimate, batchSize); err != nil {
 		slog.Warn("estimate calc enqueue failed", "estimate", estimate.ID, "error", err)
 	}
@@ -2032,6 +2055,8 @@ SET status = CASE
 	if queueMode != "dual" && queueMode != "rabbit" {
 		return nil
 	}
+	requestID := requestctx.RequestID(ctx)
+	traceparent := requestctx.TraceParent(ctx)
 	eventPayload, err := json.Marshal(map[string]any{
 		"messageVersion": 1,
 		"jobId":          jobID,
@@ -2044,6 +2069,8 @@ SET status = CASE
 		"district":       estimate.District,
 		"quantity":       line.Quantity,
 		"rawText":        line.RawText,
+		"requestId":      requestID,
+		"traceparent":    traceparent,
 		"attempt":        1,
 		"maxAttempts":    5,
 		"createdAt":      time.Now().UTC(),

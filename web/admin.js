@@ -953,6 +953,8 @@ function renderAdminMonitoring() {
   const linkItems = [
     links.grafana ? { href: links.grafana, label: "Grafana" } : null,
     links.prometheus ? { href: links.prometheus, label: "Prometheus" } : null,
+    links.loki ? { href: links.loki, label: "Loki (логи)" } : null,
+    links.tempo ? { href: links.tempo, label: "Tempo (трейсы)" } : null,
     links.healthz ? { href: links.healthz, label: "Healthz JSON" } : null,
   ].filter(Boolean);
 

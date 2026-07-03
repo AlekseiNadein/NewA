@@ -26,6 +26,8 @@ loki.process "nav_logs" {
       estimate_id = "estimate_id",
       line_id     = "line_id",
       code        = "code",
+      trace_id    = "trace_id",
+      span_id     = "span_id",
     }
   }
 

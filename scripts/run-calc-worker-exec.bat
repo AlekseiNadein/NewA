@@ -12,4 +12,6 @@ set APP_LOG_FORMAT=json
 set APP_SERVICE_NAME=nav-calc-worker
 set APP_LOG_FILE=data\calc-worker.log
 set APP_METRICS_ADDR=127.0.0.1:9092
+set OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+set OTEL_SERVICE_NAME=nav-calc-worker
 data\nav-calc-worker.exe

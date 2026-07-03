@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -190,9 +191,11 @@ func publishBatch(ctx context.Context, fileStore *store.FileStore, ch *amqp.Chan
 		return nil
 	}
 	for _, evt := range events {
+		headers := traceHeadersFromPayload(evt.Payload)
 		err := ch.PublishWithContext(ctx, cfg.Exchange, evt.RoutingKey, false, false, amqp.Publishing{
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
+			Headers:      headers,
 			Body:         evt.Payload,
 		})
 		if err != nil {
@@ -220,4 +223,23 @@ func publishBatch(ctx context.Context, fileStore *store.FileStore, ch *amqp.Chan
 		publisherLastSuccessUnix.Store(time.Now().UTC().Unix())
 	}
 	return nil
+}
+
+func traceHeadersFromPayload(payload []byte) amqp.Table {
+	var envelope struct {
+		Traceparent string `json:"traceparent"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return nil
+	}
+	traceCtx := observability.ContextWithTraceParent(context.Background(), envelope.Traceparent)
+	headers := observability.InjectAMQPHeaders(traceCtx)
+	if len(headers) == 0 {
+		return nil
+	}
+	table := make(amqp.Table, len(headers))
+	for key, value := range headers {
+		table[key] = value
+	}
+	return table
 }

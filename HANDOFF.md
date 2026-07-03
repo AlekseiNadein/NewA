@@ -36,7 +36,7 @@ run.bat
 | `run-calc-worker-exec.bat` | env + `nav-calc-worker.exe` → лог `data/calc-worker.log` |
 | `restart-nginx.bat` | stop → setup (если нужно) → фоновый старт nginx |
 | `setup-nginx.bat` | скачивание portable nginx в `tools/nginx/` |
-| `start-observability.bat` | Docker: Loki + Alloy + Prometheus + Grafana |
+| `start-observability.bat` | Docker: Loki + Alloy + Tempo + OTel Collector + Prometheus + Grafana |
 | `stop-observability.bat` | остановка observability-стека |
 
 **Observability (отдельно от `run.bat`):** нужен **Docker Desktop** + `scripts\start-observability.bat`. Подробности — раздел [Observability](#observability-2026-07-01).
@@ -63,6 +63,9 @@ run.bat
 | `APP_PROMETHEUS_URL` | ссылка в админке (default `http://localhost:9093`) |
 | `APP_AUTH_METRICS_URL` | URL scrape auth metrics (default `http://127.0.0.1:9091/metrics`) |
 | `APP_WORKER_METRICS_URL` | URL scrape worker metrics (default `http://127.0.0.1:9092/metrics`) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP HTTP для трейсов (в `run.bat`: `http://127.0.0.1:4318`) |
+| `OTEL_SERVICE_NAME` | имя сервиса в Tempo (`nav-api`, `nav-auth`, `nav-calc-worker`) |
+| `APP_LOKI_URL` / `APP_TEMPO_URL` | ссылки Explore в админке «Мониторинг» |
 
 Импорт справочников (не при старте): `import_regions`, `import_resource_codifier`, `import_fgis_cs`.  
 Принудительный импорт users/companies из JSON: `go run .\backend\cmd\migrate_auth` (нужен `APP_AUTH_DATABASE_URL`).
@@ -181,16 +184,21 @@ const ENABLE_ESTIMATE_CALC_STATUS_POLLING = false;
 **Контроллер** `estimateCalcBatchControllers`: `{ session, cursor: { applied, generation }, stopped, applying, listenerPromise }`.
 
 - **`session`** — инкремент при `abortEstimateCalcBatchSession`; старый listener игнорирует ответы после abort.
-- **`applied`** — курсор «сколько терминальных статусов клиент уже принял» (источник для счётчика «Обработано позиций»).
+- **`applied`** — курсор long-poll: сколько терминальных статусов **уже отдано клиенту** через `calc-batch` (параметр `?applied=`).
 - **`generation`** — синхрон с сервером после cancel / batch.reset.
 
-**Прогресс UI:**
+**Прогресс UI (фикс 2026-07-03, стабильно):**
 
-- Счётчик: `batch.applied` / `total` (`useProgressOnly` в `updateCalcProgressTarget`), **не** `batch.processed` и **не** локальный подсчёт `calcStatus=done`.
-- Сметная стоимость: инкремент `accumulateCalcGrandTotalFromPairs` по строкам текущего батча; база — не-ГСН строки.
+- Счётчик «Обработано позиций»: **`batch.processed` / `batch.total`** (`useProgressOnly` в `updateCalcProgressTarget`). Это число **терминальных** строк на сервере (`done` | `failed` | `dead`). **`batch.applied`** — только курсор доставки, не показывать в UI.
+- Сметная стоимость во время расчёта: **`batch.grandTotal`** с сервера + `baseGrandTotal` (не-ГСН строки) через `syncRunningGrandTotalFromBatch`. Локальный `accumulateCalcGrandTotalFromPairs` — дополнение для малых смет; на 7500+ строк авторитетен `grandTotal` из API.
 - Анимация: `displayed` догоняет `processed` через `startCalcProgressAnimation`.
 
-**Применение батча:** `applyEstimateCalcBatchResponse` → `applyEstimateCalcStatusPairs` (для large — `skipRecords` до `batch.done`) → обновление только **видимых** строк таблицы (`refreshEstimateTableRowsByIds`); полный remount — только при `batch.done`.
+**Сопоставление статусов со строками (`matchCalcStatusesToItems`):**
+
+- Только по **`lineId`** (статус `items[].lineId` ↔ `item.id`). **Запрещён** zip по индексу и fallback по шифру — на дублях шифров и при частичных батчах это давало «наезд» новых результатов на первые строки и рассинхрон суммы.
+- После `persistOpenEstimate` в **табличном** режиме: `syncEstimateLineIdsFromSaved` (по `estimateLineSyncKey`, fallback по индексу) + `remapEstimateTableLineIds` в DOM — иначе `lineId` на сервере ≠ `item.id` в памяти и батчи не применяются.
+
+**Применение батча:** `applyEstimateCalcBatchResponse` → `applyEstimateCalcStatusPairs` (для large — `skipRecords` до `batch.done`) → обновление только **видимых** строк таблицы (`refreshEstimateTableRowsByIds`); полный remount — только при `batch.done`. Если listener прервался до `batch.done`, в `finally` — отложенный перезапуск `runEstimateCalcBatchListener`.
 
 **Цены с индексом:** ячейка «Стоимость ед.» — `innerHTML` (`formatEstimateUnitPrice` с `<br>`); между батчами — `applyEstimateCalcDisplayFromRecord`.
 
@@ -239,15 +247,17 @@ const ENABLE_ESTIMATE_CALC_STATUS_POLLING = false;
 | Enqueue | `file_store.go` → `enqueueEstimateCalcBatches`, `StartEstimateCalc` |
 | Routes | `backend/internal/api/server.go` |
 | Frontend batch | `web/app.js` — `runEstimateCalcBatchListener`, `restartEstimateCalculationAfterContextChange`, `abortEstimateCalcBatchSession` |
-| Настройки UI | `web/index.html` — поля батчей; `?v=20260703c` |
+| Настройки UI | `web/index.html` — поля батчей; `?v=20260703d` |
 
 #### Ловушки batch-режима
 
 - **Cancel `conn busy`** — если снова 500 на cancel, расчёт после смены ФГИС не стартует (сброс UI есть, роста нет). Проверять лог API.
-- **Не использовать `batch.processed` для счётчика** — это все terminal на сервере, клиент мог принять меньше.
+- **Не путать `applied` и `processed`** — в UI счётчик только `processed`; `applied` — курсор long-poll.
+- **Не zip-ить статусы с позициями по порядку** — только `lineId`; иначе на больших сметах ломаются первые строки и сумма.
 - **Не вызывать `refreshAllRenderedEstimateTableRows` на каждый батч** — моргание на 7500 строк; только visible IDs.
 - **Два listener'а** — всегда `abort` + await перед новым `runEstimateCalcBatchListener`.
 - **`markEstimateCalcStartJob`** — второй `POST /calc` без cancel/unmark молча не ставит очередь (теперь retry + unmark on cancel).
+- **Stale line revision** — если revision строки изменился после постановки job, worker не может обновить строку по `WHERE revision=$3`. Раньше строка оставалась `leased`/`queued` → прогресс замирал (напр. 7450/7500). **Фикс:** `CompleteEstimateCalcJob` помечает строку `failed` без проверки revision; `FailEstimateCalcJob` — fallback UPDATE по `estimate_id+line_id`; Rabbit skip `stale line revision` → `FailEstimateCalcJob`.
 
 ### Поток данных (legacy polling — справочно)
 
@@ -378,7 +388,7 @@ SELECT status, count(*), max(updated_at) FROM estimate_calc_jobs GROUP BY status
 SELECT count(*) FROM estimate_calc_jobs WHERE status='leased' AND leased_until < now();
 ```
 
-Ожидаемые ошибки в логе (не баг worker): `record not found`, `stale line revision` (устаревшие задачи в очереди).
+Ожидаемые ошибки в логе: `record not found`. `stale line revision` — устаревший job относительно revision строки; строка переводится в `failed` (терминальный статус), прогресс не замирает.
 
 ### Настройки приложения
 
@@ -423,7 +433,10 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 - `restartEstimateTableCalculation` — обнуление счётчиков прогресса (позиции, ошибки, сметная стоимость) и `markEstimateCalcAwaitingServer`
 - `restartEstimateCalculationAfterContextChange` — полный цикл cancel + restart при смене района/ФГИС **во время** batch-расчёта
 - `runEstimateCalcBatchListener` / `abortEstimateCalcBatchSession` — long-poll batch-listener и инвалидация сессии
-- `startCalcProgressAnimation` / `estimateCalcProgressTargets` — анимация счётчиков; источник прогресса — `batch.applied` из `calc-batch`, не legacy polling
+- `matchCalcStatusesToItems` — сопоставление batch-статусов со строками **только по `lineId`**
+- `syncEstimateLineIdsFromSaved` / `remapEstimateTableLineIds` — синхронизация id строк после persist в табличном режиме
+- `syncRunningGrandTotalFromBatch` — сметная стоимость из `batch.grandTotal` во время расчёта
+- `startCalcProgressAnimation` / `estimateCalcProgressTargets` — анимация счётчиков; источник прогресса — `batch.processed` из `calc-batch`, не legacy polling
 - `rehydrateEmptyOpenEstimates` / `ensureOpenEstimateHydrated` — восстановление строк после F5 при урезанном sessionStorage
 - `enrichEditorEstimateItems` — восстановление из `calc_json` при открытии сметы
 
@@ -526,7 +539,7 @@ RABBITMQ_MIGRATION_PLAN.md
 
 ## Observability (2026-07-01)
 
-Контекст: внедрение логирования, метрик и Docker-стека Grafana/Prometheus/Loki поверх существующего `healthz` и админки «Очередь». Приложение на Windows (`run.bat`), observability — в Docker на том же хосте.
+Контекст: логирование, метрики, трейсы и Docker-стек Grafana/Prometheus/Loki/Tempo поверх `healthz` и админки «Очередь». Приложение на Windows (`run.bat`), observability — в Docker на том же хосте.
 
 ### Архитектура
 
@@ -535,27 +548,31 @@ RABBITMQ_MIGRATION_PLAN.md
 ─────────────────────────────          ───────────────────────
 nginx :8080
 nav-api :8090  ── metrics :9090 ──────► Prometheus :9093 ──► Grafana :3000
-nav-auth :8081 ── metrics :9091 ──┘         ▲
-calc_worker    ── metrics :9092 ──┘         │
-data/*.log ──────────────────────────► Alloy ──► Loki :3100 ──┘
+nav-auth :8081 ── metrics :9091 ──┘         ▲                    ▲
+calc_worker    ── metrics :9092 ──┘         │                    │
+         OTLP :4318 ─────────────────► OTel Collector ──► Tempo ┘
+data/*.log ──────────────────────────► Alloy ──► Loki :3100 ─────┘
+                                              (trace_id ↔ Tempo)
 ```
 
-Три столпа:
+Четыре столпа:
 
 | Столп | Реализовано | Где смотреть |
 |-------|-------------|--------------|
-| **Логи** | JSON slog, `request_id`, calc-поля (`estimate_id`, `line_id`, `code`) | `data/*.log`, Grafana → Loki (после Docker) |
-| **Метрики** | Prometheus `/metrics` на каждом процессе | Grafana «NAV Overview», админка «Мониторинг», `:9093` |
+| **Логи** | JSON slog, `request_id`, `trace_id`, calc-поля | `data/*.log`, Grafana → Loki, админка → Loki |
+| **Метрики** | Prometheus `/metrics` на каждом процессе | Grafana «NAV Overview», админка «Мониторинг» |
+| **Трейсы** | OpenTelemetry → Tempo, `traceparent` в Rabbit/outbox | Grafana → Tempo Explore, админка → Tempo |
 | **Операционный health** | `healthz`, админка «Очередь» | `/api/healthz`, `/admin` → Очередь |
 
-**Не реализовано (следующий этап):** OpenTelemetry + Jaeger, `traceparent` в Rabbit, Grafana alerting.
+**Следующий этап:** Grafana alerting (DLQ, outbox backlog, consumer down).
 
 ### Пакет `backend/internal/observability/`
 
 | Файл | Назначение |
 |------|------------|
-| `init.go` | slog (level/format/file), HTTP listener `/metrics` |
-| `middleware.go` | access log, `X-Request-ID`, HTTP Prometheus counters |
+| `init.go` | slog (level/format/file), tracing, HTTP listener `/metrics` |
+| `middleware.go` | OTel HTTP spans, access log, `X-Request-ID`, HTTP Prometheus counters |
+| `tracing.go` | OTLP export, `traceparent` propagation, Rabbit headers, `trace_id` в логах |
 | `metrics.go` | registry, метрики очереди/calc/HTTP |
 | `collector.go` | periodic gauge update: outbox pending, queue depths, consumer stats из БД |
 | `snapshot.go` | сбор snapshot для админки; scrape `:9091`/`:9092` |
@@ -593,21 +610,24 @@ Scrape: `deploy/observability/prometheus.yml` → `host.docker.internal:9090|909
 | Auth | `data/nav-auth.log` | `run-auth-server-exec.bat` |
 | Calc worker | `data/calc-worker.log` | `run-calc-worker-exec.bat` |
 
-Формат JSON (`APP_LOG_FORMAT=json`). Correlation: `request_id` в HTTP → outbox payload (`requestId`) → Rabbit message → логи worker.
+Формат JSON (`APP_LOG_FORMAT=json`). Correlation: `request_id` + `trace_id` в HTTP → outbox (`requestId`, `traceparent`) → Rabbit headers → worker span `calc.process`.
 
 Пример поиска в Loki:
 ```logql
 {job="nav"} | json | estimate_id="..."
 {job="nav"} | json | request_id="..."
+{job="nav"} | json | trace_id="..."   # клик → Tempo (derived field)
 ```
 
 ### Docker-стек (`deploy/observability/`)
 
 | Сервис | Порт | Роль |
 |--------|------|------|
-| Grafana | `3000` | дашборды, логи (admin/admin) |
+| Grafana | `3000` | дашборды, логи, трейсы (admin/admin) |
 | Prometheus | `9093` | scrape метрик |
 | Loki | `3100` | хранение логов |
+| Tempo | `3200` | хранение трейсов |
+| OTel Collector | `4317`/`4318` | OTLP ingress → Tempo |
 | Alloy | — | tail `data/*.log` → Loki |
 
 ```bat
@@ -635,8 +655,8 @@ run.bat                           REM приложение (обязательн
 1. PostgreSQL, RabbitMQ — как обычно
 2. `run.bat` — приложение
 3. Docker Desktop — запущен
-4. `scripts\start-observability.bat` — Grafana/Prometheus/Loki
-5. Админка → **Мониторинг** или Grafana `:3000`
+4. `scripts\start-observability.bat` — Grafana/Prometheus/Loki/Tempo
+5. Админка → **Мониторинг** (ссылки Grafana, Loki, Tempo) или Grafana `:3000`
 
 ### Известные проблемы / фиксы
 
@@ -649,10 +669,8 @@ run.bat                           REM приложение (обязательн
 
 ### Следующие шаги observability
 
-1. **OpenTelemetry + Jaeger** — distributed tracing (`OTEL_EXPORTER_OTLP_ENDPOINT`)
-2. **`traceparent` в Rabbit** — сквозной trace calc pipeline
-3. **Grafana alerting** — DLQ, outbox backlog, consumer down (правила поверх healthz-логики)
-4. Опционально: probe доступности Grafana в админке (показывать «Docker не запущен»)
+1. **Grafana alerting** — DLQ, outbox backlog, consumer down (правила поверх healthz-логики)
+2. Опционально: probe доступности Grafana в админке (показывать «Docker не запущен»)
 
 ### Ключевые пути (git)
 
@@ -660,46 +678,49 @@ run.bat                           REM приложение (обязательн
 
 ---
 
-## Текущая сессия (2026-07-03, batch calc — стабильное состояние)
+## Текущая сессия (2026-07-03, стабильное состояние)
 
-**Контекст:** batch-протокол доставки результатов расчёта в UI (см. [Batch-протокол](#batch-протокол-расчёта-2026-07-02--2026-07-03-актуально)). Очередь Rabbit/outbox/worker **без изменений**.
+**Контекст:** batch-протокол доставки результатов расчёта в UI (см. [Batch-протокол](#batch-протокол-расчёта-2026-07-02--2026-07-03-актуально)) + observability Loki/Tempo/OTel. Очередь Rabbit/outbox/worker **без изменений** в контракте сообщений; добавлен `traceparent` в outbox/Rabbit для корреляции.
 
 ### Реализовано и проверено
 
 | Область | Содержание |
 |---------|------------|
-| **Backend** | `calc_generation`, `calc_start_batch_size`, `calc_client_batch_size`; `GET calc-batch`, `POST calc/cancel`; cancel без `conn busy`; generation check в enqueue; `unmarkEstimateCalcStartJob` при cancel |
-| **Frontend** | Batch-listener (`ENABLE_ESTIMATE_CALC_BATCH_LISTENER=true`); polling выключен; прогресс по `batch.applied`; инкремент grand total; refresh только visible rows; rehydrate после F5 |
+| **Backend batch** | `calc_generation`, `calc_start_batch_size`, `calc_client_batch_size`; `GET calc-batch`, `POST calc/cancel`; cancel без `conn busy`; generation check в enqueue; `unmarkEstimateCalcStartJob` при cancel |
+| **Backend calc fix** | Stale revision: строка → `failed` в `CompleteEstimateCalcJob`; fallback в `FailEstimateCalcJob`; Rabbit `stale line revision` → fail, не silent skip |
+| **Frontend batch** | Batch-listener (`ENABLE_ESTIMATE_CALC_BATCH_LISTENER=true`); polling выключен; счётчик по **`batch.processed`**; сумма по **`batch.grandTotal`**; `matchCalcStatusesToItems` только по `lineId`; sync line id после persist в table mode; refresh только visible rows; rehydrate после F5; auto-restart listener |
+| **Observability** | Tempo + OTel Collector в Docker; OTLP в `run.bat`; `trace_id` в логах; `traceparent` в calc pipeline; ссылки Loki/Tempo в админке |
 | **Контекст mid-calc** | Смена района/ФГИС → reset UI → cancel → persist → calc → новый listener |
 | **Тесты** | `backend/internal/store/calc_batch_test.go` |
 
 ### Стабильное поведение (acceptance)
 
-1. **Text → table:** счётчик 0→N, сметная стоимость растёт по батчам; индексы в цене (`<br>`) видны до завершения расчёта.
-2. **Большие сметы (~7500):** нет мгновенного 100%, нет моргания таблицы, сумма не «прыгает».
+1. **Text → table:** счётчик 0→N, сметная стоимость растёт на всём диапазоне (в т.ч. 7500+); индексы в цене (`<br>`) видны до завершения расчёта.
+2. **Большие сметы (~7500):** нет мгновенного 100%, нет моргания таблицы, шифры/суммы не «наезжают» на первые строки, прогресс не замирает на N−50 из‑за `leased` без terminal.
 3. **F5 с открытой сметой:** строки восстанавливаются из `state.estimates`, расчёт продолжается.
 4. **Смена ФГИС/района во время расчёта:** немедленно 0/N и базовая сумма → после cancel рост снова идёт.
 5. **Закрытие сметы:** cancel + stop listener.
 
 ### Бэкапы сессии
 
-`backups/2026-07-02_17-10_calc-batch/`, `2026-07-03_11-00_rehydrate-calc-reset/`, `2026-07-03_11-15_calc-session-reset/`, `2026-07-03_11-25_cancel-conn-busy/`
+`backups/2026-07-02_17-10_calc-batch/`, `2026-07-03_11-00_rehydrate-calc-reset/`, `2026-07-03_11-15_calc-session-reset/`, `2026-07-03_11-25_cancel-conn-busy/`, `2026-07-03_loki-tempo/`, `2026-07-03_calc-match-fix/`, `2026-07-03_calc-progress-fix/`
 
 ### Cache bust
 
-`web/app.js?v=20260703c`
+`web/app.js?v=20260703d`
 
 ### Не делать без явной задачи
 
 - Включать `ENABLE_ESTIMATE_CALC_STATUS_POLLING` параллельно с batch-listener.
-- Использовать `batch.processed` или локальный `done`-count для UI-счётчика.
+- Показывать в UI **`batch.applied`** вместо **`batch.processed`**.
+- Zip/fallback по шифру в `matchCalcStatusesToItems`.
 - `refreshAllRenderedEstimateTableRows` на каждый batch.
 - `UPDATE` внутри `rows.Next()` в cancel.
 
 ### Следующие шаги (опционально)
 
-1. Smoke/e2e: mid-calc FGIS change на смете 7500+ строк.
-2. Метрики batch-listener (latency, batch size) в observability.
+1. Grafana alerting (DLQ, outbox backlog, consumer down).
+2. Smoke/e2e: mid-calc FGIS change на смете 7500+ строк.
 3. SSE вместо long-poll `calc-batch` (если понадобится снизить число HTTP-запросов).
 
 ---
