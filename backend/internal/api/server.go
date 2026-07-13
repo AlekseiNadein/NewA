@@ -59,6 +59,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/admin/estimate-locks/", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminEstimateLockByID))))
 	mux.Handle("/api/admin/queue-stats", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminQueueStats))))
 	mux.Handle("/api/admin/queue-purge", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminQueuePurge))))
+	mux.Handle("/api/admin/monitoring", s.withAuth(s.withAdmin(http.HandlerFunc(s.handleAdminMonitoring))))
 	mux.Handle("/api/constructions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructions))))
 	mux.Handle("/api/constructions/", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleConstructionByID))))
 	mux.Handle("/api/objects", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleObjects))))
@@ -68,6 +69,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/license-sessions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleLicenseSessions))))
 	mux.Handle("/api/estimate-locks", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleEstimateLocks))))
 	mux.Handle("/api/settings", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleSettings))))
+	mux.Handle("/api/user-positions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleUserPositions))))
 	mux.Handle("/api/gsn/supplements", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNSupplements))))
 	mux.Handle("/api/gsn/base-info", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNBaseInfo))))
 	mux.Handle("/api/gsn/hierarchy", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNHierarchy))))
@@ -327,6 +329,11 @@ func (s *Server) handleEstimates(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		summary := r.URL.Query().Get("summary") == "1" || strings.EqualFold(r.URL.Query().Get("summary"), "true")
+		if summary {
+			writeJSON(w, http.StatusOK, s.store.ListEstimatesSummary(claims.CompanyID, includeAll))
+			return
+		}
 		writeJSON(w, http.StatusOK, s.store.ListEstimates(claims.CompanyID, includeAll))
 
 	case http.MethodPost:
@@ -384,6 +391,14 @@ func (s *Server) handleEstimateByID(w http.ResponseWriter, r *http.Request) {
 
 	includeAll := claims.Role == domain.RoleSuperAdmin
 	switch r.Method {
+	case http.MethodGet:
+		estimate, err := s.store.GetEstimate(id, claims.CompanyID, includeAll)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, estimate)
+
 	case http.MethodPut:
 		if !claims.Role.CanEditEstimates() {
 			writeError(w, http.StatusForbidden, "not enough permissions")
@@ -650,12 +665,28 @@ func (s *Server) handleEstimateLock(w http.ResponseWriter, r *http.Request, esti
 		writeJSON(w, http.StatusOK, lock)
 
 	case http.MethodDelete:
-		s.estimateLocks.Release(estimateID, claims.UserID)
+		released := s.estimateLocks.Release(estimateID, claims.UserID)
 		w.WriteHeader(http.StatusNoContent)
+		if released {
+			s.scheduleClearEstimateCalcOnClose(estimateID, estimate.CompanyID, includeAll)
+		}
 
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) scheduleClearEstimateCalcOnClose(estimateID, companyID string, includeAll bool) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := s.store.ClearEstimateCalcResultsOnClose(ctx, companyID, estimateID, includeAll); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return
+			}
+			slog.Warn("clear estimate calc on close failed", "estimateId", estimateID, "error", err)
+		}
+	}()
 }
 
 func (s *Server) findEstimate(id, companyID string, includeAll bool) (domain.Estimate, bool) {
@@ -745,12 +776,13 @@ func (s *Server) handleAdminEstimateLockByID(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if _, ok := s.estimateLocks.ForceRelease(estimateID); !ok {
-		writeError(w, http.StatusNotFound, "estimate lock not found")
+	if lock, ok := s.estimateLocks.ForceRelease(estimateID); ok {
+		w.WriteHeader(http.StatusNoContent)
+		s.scheduleClearEstimateCalcOnClose(estimateID, lock.CompanyID, includeAll)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	writeError(w, http.StatusNotFound, "estimate lock not found")
 }
 
 func (s *Server) handleGSNSupplements(w http.ResponseWriter, r *http.Request) {

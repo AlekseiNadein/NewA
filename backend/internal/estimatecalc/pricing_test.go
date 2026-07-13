@@ -77,3 +77,18 @@ func TestLinePricingFromRecordWorkPosition(t *testing.T) {
 		t.Fatalf("unit price = %v, want %v", pricing.UnitPrice, wantTotal/4)
 	}
 }
+
+func TestRoundMoney(t *testing.T) {
+	tests := []struct {
+		in, want float64
+	}{
+		{54.666666666666664, 54.67},
+		{40.6809, 40.68},
+		{77949.28632712, 77949.29},
+	}
+	for _, tc := range tests {
+		if got := RoundMoney(tc.in); got != tc.want {
+			t.Fatalf("RoundMoney(%v) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}

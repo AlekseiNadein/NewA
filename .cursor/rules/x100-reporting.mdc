@@ -1,0 +1,26 @@
+---
+description: X100 totals and k6 load-test reporting — use grandTotal, not app_estimates.total
+alwaysApply: true
+---
+
+# Отчёты по X100 и k6
+
+Для **сметной стоимости X100** не используй SQL `app_estimates.total` — это legacy-поле шапки, часто `0` при нормальном расчёте строк.
+
+## Правильный источник
+
+- **`calc-status?summary=1` → `grandTotal`** — то же, что показывает UI
+- Строки: `processed/total`, ошибки: `errors`
+
+## Скрипты (запускать, не собирать отчёт вручную)
+
+| Задача | Команда |
+|--------|---------|
+| Текущие итоги всех X100 | `scripts\report-x100-totals.ps1` |
+| Результаты k6-прогона | `scripts\parse-k6-x100-results.ps1 deploy\k6\<log-file>` |
+
+После `x100-editor-calc-wait.js` **всегда** парси лог через `parse-k6-x100-results.ps1`. Не читай JSON из k6-лога вручную — k6 переносит длинные строки.
+
+## k6-сценарий
+
+`deploy/k6/scenarios/x100-editor-calc-wait.js` пишет однострочный маркер `X100_RESULT vu=... grandTotal=...` (устойчив к переносам в логе).

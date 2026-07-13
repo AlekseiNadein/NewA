@@ -233,6 +233,14 @@ type CompanyLicensesView struct {
 	Items       []CompanyLicense `json:"items"`
 }
 
+type UserPosition struct {
+	ID   string  `json:"id"`
+	Code string  `json:"code"`
+	Name string  `json:"name"`
+	Unit string  `json:"unit"`
+	Cost float64 `json:"cost"`
+}
+
 type AppSettings struct {
 	CalcWorkerCount    int  `json:"calcWorkerCount"`
 	CalcStartBatchSize int  `json:"calcStartBatchSize"`

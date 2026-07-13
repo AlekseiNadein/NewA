@@ -236,6 +236,7 @@ let estimateLockHeartbeatTimer = 0;
 let licenseSessionHeartbeatTimer = 0;
 let estimateCalcStatusPollTimer = 0;
 let estimateCalcStatusPollInflight = null;
+let estimateCalcReconcileInflight = new Set();
 let pendingEditorRemountEstimateId = null;
 let editorOpeningEstimateId = null;
 let estimateCalcAwaitingServer = new Set();
@@ -991,7 +992,7 @@ async function bootstrapAppData(existingRequestId) {
     if (requestId !== loadAppRequestId) {
       return;
     }
-    rehydrateEmptyOpenEstimates();
+    await rehydrateEmptyOpenEstimates();
     await restoreOpenEstimateLocks();
     if (requestId !== loadAppRequestId) {
       return;
@@ -999,7 +1000,7 @@ async function bootstrapAppData(existingRequestId) {
     startEstimateLockSync();
     void loadGSNRegions().catch(() => {});
     void loadFGISSets().catch(() => {});
-    loadUserPositions();
+    void loadUserPositions().catch(() => {});
     renderShell();
   } catch (error) {
     if (requestId !== loadAppRequestId) {
@@ -1063,13 +1064,43 @@ async function refreshConstructionData() {
   const [constructions, objects, estimates] = await Promise.all([
     api("/api/constructions"),
     api("/api/objects"),
-    api("/api/estimates"),
+    api("/api/estimates?summary=1"),
   ]);
 
   state.constructions = Array.isArray(constructions) ? constructions : [];
   state.objects = Array.isArray(objects) ? objects : [];
   state.estimates = Array.isArray(estimates) ? estimates : [];
   renderConstructionTree();
+}
+
+function estimateHasLineItems(estimate) {
+  return Array.isArray(estimate?.items) && estimate.items.length > 0;
+}
+
+function upsertEstimateCache(estimate) {
+  if (!estimate?.id) {
+    return;
+  }
+  const index = state.estimates.findIndex((item) => item.id === estimate.id);
+  if (index >= 0) {
+    state.estimates[index] = estimate;
+  } else {
+    state.estimates.push(estimate);
+  }
+}
+
+async function fetchEstimateDetail(estimateId) {
+  const normalizedId = normalizeEstimateId(estimateId);
+  if (!normalizedId) {
+    throw new Error("Смета не найдена");
+  }
+  const cached = findCachedSourceEstimate(normalizedId);
+  if (cached && estimateHasLineItems(cached)) {
+    return cached;
+  }
+  const detail = await api(`/api/estimates/${encodeURIComponent(normalizedId)}`);
+  upsertEstimateCache(detail);
+  return detail;
 }
 
 function showAuthScreen(screen) {
@@ -1636,22 +1667,45 @@ function userPositionsStorageKey() {
 }
 
 function loadUserPositions() {
-  const items = readLocalJSON(userPositionsStorageKey(), []);
-  const seen = new Set();
-  state.userPositions = items.filter((item) => {
-    if (!item?.id || seen.has(item.id)) {
-      return false;
+  const key = userPositionsStorageKey();
+  const applyLocal = () => {
+    const items = readLocalJSON(key, []);
+    const seen = new Set();
+    state.userPositions = items.filter((item) => {
+      if (!item?.id || seen.has(item.id)) {
+        return false;
+      }
+      seen.add(item.id);
+      return true;
+    });
+    if (seen.size !== items.length) {
+      saveUserPositions();
     }
-    seen.add(item.id);
-    return true;
-  });
-  if (seen.size !== items.length) {
-    saveUserPositions();
-  }
+  };
+
+  return api("/api/user-positions")
+    .then((payload) => {
+      if (Array.isArray(payload?.items) && payload.items.length > 0) {
+        state.userPositions = payload.items;
+        localStorage.setItem(key, JSON.stringify(state.userPositions));
+        return;
+      }
+      applyLocal();
+      if (Array.isArray(payload?.items) && payload.items.length === 0 && state.userPositions.length > 0) {
+        saveUserPositions();
+      }
+    })
+    .catch(() => {
+      applyLocal();
+    });
 }
 
 function saveUserPositions() {
   localStorage.setItem(userPositionsStorageKey(), JSON.stringify(state.userPositions));
+  void api("/api/user-positions", {
+    method: "PUT",
+    body: JSON.stringify({ items: state.userPositions }),
+  }).catch(() => {});
 }
 
 function openUserPositionDialog(editId = "") {
@@ -2396,7 +2450,7 @@ function renderEditor() {
   }
   if (
     isPersistedEstimateId(estimate.id) &&
-    (!Array.isArray(estimate.items) || estimate.items.length === 0)
+    !Array.isArray(estimate.items)
   ) {
     els.editorEyebrow.textContent = "Редактор сметы";
     els.editorTitle.classList.add("hidden");
@@ -2932,7 +2986,7 @@ function applyDistrictToEstimate(estimateID, options = {}) {
   saveEditorState();
   renderEditor();
   if (options.persist !== false) {
-    void persistOpenEstimate(estimateId).catch(() => {});
+    void persistOpenEstimate(estimateID).catch(() => {});
   }
   return true;
 }
@@ -3126,6 +3180,50 @@ function estimateGrandTotal(items) {
   return (items || []).reduce((sum, item) => sum + estimateLineTotal(item), 0);
 }
 
+function isUserCatalogCipherCode(code) {
+  const text = String(extractSourceDataPositionCipher(code) || code || "").trim();
+  if (!text) {
+    return false;
+  }
+  if (text[0] === "Т" || text[0] === "T") {
+    return true;
+  }
+  if (text.length >= 2 && (text[1] === "Т" || text[1] === "T")) {
+    return true;
+  }
+  return false;
+}
+
+function estimateLineUserCatalogCipher(item) {
+  if (!estimateLineIsGsn(item) || item?.type !== "position" || estimateLineIsStructural(item)) {
+    return false;
+  }
+  const code = estimateLineNormalizedSourceCode(item) || estimateRecordLookupCode(item);
+  return isUserCatalogCipherCode(code);
+}
+
+function estimateLineUserCatalogNeedsLookup(item) {
+  if (!estimateLineUserCatalogCipher(item)) {
+    return false;
+  }
+  const parsed = parseSourceDataPositionLineFieldsFromRawText(item.rawText);
+  if (!parsed) {
+    return true;
+  }
+  return !parsed.hasTotal || !parsed.hasName || !parsed.hasUnit;
+}
+
+function estimateLineCalcCountsAsError(item, status = null) {
+  const resolvedStatus = String(status ?? item?.calcStatus ?? "").trim();
+  if (resolvedStatus !== "failed" && resolvedStatus !== "dead") {
+    return false;
+  }
+  if (estimateLineUserCatalogCipher(item)) {
+    return estimateLineUserCatalogNeedsLookup(item);
+  }
+  return true;
+}
+
 function estimateLineNeedsGsnCalc(item) {
   if (item?.type !== "position" || !estimateLineIsGsn(item) || estimateLineIsStructural(item)) {
     return false;
@@ -3170,7 +3268,7 @@ function applyEstimateCalcPricingFromJson(item, calcJson) {
     item.quantity = pricing.quantity;
   }
   if (pricing.unitPrice != null) {
-    item.unitPrice = pricing.unitPrice;
+    item.unitPrice = roundEstimateUnitPrice(pricing.unitPrice);
   }
   if (pricing.total != null) {
     item.total = pricing.total;
@@ -3218,7 +3316,7 @@ function applyEstimateCalcLineResult(item, status) {
     item.quantity = Number(status.quantity);
   }
   if (status.unitPrice != null && Number.isFinite(Number(status.unitPrice))) {
-    item.unitPrice = Number(status.unitPrice);
+    item.unitPrice = roundEstimateUnitPrice(status.unitPrice);
   }
   if (status.total != null && Number.isFinite(Number(status.total))) {
     item.total = Number(status.total);
@@ -3228,6 +3326,18 @@ function applyEstimateCalcLineResult(item, status) {
 function estimateCalcTerminalStatus(status) {
   const value = String(status || "").trim();
   return value === "done" || value === "failed" || value === "dead";
+}
+
+function isLocalCalcStatusStaleForServer(local, server) {
+  const localStatus = String(local?.calcStatus || "").trim();
+  const serverStatus = String(server?.calcStatus || "").trim();
+  if (!serverStatus || localStatus === serverStatus) {
+    return false;
+  }
+  return (
+    (localStatus === "queued" || localStatus === "leased" || !localStatus) &&
+    estimateCalcTerminalStatus(serverStatus)
+  );
 }
 
 function estimateCalcProgressDisplayErrors(target, displayed) {
@@ -3358,9 +3468,12 @@ function isGsnCalcStatusEntry(item, status) {
   return Boolean(String(status?.code || "").trim());
 }
 
-function resetGsnLinesForTableCalculation(items) {
+function resetGsnLinesForTableCalculation(items, { preserveDone = false } = {}) {
   (items || []).forEach((item) => {
     if (!estimateLineNeedsGsnCalc(item)) {
+      return;
+    }
+    if (preserveDone && estimateLineCalcDone(item)) {
       return;
     }
     item.calcStatus = "queued";
@@ -3378,12 +3491,12 @@ function resetGsnLinesForTableCalculation(items) {
   });
 }
 
-function prepareEstimateTableCalculationState(estimateId, estimate = null) {
+function prepareEstimateTableCalculationState(estimateId, estimate = null, { preserveDone = false } = {}) {
   const resolved = estimate || state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
   if (!resolved) {
     return;
   }
-  resetGsnLinesForTableCalculation(resolved.items);
+  resetGsnLinesForTableCalculation(resolved.items, { preserveDone });
   restartEstimateTableCalculation(estimateId, resolved);
   markEstimateCalcAwaitingServer(estimateId);
   estimateCalcPollBlockedByPersist.add(estimateId);
@@ -3440,9 +3553,8 @@ function accumulateCalcGrandTotalFromPairs(estimateId, pairsItems, allItems = nu
 }
 
 function applyEstimateCalcBatch(estimate, statuses) {
-  const resolveItem = createEstimateCalcStatusResolver(estimate?.items);
-  applyEstimateCalcStatusFieldsOnly(estimate, statuses, resolveItem);
-  applyEstimateCalcRecordsBatch(estimate, statuses, resolveItem);
+  applyEstimateCalcStatusFieldsOnly(estimate, statuses);
+  applyEstimateCalcRecordsBatch(estimate, statuses);
 }
 
 function estimateGrandTotalForDisplay(items) {
@@ -3544,6 +3656,29 @@ function estimateCalcAwaitingBlocksProgress(estimateId, items) {
   );
 }
 
+function finalizeEstimateCalcProgressTarget(estimateId, estimate) {
+  const key = estimateCalcTargetKey(estimateId);
+  const items = estimate?.items || [];
+  const progress = estimateCalcProgress(items, estimateId);
+  if (!progress.total) {
+    return;
+  }
+  enrichEditorEstimateItems(items);
+  const baseGrandTotal = estimateCalcProgressBaseGrandTotal(items);
+  const grand = initCalcProgressGrandTotalTarget();
+  grand.baseGrandTotal = baseGrandTotal;
+  grand.runningGrandTotal = estimateGrandTotalForDisplay(items);
+  estimateCalcProgressTargets.set(key, {
+    total: progress.total,
+    processed: progress.total,
+    errors: progress.errors,
+    displayed: progress.total,
+    largeEstimate: progress.total > LARGE_ESTIMATE_CALC_LINE_THRESHOLD,
+    ...grand,
+  });
+  clearEstimateCalcAwaitingServer(estimateId);
+}
+
 function restartEstimateTableCalculation(estimateId, estimate = null) {
   const key = estimateCalcTargetKey(estimateId);
   const resolved = estimate || state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
@@ -3580,7 +3715,7 @@ function estimateCalcProgress(items, estimateId = "") {
     if (estimateCalcTerminalStatus(status)) {
       processed += 1;
     }
-    if (status === "failed" || status === "dead") {
+    if (estimateLineCalcCountsAsError(item)) {
       errors += 1;
     }
   });
@@ -3655,7 +3790,7 @@ function calcProgressFromStatusPayload(estimate, statuses, resolveItem) {
     if (estimateCalcTerminalStatus(nextStatus)) {
       processed += 1;
     }
-    if (nextStatus === "failed" || nextStatus === "dead") {
+    if (estimateLineCalcCountsAsError(item, nextStatus)) {
       errors += 1;
     }
   });
@@ -3751,16 +3886,18 @@ function updateCalcProgressTarget(estimateId, progress, estimate = null, { usePr
   const prevDisplayed = previous?.displayed ?? 0;
   const displayed =
     done || prevDisplayed >= processed ? processed : Math.min(processed, prevDisplayed);
+  let runningGrandTotal = previous?.runningGrandTotal ?? previous?.baseGrandTotal ?? 0;
+  if (done && estimate) {
+    enrichEditorEstimateItems(estimate.items);
+    runningGrandTotal = estimateGrandTotalForDisplay(estimate.items || []);
+  }
   estimateCalcProgressTargets.set(key, {
     total,
     processed,
     errors,
     displayed,
     largeEstimate: previous?.largeEstimate,
-    runningGrandTotal:
-      done && estimate
-        ? estimateGrandTotalForDisplay(estimate.items)
-        : (previous?.runningGrandTotal ?? previous?.baseGrandTotal ?? 0),
+    runningGrandTotal,
     countedDoneLineIds: previous?.countedDoneLineIds ?? new Set(),
     lineTotals: previous?.lineTotals ?? new Map(),
     baseGrandTotal: previous?.baseGrandTotal ?? (estimate ? estimateCalcProgressBaseGrandTotal(estimate.items) : 0),
@@ -3912,7 +4049,7 @@ function syncOpenEstimateCalcJsonFromSource(estimateId) {
       item.calcJsonKey = JSON.stringify(saved.calcJson || null);
       changed = true;
     }
-    if (saved.calcStatus && !item.calcStatus) {
+    if (saved.calcStatus && (!item.calcStatus || isLocalCalcStatusStaleForServer(item, saved))) {
       item.calcStatus = saved.calcStatus;
       item.calcError = saved.calcError || "";
       changed = true;
@@ -4073,6 +4210,30 @@ function isSourceDataQuantityExpression(expr) {
 function roundSourceDataQuantity(value, decimals) {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
+}
+
+function roundEstimateUnitPrice(value) {
+  return roundSourceDataQuantity(Number(value), 2);
+}
+
+function formatEstimateUnitPriceAmount(value) {
+  const number = roundEstimateUnitPrice(value);
+  if (!Number.isFinite(number) || number === 0) {
+    return "";
+  }
+  return estimateCostDetailed.format(number);
+}
+
+function formatEstimateUnitPriceText(raw) {
+  const text = String(raw || "").trim();
+  if (!text) {
+    return "";
+  }
+  const number = parseLocalizedNumber(text);
+  if (!Number.isFinite(number) || number === 0) {
+    return escapeHTML(text);
+  }
+  return formatEstimateUnitPriceAmount(number);
 }
 
 function tokenizeSourceDataQuantityExpression(expr) {
@@ -4267,12 +4428,25 @@ function resolveEstimateItemQuantity(item) {
   }
 }
 
+function isSourceDataIndexMarkerField(raw) {
+  const text = String(raw || "").trim();
+  return text.startsWith("[") && text.endsWith("]");
+}
+
+function sourceDataPositionValueFieldIndexes(fields) {
+  if (fields.length > 2 && isSourceDataIndexMarkerField(fields[2])) {
+    return { total: 3, name: 4, unit: 5 };
+  }
+  return { total: 2, name: 3, unit: 4 };
+}
+
 function parseSourceDataPositionLineFields(fields) {
   const cipherRaw = String(fields[0] || "").trim();
   const quantityRaw = fields.length > 1 ? String(fields[1] ?? "").trim() : "";
-  const totalRaw = fields.length > 2 ? String(fields[2] ?? "").trim() : "";
-  const nameRaw = fields.length > 3 ? String(fields[3] ?? "").trim() : "";
-  const unitRaw = fields.length > 4 ? String(fields[4] ?? "").trim() : "";
+  const valueIndexes = sourceDataPositionValueFieldIndexes(fields);
+  const totalRaw = fields.length > valueIndexes.total ? String(fields[valueIndexes.total] ?? "").trim() : "";
+  const nameRaw = fields.length > valueIndexes.name ? String(fields[valueIndexes.name] ?? "").trim() : "";
+  const unitRaw = fields.length > valueIndexes.unit ? String(fields[valueIndexes.unit] ?? "").trim() : "";
   const sourceCode = extractSourceDataPositionCipher(cipherRaw);
   const originalCode = extractSourceDataPositionOriginalCode(cipherRaw);
   const hasTotal = totalRaw !== "";
@@ -4331,7 +4505,11 @@ function buildGsnPositionItemFromSourceDataLine({ existing, fields, rawText, lin
   const name = parsed.hasName ? parsed.name : calcDone ? existing.name || "" : "";
   const unit = parsed.hasUnit ? parsed.unit : calcDone ? existing.unit || "" : "";
   const originalCode = calcDone ? existing.originalCode || "" : "";
-  const total = parsed.hasTotal ? parsed.total : calcDone ? Number(existing.total || 0) : 0;
+  const total = calcDone
+    ? Number(existing.total || 0)
+    : parsed.hasTotal
+      ? parsed.total
+      : 0;
   const unitPrice = calcDone ? Number(existing.unitPrice || 0) : 0;
   const quantity = rawTextUnchanged
     ? Number(existing?.quantity || 0)
@@ -4379,7 +4557,7 @@ function hydrateEstimateItemFromSourceDataRawText(item) {
   if (parsed.hasUnit) {
     item.unit = parsed.unit;
   }
-  if (parsed.hasTotal) {
+  if (parsed.hasTotal && !estimateLineCalcDone(item)) {
     item.total = parsed.total;
   }
   if (!String(item.source || "").trim() && item.type === "position") {
@@ -4583,7 +4761,7 @@ function formatEstimateLineQuantityInput(value) {
 }
 
 function formatEstimateLinePriceInput(line) {
-  const value = Number(line?.unitPrice || 0);
+  const value = roundEstimateUnitPrice(line?.unitPrice || 0);
   if (!Number.isFinite(value) || value === 0) {
     return "";
   }
@@ -4642,15 +4820,14 @@ function formatEstimateUnitPrice(item) {
   const base = String(normalized?.unitPriceText || "").trim();
   const index = String(normalized?.unitPriceIndex || "").trim();
   if (index) {
-    const basePart = base ? escapeHTML(base) : "";
-    const indexPart = `<span class="editor-estimate-price-index">*${escapeHTML(index)}</span>`;
+    const basePart = base ? formatEstimateUnitPriceText(base) : "";
+    const indexPart = `<span class="editor-estimate-price-index">*${formatEstimateUnitPriceText(index)}</span>`;
     return basePart ? `${basePart}<br>${indexPart}` : indexPart;
   }
   if (base) {
-    return escapeHTML(base);
+    return formatEstimateUnitPriceText(base);
   }
-  const value = Number(normalized?.unitPrice || 0);
-  return value ? estimateCostDetailed.format(value) : "";
+  return formatEstimateUnitPriceAmount(normalized?.unitPrice || 0);
 }
 
 function estimateChildFromResource(resource, index, parentId) {
@@ -4764,24 +4941,71 @@ function estimateCalcRecordNeedsApply(item) {
   return !estimateLineHasAppliedPricing(item);
 }
 
-function applyEstimateCalcRecordsBatch(estimate, statuses, resolveItem = null) {
-  const resolve = resolveItem || createEstimateCalcStatusResolver(estimate?.items);
+function applyEstimateCalcRecordsBatch(estimate, statuses) {
   let changed = false;
-
-  (statuses || []).forEach((status) => {
+  matchCalcStatusesToItems(estimate?.items, statuses).forEach(({ item, status }) => {
     if (status.status !== "done" || !status.calcJson) {
-      return;
-    }
-    const item = resolve(status);
-    if (!item) {
       return;
     }
     if (applyEstimateCalcRecord(item, status.calcJson)) {
       changed = true;
     }
   });
-
   return changed;
+}
+
+async function reconcileEstimateCalcStatusesFromServer(estimateId, { refreshTable = true } = {}) {
+  if (!state.me || !isPersistedEstimateId(estimateId) || estimateCalcReconcileInflight.has(estimateId)) {
+    return false;
+  }
+  const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+  if (!estimate) {
+    return false;
+  }
+
+  estimateCalcReconcileInflight.add(estimateId);
+  try {
+    const large = isLargeEstimateForCalc(estimate);
+    const response = await api(`/api/estimates/${estimateId}/calc-status${large ? "?lite=1" : ""}`);
+    const statuses = response.items || [];
+    enrichEditorEstimateItems(estimate.items);
+    const pairs = collectEstimateCalcStatusPairsToApply(estimate.items, statuses);
+    if (!pairs.length) {
+      return false;
+    }
+    applyEstimateCalcStatusPairs(estimate, pairs, { skipRecords: large });
+    enrichEditorEstimateItems(estimate.items);
+    ensureEstimateCalcProgressTarget(estimateId, estimate);
+    accumulateCalcGrandTotalFromPairs(
+      estimateId,
+      pairs.map(({ item }) => item),
+      estimate.items,
+    );
+    updateCalcProgressTarget(estimateId, estimateCalcProgress(estimate.items, estimateId), estimate);
+    if (!estimateHasInFlightGsnCalc(estimate.items)) {
+      clearEstimateCalcAwaitingServer(estimateId);
+    }
+    if (
+      refreshTable &&
+      state.section === "editor" &&
+      sameEstimateId(state.editorTab, estimateId) &&
+      state.estimateViewMode === "table"
+    ) {
+      updateEditorCalcProgressDom(estimate);
+      updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: large });
+      if (large) {
+        syncLargeEstimateTableRows(estimate);
+      } else {
+        refreshAllRenderedEstimateTableRows(estimate);
+      }
+      saveEditorState();
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    estimateCalcReconcileInflight.delete(estimateId);
+  }
 }
 
 function shouldPreserveLocalGsnCalcOnMerge(local, saved) {
@@ -4789,10 +5013,32 @@ function shouldPreserveLocalGsnCalcOnMerge(local, saved) {
     return false;
   }
   const savedStatus = String(saved?.calcStatus || "").trim();
+  if (!savedStatus) {
+    return false;
+  }
   if (savedStatus === "done" && local.calcJson && !saved.calcJson) {
     return true;
   }
   return false;
+}
+
+function estimateCalcListenerShouldWait(estimateId, estimate = null) {
+  const resolved = estimate || state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+  const key = estimateCalcTargetKey(estimateId);
+  return Boolean(
+    (key && estimateCalcAwaitingServer.has(key)) ||
+      (resolved && estimateHasInFlightGsnCalc(resolved.items)),
+  );
+}
+
+function shouldRunEstimateCalcBatchListener(estimateId) {
+  if (!ENABLE_ESTIMATE_CALC_BATCH_LISTENER || !isPersistedEstimateId(estimateId)) {
+    return false;
+  }
+  if (persistEstimateInflight.has(estimateId) || estimateCalcPollBlockedByPersist.has(estimateId)) {
+    return false;
+  }
+  return estimateCalcListenerShouldWait(estimateId);
 }
 
 function applyEstimateCalcStatusMetaOnly(estimate, statuses) {
@@ -4823,38 +5069,12 @@ function applyEstimateCalcStatusMetaOnly(estimate, statuses) {
   return changed;
 }
 
-function applyEstimateCalcStatusFieldsOnly(estimate, statuses, resolveItem = null) {
-  const resolve = resolveItem || createEstimateCalcStatusResolver(estimate?.items);
-  let changed = false;
-
-  (statuses || []).forEach((status) => {
-    const item = resolve(status);
-    if (!item) {
-      return;
-    }
-    const nextStatus = status.status || "";
-    const nextError = status.error || "";
-    const nextCalcKey = JSON.stringify(status.calcJson || null);
-    if (item.calcStatus !== nextStatus || item.calcError !== nextError || item.calcJsonKey !== nextCalcKey) {
-      item.calcStatus = nextStatus;
-      item.calcError = nextError;
-      item.calcJson = status.calcJson || null;
-      item.calcJsonKey = nextCalcKey;
-      changed = true;
-    }
-    applyEstimateCalcLineResult(item, status);
-    if (nextStatus === "done") {
-      if (status.calcJson) {
-        if (applyEstimateCalcRecord(item, status.calcJson)) {
-          changed = true;
-        }
-      } else {
-        applyEstimateCalcPricingFromJson(item, status.calcJson);
-      }
-    }
-  });
-
-  return changed;
+function applyEstimateCalcStatusFieldsOnly(estimate, statuses) {
+  const pairs = matchCalcStatusesToItems(estimate?.items, statuses);
+  if (!pairs.length) {
+    return false;
+  }
+  return applyEstimateCalcStatusPairs(estimate, pairs, { skipRecords: true });
 }
 
 function calcStatusNeedsApply(item, status) {
@@ -4870,28 +5090,180 @@ function calcStatusNeedsApply(item, status) {
   return nextStatus === "done" && status.calcJson && estimateCalcRecordNeedsApply(item);
 }
 
+function estimateItemParticipatesInCalcStatusMatch(item) {
+  if (!item) {
+    return false;
+  }
+  if (estimateLineNeedsGsnCalc(item)) {
+    return true;
+  }
+  const status = String(item.calcStatus || "").trim();
+  return status === "queued" || status === "leased" || estimateCalcTerminalStatus(status);
+}
+
+function buildCalcStatusLineMatchKey({ code, originalCode, quantity }) {
+  const resolvedCode = String(code || originalCode || "").trim();
+  if (!resolvedCode) {
+    return "";
+  }
+  const qty = Number(quantity);
+  if (!Number.isFinite(qty)) {
+    return resolvedCode;
+  }
+  return `${resolvedCode}\0${qty.toFixed(6)}`;
+}
+
+function buildCalcStatusMatchKeyFromItem(item) {
+  if (!item) {
+    return "";
+  }
+  return buildCalcStatusLineMatchKey({
+    code: estimateRecordLookupCode(item) || item.code,
+    originalCode: item.originalCode,
+    quantity: item.quantity,
+  });
+}
+
+function buildCalcStatusMatchKeyFromStatus(status) {
+  if (!status) {
+    return "";
+  }
+  return buildCalcStatusLineMatchKey({
+    code: status.code,
+    originalCode: status.originalCode,
+    quantity: status.quantity,
+  });
+}
+
+function mergeEstimateCalcStatusPairs(...lists) {
+  const merged = new Map();
+  lists.forEach((pairs) => {
+    (pairs || []).forEach((pair) => {
+      if (pair?.item?.id) {
+        merged.set(pair.item.id, pair);
+      }
+    });
+  });
+  return [...merged.values()];
+}
+
+function collectStaleLocalCalcStatusPairs(items, statuses) {
+  const statusesByLineId = new Map();
+  (statuses || []).forEach((status) => {
+    const lineId = String(status?.lineId || "").trim();
+    if (lineId) {
+      statusesByLineId.set(lineId, status);
+    }
+  });
+  const pairs = [];
+  (items || []).forEach((item) => {
+    if (!item?.id) {
+      return;
+    }
+    const localStatus = String(item.calcStatus || "").trim();
+    if (localStatus !== "queued" && localStatus !== "leased") {
+      return;
+    }
+    const status = statusesByLineId.get(item.id);
+    if (!status) {
+      return;
+    }
+    const serverStatus = String(status.status || "").trim();
+    if (!estimateCalcTerminalStatus(serverStatus)) {
+      return;
+    }
+    pairs.push({ item, status });
+  });
+  return pairs;
+}
+
+function collectEstimateCalcStatusPairsToApply(items, statuses) {
+  const matched = matchCalcStatusesToItems(items, statuses);
+  const stale = collectStaleLocalCalcStatusPairs(items, statuses);
+  return mergeEstimateCalcStatusPairs(
+    matched.filter(({ item, status }) => calcStatusNeedsApply(item, status)),
+    stale.filter(({ item, status }) => calcStatusNeedsApply(item, status)),
+  );
+}
+
 function matchCalcStatusesToItems(items, statuses) {
   const itemsById = new Map();
+  const poolsByCode = new Map();
+  const poolsByMatchKey = new Map();
   (items || []).forEach((item) => {
     if (item?.id) {
       itemsById.set(item.id, item);
     }
+    if (!estimateItemParticipatesInCalcStatusMatch(item)) {
+      return;
+    }
+    const code = estimateRecordLookupCode(item) || String(item.code || "").trim();
+    if (code) {
+      const pool = poolsByCode.get(code);
+      if (pool) {
+        pool.push(item);
+      } else {
+        poolsByCode.set(code, [item]);
+      }
+    }
+    const matchKey = buildCalcStatusMatchKeyFromItem(item);
+    if (matchKey) {
+      const pool = poolsByMatchKey.get(matchKey);
+      if (pool) {
+        pool.push(item);
+      } else {
+        poolsByMatchKey.set(matchKey, [item]);
+      }
+    }
   });
+
+  const usedItemIds = new Set();
+  const claimItemById = (item) => {
+    if (!item || usedItemIds.has(item.id)) {
+      return null;
+    }
+    usedItemIds.add(item.id);
+    return item;
+  };
+  const claimPoolItem = (item) => {
+    if (!item || !estimateItemParticipatesInCalcStatusMatch(item) || usedItemIds.has(item.id)) {
+      return null;
+    }
+    usedItemIds.add(item.id);
+    return item;
+  };
 
   const pairs = [];
   (statuses || []).forEach((status) => {
-    if (!String(status?.code || "").trim()) {
-      return;
-    }
     const lineId = String(status?.lineId || "").trim();
-    if (!lineId) {
+    const code = String(status?.code || "").trim();
+    const matchKey = buildCalcStatusMatchKeyFromStatus(status);
+    if (!lineId && !code && !matchKey) {
       return;
     }
-    const item = itemsById.get(lineId);
-    if (!item || !estimateLineNeedsGsnCalc(item)) {
-      return;
+
+    let item = lineId ? claimItemById(itemsById.get(lineId)) : null;
+    if (!item && matchKey) {
+      const pool = poolsByMatchKey.get(matchKey) || [];
+      for (const candidate of pool) {
+        item = claimPoolItem(candidate);
+        if (item) {
+          break;
+        }
+      }
     }
-    pairs.push({ item, status });
+    if (!item && code && !lineId) {
+      const pool = poolsByCode.get(code) || [];
+      for (const candidate of pool) {
+        item = claimPoolItem(candidate);
+        if (item) {
+          break;
+        }
+      }
+    }
+    if (item) {
+      pairs.push({ item, status });
+    }
   });
   return pairs;
 }
@@ -5103,9 +5475,7 @@ async function applyIncrementalEstimateCalcUpdates(estimate, statuses) {
   const estimateId = estimate.id;
   const large = isLargeEstimateForCalc(estimate);
   enrichEditorEstimateItems(estimate.items);
-  const pairs = matchCalcStatusesToItems(estimate.items, statuses).filter(({ item, status }) =>
-    calcStatusNeedsApply(item, status),
-  );
+  const pairs = collectEstimateCalcStatusPairsToApply(estimate.items, statuses);
   if (!pairs.length) {
     return { applied: 0, remaining: 0 };
   }
@@ -5202,6 +5572,7 @@ async function finalizeEstimateCalcIfComplete(estimate, statuses) {
     }
   }
   saveEditorState();
+  finalizeEstimateCalcProgressTarget(estimateId, estimate);
   if (
     state.section === "editor" &&
     sameEstimateId(state.editorTab, estimateId) &&
@@ -5211,8 +5582,10 @@ async function finalizeEstimateCalcIfComplete(estimate, statuses) {
     if (large) {
       refreshEstimateTableCalcVisuals(estimate);
       syncLargeEstimateTableRows(estimate);
+      updateEditorTableTotals(estimate, { skipCacheRefresh: true, lite: true });
     } else {
       updateEditorTableContent(estimate, { refreshBody: true });
+      updateEditorTableTotals(estimate, { skipCacheRefresh: true });
     }
   }
 }
@@ -5308,9 +5681,7 @@ async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGenerat
     return false;
   }
 
-  const pairs = matchCalcStatusesToItems(estimate.items || [], batch.items || []).filter(({ item, status }) =>
-    calcStatusNeedsApply(item, status),
-  );
+  const pairs = collectEstimateCalcStatusPairsToApply(estimate.items || [], batch.items || []);
   const appliedCount = Number(batch.applied ?? 0);
   const batchProgress = {
     total: Number(batch.total || 0),
@@ -5334,7 +5705,8 @@ async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGenerat
   }
 
   const large = isLargeEstimateForCalc(estimate);
-  applyEstimateCalcStatusPairs(estimate, pairs, { skipRecords: large && !batch.done });
+  const applyRecords = !large || Boolean(batch.done);
+  applyEstimateCalcStatusPairs(estimate, pairs, { skipRecords: !applyRecords });
   enrichEditorEstimateItems(estimate.items);
   ensureEstimateCalcProgressTarget(estimate.id, estimate);
   accumulateCalcGrandTotalFromPairs(
@@ -5393,11 +5765,16 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
         break;
       }
 
+      if (!estimateCalcListenerShouldWait(estimateId, estimate)) {
+        break;
+      }
+
       try {
+        const shouldWait = estimateCalcListenerShouldWait(estimateId, estimate);
         const params = new URLSearchParams({
           applied: String(ctrl.cursor.applied || 0),
           generation: String(ctrl.cursor.generation || 0),
-          wait: "1",
+          wait: shouldWait ? "1" : "0",
         });
         const batch = await api(`/api/estimates/${estimateId}/calc-batch?${params.toString()}`);
         if (ctrl.stopped || ctrl.session !== session) {
@@ -5433,6 +5810,12 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
           lastBatchDone = true;
           ctrl.cursor.applied = Number(batch.applied ?? ctrl.cursor.applied ?? 0);
           updateEditorCalcProgressDom(estimate);
+          await reconcileEstimateCalcStatusesFromServer(estimateId);
+          const current = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+          if (current) {
+            finalizeEstimateCalcProgressTarget(estimateId, current);
+            updateEditorTableTotals(current, { skipCacheRefresh: true, lite: isLargeEstimateForCalc(current) });
+          }
           saveEditorState();
           break;
         }
@@ -5451,6 +5834,19 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
   } finally {
     if (ctrl.listenerPromise === run) {
       ctrl.listenerPromise = null;
+    }
+    if (
+      lastBatchDone &&
+      !ctrl.stopped &&
+      ctrl.session === session &&
+      state.section === "editor" &&
+      state.estimateViewMode === "table" &&
+      sameEstimateId(state.editorTab, estimateId)
+    ) {
+      const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+      if (estimate && estimateHasInFlightGsnCalc(estimate.items)) {
+        void reconcileEstimateCalcStatusesFromServer(estimateId);
+      }
     }
     if (
       !lastBatchDone &&
@@ -5474,7 +5870,7 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
 }
 
 async function startEstimateCalcBatchListener(estimateId) {
-  if (!ENABLE_ESTIMATE_CALC_BATCH_LISTENER || !isPersistedEstimateId(estimateId)) {
+  if (!shouldRunEstimateCalcBatchListener(estimateId)) {
     return;
   }
   stopEstimateCalcStatusPolling();
@@ -5811,6 +6207,9 @@ function syncEstimateCalcStatusPolling() {
     if (estimate) {
       ensureEstimateCalcProgressTarget(estimateId, estimate);
       updateEditorCalcProgressDom(estimate);
+      if (estimateHasInFlightGsnCalc(estimate.items)) {
+        void reconcileEstimateCalcStatusesFromServer(estimateId);
+      }
     }
     startEstimateCalcBatchListener(estimateId);
     return;
@@ -5965,6 +6364,7 @@ function renderEstimateCalcStatusBadge(item) {
   if (!status || estimateLineIsStructural(item)) {
     return "";
   }
+  const calcError = String(item?.calcError || "").toLowerCase();
   const labels = {
     queued: "В очереди",
     leased: "Считается",
@@ -5972,7 +6372,8 @@ function renderEstimateCalcStatusBadge(item) {
     failed: "Повтор",
     dead: "Ошибка",
   };
-  const label = labels[status] || status;
+  const isNotFoundError = calcError.includes("not found") || calcError.includes("не найден");
+  const label = isNotFoundError && (status === "failed" || status === "dead") ? "Не найдено" : labels[status] || status;
   const title = item?.calcError ? ` title="${escapeHTML(item.calcError)}"` : "";
   return `<span class="editor-estimate-calc-status editor-estimate-calc-status-${escapeHTML(status)}"${title}>${escapeHTML(label)}</span>`;
 }
@@ -6545,6 +6946,16 @@ function mountEditorContent(estimate, { force = false } = {}) {
     mountEditorTableBody(estimate, tbody);
     ensureEditorTableBodyComplete(estimate);
   }
+  if (
+    isPersistedEstimateId(estimate.id) &&
+    !estimateCalcListenerShouldWait(estimate.id, estimate) &&
+    (estimate.items || []).some((item) => {
+      const status = String(item.calcStatus || "").trim();
+      return (status === "queued" || status === "leased") && estimateLineNeedsGsnCalc(item);
+    })
+  ) {
+    void reconcileEstimateCalcStatusesFromServer(estimate.id);
+  }
 }
 
 function renderEstimateTableEditor(estimate) {
@@ -6599,13 +7010,14 @@ function formatEstimateUnitPricePlain(item) {
   const base = String(normalized?.unitPriceText || "").trim();
   const index = String(normalized?.unitPriceIndex || "").trim();
   if (index) {
-    return base ? `${base}\n*${index}` : `*${index}`;
+    const basePart = base ? formatEstimateUnitPriceAmount(parseLocalizedNumber(base)) : "";
+    const indexPart = `*${formatEstimateUnitPriceAmount(parseLocalizedNumber(index))}`;
+    return basePart ? `${basePart}\n${indexPart}` : indexPart;
   }
   if (base) {
-    return base;
+    return formatEstimateUnitPriceAmount(parseLocalizedNumber(base));
   }
-  const value = Number(normalized?.unitPrice || 0);
-  return value ? estimateCostDetailed.format(value) : "";
+  return formatEstimateUnitPriceAmount(normalized?.unitPrice || 0);
 }
 
 function estimateLineCodeExportText(item) {
@@ -6705,6 +7117,8 @@ function enrichEditorEstimateItems(items) {
     hydrateEstimateItemFromSourceDataRawText(item);
     if (estimateCalcRecordNeedsApply(item)) {
       applyEstimateCalcRecord(item, item.calcJson);
+    } else if (estimateLineCalcDone(item)) {
+      applyEstimateCalcPricingFromJson(item, item.calcJson);
     }
   });
 }
@@ -7777,7 +8191,6 @@ async function setEstimateViewMode(estimateId, mode) {
     const parsedEstimate = cloneOpenEstimate(estimate);
     try {
       applyEstimateTextToEstimate(parsedEstimate, draft);
-      (parsedEstimate.items || []).forEach(clearGsnLineCalcEnrichment);
       enrichEditorEstimateItems(parsedEstimate.items);
       if (!parsedEstimate.district && previousDistrict) {
         parsedEstimate.district = previousDistrict;
@@ -7786,6 +8199,19 @@ async function setEstimateViewMode(estimateId, mode) {
       showMessage(error.message || "Не удалось разобрать текст сметы", "error");
       return;
     }
+
+    let savedItems = estimate.items || [];
+    if (isPersistedEstimateId(estimateId)) {
+      try {
+        const serverEstimate = await fetchEstimateDetail(estimateId);
+        savedItems = serverEstimate.items || savedItems;
+      } catch {
+        // keep local snapshot
+      }
+    }
+    syncEstimateLineIdsFromSaved(parsedEstimate.items, savedItems);
+    mergeEstimateCalcStateFromSaved(parsedEstimate.items, savedItems);
+    enrichEditorEstimateItems(parsedEstimate.items);
 
     const fgisSetId = applyParsedSourceDataFgisSet(parsedEstimate, parsedEstimate, fgisSetIdFromText);
     const estimateIndex = state.openEstimates.findIndex((item) => item.id === estimateId);
@@ -7796,25 +8222,35 @@ async function setEstimateViewMode(estimateId, mode) {
 
     resetEditorTableInteractionState();
 
-    prepareEstimateTableCalculationState(estimateId, parsedEstimate);
+    const needsCalc = estimateNeedsTableCalculation(parsedEstimate);
+    if (needsCalc) {
+      prepareEstimateTableCalculationState(estimateId, parsedEstimate, { preserveDone: true });
+    } else {
+      finalizeEstimateCalcProgressTarget(estimateId, parsedEstimate);
+    }
 
     state.estimateViewMode = "table";
     renderEditor();
     const tableEstimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
     if (tableEstimate) {
       updateEditorCalcProgressDom(tableEstimate);
-      updateEditorTableTotals(tableEstimate, { skipCacheRefresh: true });
+      updateEditorTableTotals(tableEstimate, { skipCacheRefresh: true, lite: isLargeEstimateForCalc(tableEstimate) });
+      if (!needsCalc && isLargeEstimateForCalc(tableEstimate)) {
+        syncLargeEstimateTableRows(tableEstimate);
+      }
     }
     refreshEditorFgisSetSelect(parsedEstimate);
     saveEditorState();
 
-    void runEstimateTableCalculation(estimateId, {
-      fgisSetId,
-      fgisSetIdFromText,
-      parsedEstimate,
-      revertToTextOnLicenseBlock: true,
-      skipStatePrep: true,
-    });
+    if (needsCalc) {
+      void runEstimateTableCalculation(estimateId, {
+        fgisSetId,
+        fgisSetIdFromText,
+        parsedEstimate,
+        revertToTextOnLicenseBlock: true,
+        skipStatePrep: true,
+      });
+    }
     return;
   }
 
@@ -8249,24 +8685,31 @@ function rehydrateOpenEstimateFromSource(estimate, sourceEstimate) {
 }
 
 function rehydrateEmptyOpenEstimates() {
+  return rehydrateEmptyOpenEstimatesAsync();
+}
+
+async function rehydrateEmptyOpenEstimatesAsync() {
   let changed = false;
-  state.openEstimates.forEach((estimate, index) => {
+  for (let index = 0; index < state.openEstimates.length; index += 1) {
+    const estimate = state.openEstimates[index];
     if (!isPersistedEstimateId(estimate.id)) {
-      return;
+      continue;
     }
-    if (Array.isArray(estimate.items) && estimate.items.length > 0) {
-      return;
+    if (estimateHasLineItems(estimate)) {
+      continue;
     }
-    const sourceEstimate = findCachedSourceEstimate(estimate.id);
-    if (!sourceEstimate) {
-      return;
+    let sourceEstimate;
+    try {
+      sourceEstimate = await fetchEstimateDetail(estimate.id);
+    } catch {
+      continue;
     }
     const hydrated = rehydrateOpenEstimateFromSource(estimate, sourceEstimate);
     if (hydrated) {
       state.openEstimates[index] = hydrated;
       changed = true;
     }
-  });
+  }
   if (changed) {
     saveEditorState();
   }
@@ -8285,12 +8728,13 @@ async function ensureOpenEstimateHydrated(estimateId) {
   if (Array.isArray(estimate.items) && estimate.items.length > 0) {
     return false;
   }
-  let sourceEstimate = findCachedSourceEstimate(estimateId);
-  if (!sourceEstimate) {
-    await refreshConstructionData();
-    sourceEstimate = findCachedSourceEstimate(estimateId);
+  if (Array.isArray(estimate.items)) {
+    return false;
   }
-  if (!sourceEstimate) {
+  let sourceEstimate;
+  try {
+    sourceEstimate = await fetchEstimateDetail(estimateId);
+  } catch {
     return false;
   }
   const hydrated = rehydrateOpenEstimateFromSource(estimate, sourceEstimate);
@@ -9100,16 +9544,70 @@ function estimateLineSyncKey(item) {
 }
 
 function syncRunningGrandTotalFromBatch(estimateId, estimate, batch) {
-  if (batch?.grandTotal == null || !Number.isFinite(Number(batch.grandTotal))) {
-    return;
-  }
   const key = estimateCalcTargetKey(estimateId);
   const target = estimateCalcProgressTargets.get(key);
   if (!target) {
     return;
   }
+  if (batch?.done && estimate) {
+    enrichEditorEstimateItems(estimate.items);
+    target.runningGrandTotal = estimateGrandTotalForDisplay(estimate.items || []);
+    return;
+  }
+  if (batch?.grandTotal == null || !Number.isFinite(Number(batch.grandTotal))) {
+    return;
+  }
   const base = target.baseGrandTotal ?? estimateCalcProgressBaseGrandTotal(estimate?.items || []);
   target.runningGrandTotal = base + Number(batch.grandTotal);
+}
+
+function mergeEstimateCalcStateFromSaved(localItems, savedItems) {
+  if (!Array.isArray(localItems) || !Array.isArray(savedItems) || !localItems.length || !savedItems.length) {
+    return 0;
+  }
+
+  const savedById = new Map();
+  const savedPools = new Map();
+  savedItems.forEach((saved, index) => {
+    if (saved?.id) {
+      savedById.set(saved.id, saved);
+    }
+    const key = estimateLineSyncKey(saved) || `__idx__${index}`;
+    const pool = savedPools.get(key);
+    if (pool) {
+      pool.push(saved);
+    } else {
+      savedPools.set(key, [saved]);
+    }
+  });
+
+  let merged = 0;
+  localItems.forEach((local, index) => {
+    if (!estimateLineNeedsGsnCalc(local)) {
+      return;
+    }
+    let saved = local?.id ? savedById.get(local.id) : null;
+    if (!saved) {
+      const key = estimateLineSyncKey(local) || `__idx__${index}`;
+      const pool = savedPools.get(key);
+      saved = pool?.length ? pool.shift() : savedItems[index];
+    }
+    if (!saved || String(saved.calcStatus || "").trim() !== "done") {
+      clearGsnLineCalcEnrichment(local);
+      return;
+    }
+
+    local.id = saved.id || local.id;
+    local.calcStatus = saved.calcStatus;
+    local.calcError = saved.calcError || "";
+    local.calcJson = saved.calcJson || null;
+    local.calcJsonKey = JSON.stringify(saved.calcJson || null);
+    delete local.calcRecordAppliedKey;
+    local.unitPrice = Number(saved.unitPrice || 0);
+    local.total = Number(saved.total || 0);
+    merged += 1;
+  });
+  return merged;
 }
 
 function syncEstimateLineIdsFromSaved(localItems, savedItems) {
@@ -9211,6 +9709,13 @@ async function persistOpenEstimate(estimateId, options = {}) {
       throw new Error(message);
     }
     return;
+  }
+
+  const shouldBlockCalcPoll =
+    state.estimateViewMode === "table" && sameEstimateId(state.editorTab, estimateId);
+  if (shouldBlockCalcPoll) {
+    estimateCalcPollBlockedByPersist.add(estimateId);
+    await abortEstimateCalcBatchSession(estimateId);
   }
 
   const request = (async () => {
@@ -9328,6 +9833,12 @@ async function persistOpenEstimate(estimateId, options = {}) {
   } finally {
     if (persistEstimateInflight.get(estimateId) === request) {
       persistEstimateInflight.delete(estimateId);
+    }
+    if (shouldBlockCalcPoll) {
+      estimateCalcPollBlockedByPersist.delete(estimateId);
+      if (shouldRunEstimateCalcBatchListener(estimateId)) {
+        startEstimateCalcBatchListener(estimateId);
+      }
     }
   }
 }
@@ -9629,15 +10140,11 @@ async function closeEstimateFromEditor(estimateID) {
 
   await flushPersistOpenEstimate(estimateID);
 
-  if (state.estimateViewMode === "table" && state.editorTab === estimateID) {
-    await cancelAndStopEstimateCalc(estimateID);
-  } else {
-    stopEstimateCalcBatchListener(estimateID);
-  }
+  stopEstimateCalcBatchListener(estimateID);
 
   state.openEstimates.splice(index, 1);
   invalidateEstimateTextDraft(estimateID);
-  await releaseEstimateLock(estimateID);
+  void releaseEstimateLock(estimateID);
   void refreshEstimateLocks();
 
   if (state.editorTab === estimateID) {
@@ -9681,17 +10188,16 @@ async function openEstimateInEditor(estimateID) {
       return;
     }
     const existingEstimate = state.openEstimates[existingIndex];
-    if (!Array.isArray(existingEstimate.items) || existingEstimate.items.length === 0) {
-      let sourceEstimate = findCachedSourceEstimate(estimateId);
-      if (!sourceEstimate) {
-        await refreshConstructionData();
-        sourceEstimate = findCachedSourceEstimate(estimateId);
-      }
-      if (sourceEstimate) {
+    if (!estimateHasLineItems(existingEstimate)) {
+      try {
+        const sourceEstimate = await fetchEstimateDetail(estimateId);
         const hydratedEstimate = rehydrateOpenEstimateFromSource(existingEstimate, sourceEstimate);
         if (hydratedEstimate) {
           state.openEstimates[existingIndex] = hydratedEstimate;
         }
+      } catch (error) {
+        showMessage(error.message || "Не удалось загрузить смету", "error");
+        return;
       }
     }
     state.estimateViewMode = "text";
@@ -9716,13 +10222,11 @@ async function openEstimateInEditor(estimateID) {
       throw error;
     }
 
-    let sourceEstimate = findCachedSourceEstimate(estimateId);
-    if (!sourceEstimate) {
-      await refreshConstructionData();
-      sourceEstimate = findCachedSourceEstimate(estimateId);
-    }
-    if (!sourceEstimate) {
-      showMessage("Смета не найдена", "error");
+    let sourceEstimate;
+    try {
+      sourceEstimate = await fetchEstimateDetail(estimateId);
+    } catch (error) {
+      showMessage(error.message || "Смета не найдена", "error");
       return;
     }
 

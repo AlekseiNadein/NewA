@@ -44,7 +44,7 @@ CREATE INDEX IF NOT EXISTS idx_app_estimates_company_id ON app_estimates(company
 CREATE INDEX IF NOT EXISTS idx_app_estimates_object_id ON app_estimates(object_id);
 
 CREATE TABLE IF NOT EXISTS app_estimate_lines (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     estimate_id TEXT NOT NULL REFERENCES app_estimates(id) ON DELETE CASCADE,
     line_type TEXT NOT NULL CHECK (line_type IN ('section', 'subsection', 'position')),
     source TEXT NOT NULL DEFAULT '',
@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS app_estimate_lines (
     calc_error TEXT NOT NULL DEFAULT '',
     revision BIGINT NOT NULL DEFAULT 0,
     calculated_at TIMESTAMPTZ,
-    sort_order INTEGER NOT NULL DEFAULT 0
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (estimate_id, id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_app_estimate_lines_estimate_id ON app_estimate_lines(estimate_id, sort_order, id);

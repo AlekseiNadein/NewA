@@ -8,3 +8,4 @@ echo [observability] Prometheus:      http://localhost:9093
 echo [observability] Loki:            http://localhost:3100
 echo [observability] Tempo:           http://localhost:3200
 echo [observability] OTLP HTTP/gRPC:  http://localhost:4318 / localhost:4317
+echo [observability] k6 load tests:   scripts\run-k6-smoke.bat / scripts\run-k6-load.bat [VUs]

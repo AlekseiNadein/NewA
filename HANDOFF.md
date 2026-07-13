@@ -125,7 +125,8 @@ Auth **не участвует** в calc worker: worker не используе�
 
 calc worker service (отдельный процесс)
   → ClaimEstimateCalcJob (FOR UPDATE SKIP LOCKED, lease/retry/dead)
-  → gsn.GetRecordDetail(code, fgisSet, district)
+  → если IsUserCatalogCipherCode(code) → user catalog (исходник / app_user_positions)
+  → иначе gsn.GetRecordDetail(code, fgisSet, district)
   → CompleteEstimateCalcJob → calc_json, calc_status=done
 
 Табличный редактор (сразу после parse)
@@ -163,7 +164,7 @@ calc worker service (отдельный процесс)
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
-| `GET` | `/api/estimates/{id}/calc-batch?applied=&generation=&wait=1` | Long-poll (~25 с): следующий батч терминальных статусов |
+| `GET` | `/api/estimates/{id}/calc-batch?applied=&generation=&wait=1` | Long-poll (до ~25 с): следующий батч терминальных статусов; **без ожидания**, если расчёт не активен (см. ниже) |
 | `POST` | `/api/estimates/{id}/calc/cancel` | Отмена in-flight расчёта, bump generation |
 | `POST` | `/api/estimates/{id}/calc` | Запуск enqueue (как раньше) |
 | `GET` | `/api/estimates/{id}/calc-status` | Legacy polling (на frontend **выключен**) |
@@ -171,6 +172,8 @@ calc worker service (отдельный процесс)
 Ответ `calc-batch`: `generation`, `applied`, `total`, `processed`, `errors`, `grandTotal`, `done`, `items[]`, опционально `reset`.
 
 Логика готовности батча (`store/calc_batch.go`): отдать батч, когда накопилось ≥ `calc_client_batch_size` **новых** терминальных строк **или** смета полностью терминальна (хвост).
+
+**Idle-детект (2026-07-09):** если батч «не готов», но по смете **нет активного расчёта** (нет строк `queued`/`leased`, jobs `queued`/`leased`, pending outbox) — ответ **сразу**, без 25-секундного long-poll. Иначе UI зависал на `wait=1`×N, когда сервер уже сбросил статусы, а `POST /calc` ещё не был вызван.
 
 #### Frontend (`web/app.js`)
 
@@ -348,6 +351,10 @@ PUT /api/estimates
 
 `raw_text`, `parsed_json`, `calc_json`, `calc_status`, `calc_error`, `revision`, `calculated_at`
 
+**PK (2026-07-09):** составной ключ **`(estimate_id, id)`**, не глобальный `id`. Один и тот же `line_3` может существовать в разных сметах. Миграция при старте: `migrateEstimateLinesCompositePK()` в `ensureTreeSchema`; SQL: `db/migrate_estimate_lines_composite_pk.sql`. Схема: `db/schema.sql`.
+
+**PUT без смены контекста (2026-07-09):** `prepareEstimateLineForStorage` + `loadStoredEstimateLines` в `upsertEstimateDB` — если `revision` строки не изменился, **сохраняются** `calc_status`, `calc_json`, цены. Сброс calc — только при смене района/набора/кода/количества/generation или явном cancel.
+
 ### Сервис расчёта
 
 | Путь | Роль |
@@ -403,7 +410,7 @@ SELECT count(*) FROM estimate_calc_jobs WHERE status='leased' AND leased_until <
 
 ## API (основное)
 
-Auth · CRUD строек/объектов/смет · `GET /api/estimates/{id}/calc-batch` · `POST .../calc/cancel` · `POST .../calc` · legacy `GET .../calc-status` · `GET/PUT /api/settings`
+Auth · CRUD строек/объектов/смет · `GET /api/estimates/{id}/calc-batch` · `POST .../calc/cancel` · `POST .../calc` · legacy `GET .../calc-status` · `GET/PUT /api/settings` · `GET/PUT /api/user-positions`
 
 GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hierarchy-records`, `fgis-sets`, `fgis-rows`
 
@@ -414,6 +421,8 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 **Переключение текст → таблица:** `applyEstimateTextToEstimate` (parse) → `prepareEstimateTableCalculationState` → `restartEstimateTableCalculation` → `renderEditor` → `persistOpenEstimate` → `POST .../calc` → `startEstimateCalcBatchListener`. **Прямых запросов к ГСН нет** (`recalculateEstimatePricing` не вызывается).
 
 **Смена района / набора ФГИС в табличном режиме (во время расчёта):** `restartEstimateCalculationAfterContextChange` — abort batch session → локальный сброс GSN-строк → UI 0/N → `POST .../calc/cancel` → persist → `POST .../calc` → новый batch-listener. См. раздел [Batch-протокол](#batch-протокол-расчёта-2026-07-02--2026-07-03-актуально).
+
+**Batch-listener и persist (2026-07-09):** `wait=1` только при `estimateHasInFlightGsnCalc` или `estimateCalcAwaitingServer`. `persistOpenEstimate` в table mode останавливает listener на время PUT; после сохранения listener поднимается **только** если расчёт реально запущен. `shouldPreserveLocalGsnCalcOnMerge` — не маскирует пустой `calcStatus` с сервера локальным «Рассчитано».
 
 **Шапка:** шифр, наименование, сметный район (`district`, `14.3`), набор ФГИС (`fgisSetId`), сметная стоимость.
 
@@ -442,7 +451,7 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 
 При каждом parse текста GSN-строки **сбрасываются** до шифра+объёма (обогащение не сохраняется из прошлого состояния).
 
-**Строка работы** (`isWork`): шифр, «+» → ресурсы (только после расчёта). **Позиция-ресурс** (С/М/Т): стоим. ед. из ФГИС.
+**Строка работы** (`isWork`): шифр, «+» → ресурсы (только после расчёта). **Позиция-ресурс ГСН** (шифр `С/М/Т` + цифра, напр. `С1185-…`): стоим. ед. из ФГИС. **Позиция каталога пользователя** (шифр с «Т» на 1-й или 2-й позиции — см. ниже): не ГСН.
 
 **Badge статуса расчёта:** В очереди · Считается · Рассчитано · Ошибка.
 
@@ -463,6 +472,67 @@ GSN: `supplements`, `hierarchy`, `regions`, `record?code&fgisSet&district`, `hie
 | 3 | Стоимость (часто пусто) | `` |
 | 4 | Наименование | `…` |
 | 5 | Ед. изм. | `м3` |
+
+**Расширенный формат** (между объёмом и стоимостью — поле индекса/района в квадратных скобках): если 3-е поле вида `[N]` (напр. `[4]`), то стоимость / наименование / ед. изм. сдвигаются на +1:
+
+```text
+ТПрайс-лист(=14)'(1)[4]'359'Диффузор DVS Ф100 мм'шт
+  → шифр | объём | [индекс] | стоимость | наименование | ед.изм.
+```
+
+Парсинг: `sourceDataPositionValueIndexes` / `ParseSourceDataPositionFields` (frontend + backend). Без учёта `[4]` стоимость ошибочно читается из поля `[4]`.
+
+### Текстовые позиции каталога пользователя (шифр с «Т»)
+
+**Правило:** если в **нормализованном** шифре (после `extractSourceDataPositionCipher`) **1-й или 2-й** символ — `Т` / `T`, позиция относится к **каталогу пользователя**, а не к нормативной базе ГСН.
+
+| Пример шифра | 1-й | 2-й | Каталог |
+|--------------|-----|-----|---------|
+| `ТПрайс-лист(=14)` | Т | П | пользователь |
+| `СТПрайс подрядчика(=13)` | С | Т | пользователь |
+| `С1185-1008-0002` | С | 1 | ГСН (ресурс) |
+| `Е1803-008-01` | Е | 1 | ГСН (работа) |
+
+**Эталонная смета:** `4000/1-3` («Отопление и вентиляция_ОВ», `est_1d9d5a0ca3f5c5b1`) — строки `ТПрайс-лист`, `СТПрайс` с полными исходными полями (стоимость + наименование + ед. изм.).
+
+#### Очередь и расчёт
+
+1. Позиция **попадает в очередь** наравне с GSN (`shouldEnqueueEstimateLineCalc`: `type=position`, `source=gsn`, непустой шифр).
+2. Calc worker **не вызывает** `gsn.GetRecordDetail` — ветка `processUserCatalogJob` (`calcworker/worker.go`).
+3. **Источник данных при расчёте:**
+   - если в `raw_text` есть **все три** поля (стоимость, наименование, ед. изм.) → результат из исходника, `unit_price = total / quantity`;
+   - иначе → поиск по шифру в `app_user_positions` (каталог пользователя компании); при отсутствии — `failed`.
+
+#### Счётчик ошибок
+
+Увеличивается **только** если для шифра с «Т» **не хватает** полей в исходнике **и** lookup в каталоге не удался.
+
+- Frontend: `estimateLineCalcCountsAsError` — для user-catalog не считает ошибкой `failed`, если `!estimateLineUserCatalogNeedsLookup`.
+- Backend summary: `countEstimateCalcErrors` — та же логика для `calc-batch` / `SummarizeEstimateCalcStatus`.
+
+Строки с полным исходником (как в 4000/1-3) **не должны** попадать в счётчик ошибок даже при старых `failed` до пересчёта.
+
+#### Каталог пользователя (хранение)
+
+| Слой | Детали |
+|------|--------|
+| **UI** | раздел «База» → «Позиции пользователя»; поля: шифр, наименование, ед. изм., стоимость |
+| **API** | `GET/PUT /api/user-positions` → `{ items: [{ id, code, name, unit, cost }] }` |
+| **БД** | `app_user_positions` (company_id, code, name, unit, cost, sort_order) |
+| **Синхронизация** | `loadUserPositions` — сервер приоритетен; при пустом сервере — миграция из `localStorage` (`nav_user_positions_{companyId}`) через `PUT` |
+
+Отличие от строк `source=user_position` в смете: те добавляются из буфера/каталога вручную и **не** идут в calc-очередь. Текстовые строки с шифром `Т…` / `…Т…` в формате «Исходные данные» остаются `source=gsn`, но worker резолвит их через каталог.
+
+#### Ключевой код
+
+```
+backend/internal/store/user_catalog.go       — IsUserCatalogCipherCode, ParseSourceDataPositionFields, UserCatalogPositionNeedsLookup
+backend/internal/store/user_positions.go     — List/Replace/LookupUserPositionByCode
+backend/internal/store/user_catalog_test.go  — ТПрайс-лист, [4], СТПрайс
+backend/internal/calcworker/worker.go        — processUserCatalogJob
+backend/internal/api/user_positions.go
+web/app.js — isUserCatalogCipherCode, estimateLineUserCatalogNeedsLookup, estimateLineCalcCountsAsError, sourceDataPositionValueFieldIndexes
+```
 
 **Шифр для ГСН** (`extractSourceDataPositionCipher`): обрезка 1-го поля по ближайшему из `(`, пробел, `#`. Полный шифр с модификаторами хранится в `sourceCode` / `rawText`.
 
@@ -497,7 +567,8 @@ web/app.js, web/index.html, web/styles.css
 web/admin.{html,js}
 backend/internal/{api,store,gsn,presence,calcworker,outbox,queue}/
 backend/internal/api/queue_health.go
-backend/internal/store/{quantity_expr,source_data_fields}*.go
+backend/internal/store/{quantity_expr,source_data_fields,user_catalog}*.go
+backend/internal/api/user_positions.go
 backend/cmd/{server,auth_server,calc_worker,migrate_auth,purge_dlq,replay_dlq}/
 db/schema.sql, db/auth_schema.sql, db/gsn_schema.sql
 run.bat, run-auth.bat, run-calc-worker.bat
@@ -675,6 +746,91 @@ run.bat                           REM приложение (обязательн
 ### Ключевые пути (git)
 
 `backend/internal/observability/`, `backend/internal/api/{monitoring.go,queue_health.go}`, `deploy/observability/`, `scripts/start-observability.bat`, `web/admin.{html,js}` (раздел «Мониторинг»).
+
+---
+
+## Текущая сессия (2026-07-09, текстовые позиции каталога «Т»)
+
+**Контекст:** позиции в тексте сметы, у которых в шифре 1-й или 2-й символ `Т`, не из нормативной базы. Эталон — смета **4000/1-3** (`ТПрайс-лист`, `СТПрайс`): раньше worker искал их в ГСН → `record not found` и ложные ошибки в счётчике.
+
+### Реализовано
+
+| Область | Содержание |
+|---------|------------|
+| **Worker** | `IsUserCatalogCipherCode` → `processUserCatalogJob`: исходник или `app_user_positions`, без GSN |
+| **Парсинг** | расширенный формат с полем `[4]` между объёмом и стоимостью (`ParseSourceDataPositionFields`) |
+| **Ошибки** | счётчик только при неполном исходнике + неудачном lookup; `countEstimateCalcErrors` / `estimateLineCalcCountsAsError` |
+| **Каталог** | таблица `app_user_positions`, API `GET/PUT /api/user-positions`, синхронизация с `localStorage` |
+| **Тесты** | `user_catalog_test.go` (ТПрайс-лист, СТПрайс, needsLookup) |
+
+### Правила (кратко)
+
+1. В очередь — **да** (как GSN-позиция с шифром).
+2. Искать в ГСН — **нет**; в каталоге пользователя — **только если** в тексте нет стоимости, наименования или ед. изм.
+3. Ошибка в прогрессе — **только** в п.2 при отсутствии позиции в каталоге.
+
+### Проверка
+
+1. Смета `4000/1-3` → табличный вид → пересчёт: `ТПрайс-лист` / `СТПрайс` → `done`, суммы из исходника (359, 1833, 12100…), ошибок по ним нет.
+2. Строка `ТПрайс-лист'(1)` без хвостовых полей → `failed`, если нет записи в каталоге с шифром `ТПрайс-лист`.
+3. `go test ./backend/internal/store/ -run UserCatalog`
+
+### Не путать
+
+- **`source=user_position`** в смете — ручное добавление из UI, **не** в calc-очереди.
+- **Шифр `Т` + цифра** (`Т1185-…`) — по текущему правилу тоже user-catalog (1-й символ `Т`), не GSN-ресурс.
+- **Ресурсы ГСН** `С…` / `М…` без `Т` на 2-й позиции — по-прежнему через `GetRecordDetail`.
+
+---
+
+## Текущая сессия (2026-07-09, PK строк + anti-hang calc-batch)
+
+**Контекст:** смета **4000/1-4** (`est_2c32ab41b0196191`) — после первого успешного расчёта смена района/набора вызывала паузу **~75 с** (три long-poll `calc-batch` по 25 с), при этом в UI позиции оставались «Рассчитано». Ранее (до этой сессии) другая смета 4000/1-4 падала с `duplicate key app_estimate_lines_pkey` из‑за глобального PK на `id` (`line_3` и т.п. коллизировали между сметами).
+
+### Диагностика (4000/1-4, 2026-07-09 ~13:47–13:50)
+
+| Время | Событие |
+|-------|---------|
+| 13:47:07 | text→table: `PUT` + `POST /calc` |
+| 13:47:09 | worker: 16 позиций за ~1 с |
+| 13:47:17 | `PUT` **без** `POST /calc` — сервер сбросил `calc_status`, клиент показал старые «Рассчитано» |
+| 13:47:21–13:48:37 | три `calc-batch` по **~25 260 ms** каждый (`wait=1`, нет терминальных статусов на сервере) |
+| 13:48:12 | смена района: `cancel` → `PUT` → `calc` → пересчёт за ~1 с |
+| 13:50:08 | финальный район 14.3 + `alrosa-2026-q2`: `calc-batch` за **403 ms** |
+
+Worker и GSN не были узким местом — только long-poll при «мёртвом» состоянии очереди.
+
+### Реализовано
+
+| # | Область | Содержание |
+|---|---------|------------|
+| **A** | **Схема БД** | PK `app_estimate_lines`: `(estimate_id, id)`; миграция в `file_store.go` + `db/migrate_estimate_lines_composite_pk.sql` |
+| **1** | **Backend calc-batch** | `estimateHasActiveCalc()` — если расчёт не активен, не ждать 25 с; `calcBatchReadyOrIdle()` |
+| **2** | **Backend PUT** | `loadStoredEstimateLines` + preserve calc при неизменном `revision` в `prepareEstimateLineForStorage` |
+| **3** | **Frontend listener** | `estimateCalcListenerShouldWait`, `shouldRunEstimateCalcBatchListener`; блок listener на `persistOpenEstimate` в table mode |
+| **4** | **Frontend merge** | `shouldPreserveLocalGsnCalcOnMerge`: пустой `calcStatus` с сервера → не сохранять локальный `done` |
+| — | **Мелкий фикс** | `applyDistrictToEstimate`: `estimateId` → `estimateID` в `persistOpenEstimate` |
+
+### Файлы
+
+`backend/internal/store/{file_store.go,calc_batch.go,calc_batch_test.go,prepare_estimate_line_test.go}`, `db/{schema.sql,migrate_estimate_lines_composite_pk.sql}`, `web/app.js`
+
+### Бэкап сессии
+
+`backups/2026-07-09_14-08/`
+
+### Acceptance (после фиксов)
+
+1. Создать смету, text→table, дождаться расчёта.
+2. Сменить район и набор ФГИС — **нет** серии пауз по 25 с; пересчёт стартует и завершается за секунды.
+3. Обычный `PUT` (шифр/описание) без смены контекста — **не** сбрасывает готовые позиции на сервере.
+4. Две сметы могут иметь строки с одинаковым `line_N` без `duplicate key`.
+
+### Ловушки
+
+- Long-poll 25 с — **норма**, только пока расчёт реально идёт (`wait=1` + активные jobs/строки).
+- `PUT` с изменением района/набора/кода/количества меняет `revision` → calc сбрасывается; нужен `POST /calc` (через `restartEstimateCalculationAfterContextChange`).
+- Не включать параллельно legacy polling и batch-listener.
 
 ---
 
@@ -923,7 +1079,7 @@ run.bat                           REM приложение (обязательн
 
 ### Незакоммиченные изменения
 
-`HANDOFF.md`, `backend/internal/store/{quantity_expr,source_data_fields}*.go`, `file_store.go`, `web/app.js`, `Э10410.txt`, `Э10420.txt`, `tools/`
+`HANDOFF.md`, `backend/internal/store/{quantity_expr,source_data_fields,user_catalog}*.go`, `backend/internal/api/user_positions.go`, `file_store.go`, `web/app.js`, `Э10410.txt`, `Э10420.txt`, `tools/`
 
 ---
 

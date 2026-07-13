@@ -103,58 +103,23 @@ WHERE id = $1`
 		return 0, err
 	}
 
-	rows, err := tx.Query(ctx, `
-SELECT id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text, calc_status
-FROM app_estimate_lines
-WHERE estimate_id = $1
-ORDER BY sort_order, id
-`, estimateID)
-	if err != nil {
-		return 0, err
-	}
-
-	type lineReset struct {
-		id       string
-		revision int64
-	}
-	resets := make([]lineReset, 0)
-	for rows.Next() {
-		var line domain.EstimateItem
-		if err := rows.Scan(
-			&line.ID, &line.Type, &line.Source, &line.Code, &line.OriginalCode, &line.Name,
-			&line.Quantity, &line.Unit, &line.UnitPrice, &line.Total, &line.RawText, &line.CalcStatus,
-		); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		if !shouldEnqueueEstimateLineCalc(line) {
-			continue
-		}
-		resets = append(resets, lineReset{
-			id:       line.ID,
-			revision: estimateLineRevision(estimate, line),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return 0, err
-	}
-	rows.Close()
-
-	for _, reset := range resets {
-		if _, err := tx.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 UPDATE app_estimate_lines
-SET revision = $3,
-    calc_status = '',
+SET calc_status = '',
     calc_error = '',
     calc_json = NULL,
+    original_code = '',
+    name = '',
+    unit = '',
     unit_price = 0,
     total = 0,
     calculated_at = NULL
-WHERE estimate_id = $1 AND id = $2
-`, estimateID, reset.id, reset.revision); err != nil {
-			return 0, err
-		}
+WHERE estimate_id = $1
+  AND line_type = $2
+  AND LOWER(COALESCE(source, '')) = 'gsn'
+  AND COALESCE(NULLIF(TRIM(code), ''), NULLIF(TRIM(original_code), '')) IS NOT NULL
+`, estimateID, string(domain.EstimateLinePosition)); err != nil {
+		return 0, err
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -183,6 +148,12 @@ WHERE estimate_id = $1
 	}
 	s.unmarkEstimateCalcStartJob(estimateID)
 	return estimate.CalcGeneration, nil
+}
+
+// ClearEstimateCalcResultsOnClose removes stored GSN calc results when an editing session ends.
+func (s *FileStore) ClearEstimateCalcResultsOnClose(ctx context.Context, companyID, estimateID string, includeAll bool) error {
+	_, err := s.CancelEstimateCalc(ctx, companyID, estimateID, includeAll)
+	return err
 }
 
 func (s *FileStore) listEstimateCalcLineStatuses(ctx context.Context, estimateID string) ([]EstimateCalcStatus, error) {
@@ -306,7 +277,50 @@ func (s *FileStore) fetchEstimateCalcBatchOnce(
 		return EstimateCalcBatchResponse{}, false, err
 	}
 	resp, ready := buildEstimateCalcBatchResponse(estimate.CalcGeneration, applied, batchSize, lines, false)
+	if !ready {
+		active, err := s.estimateHasActiveCalc(ctx, estimateID)
+		if err != nil {
+			return EstimateCalcBatchResponse{}, false, err
+		}
+		if !active {
+			ready = true
+		}
+	}
 	return resp, ready, nil
+}
+
+func calcBatchReadyOrIdle(ready, calcActive bool) bool {
+	if ready {
+		return true
+	}
+	return !calcActive
+}
+
+func (s *FileStore) estimateHasActiveCalc(ctx context.Context, estimateID string) (bool, error) {
+	if s.treeDB == nil {
+		return false, nil
+	}
+	var active bool
+	err := s.treeDB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM app_estimate_lines
+    WHERE estimate_id = $1
+      AND line_type = $2
+      AND source = 'gsn'
+      AND calc_status IN ('queued', 'leased')
+) OR EXISTS (
+    SELECT 1
+    FROM estimate_calc_jobs
+    WHERE estimate_id = $1
+      AND status IN ('queued', 'leased')
+) OR EXISTS (
+    SELECT 1
+    FROM outbox_events
+    WHERE published_at IS NULL
+      AND payload->>'estimateId' = $1
+)`, estimateID, string(domain.EstimateLinePosition)).Scan(&active)
+	return active, err
 }
 
 // FetchEstimateCalcBatch returns the next batch of terminal calc statuses for the client.

@@ -2,6 +2,7 @@ package estimatecalc
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -13,6 +14,10 @@ type LinePricing struct {
 	Quantity  float64
 	UnitPrice float64
 	Total     float64
+}
+
+func RoundMoney(value float64) float64 {
+	return math.Round(value*100) / 100
 }
 
 func ParseLocalizedNumber(raw string) (float64, error) {
@@ -80,10 +85,11 @@ func LinePricingFromRecord(record gsn.RecordDetail, quantity float64) (LinePrici
 		if err != nil {
 			return LinePricing{}, err
 		}
+		unitPrice = RoundMoney(unitPrice)
 		return LinePricing{
 			Quantity:  quantity,
 			UnitPrice: unitPrice,
-			Total:     unitPrice * quantity,
+			Total:     RoundMoney(unitPrice * quantity),
 		}, nil
 	}
 
@@ -106,11 +112,11 @@ func LinePricingFromRecord(record gsn.RecordDetail, quantity float64) (LinePrici
 
 	unitPrice := total
 	if quantity > 0 {
-		unitPrice = total / quantity
+		unitPrice = RoundMoney(total / quantity)
 	}
 	return LinePricing{
 		Quantity:  quantity,
 		UnitPrice: unitPrice,
-		Total:     total,
+		Total:     RoundMoney(total),
 	}, nil
 }

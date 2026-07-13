@@ -70,15 +70,16 @@ func (l *EstimateLocks) Acquire(estimateID, userID, userName, companyID string) 
 	return lock, nil
 }
 
-func (l *EstimateLocks) Release(estimateID, userID string) {
+func (l *EstimateLocks) Release(estimateID, userID string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	existing, ok := l.locks[estimateID]
 	if !ok || existing.UserID != userID {
-		return
+		return false
 	}
 	delete(l.locks, estimateID)
+	return true
 }
 
 func (l *EstimateLocks) ReleaseAll(userID string) {

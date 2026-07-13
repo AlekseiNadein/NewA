@@ -70,6 +70,18 @@ func TestBuildEstimateCalcBatchResponse(t *testing.T) {
 	}
 }
 
+func TestCalcBatchReadyOrIdle(t *testing.T) {
+	if !calcBatchReadyOrIdle(true, true) || !calcBatchReadyOrIdle(true, false) {
+		t.Fatal("expected ready batches to return immediately")
+	}
+	if calcBatchReadyOrIdle(false, true) {
+		t.Fatal("expected active calc to keep waiting")
+	}
+	if !calcBatchReadyOrIdle(false, false) {
+		t.Fatal("expected idle calc to return without waiting")
+	}
+}
+
 func TestBuildEstimateCalcBatchResponseWaitsUntilReady(t *testing.T) {
 	lines := []EstimateCalcStatus{
 		{LineID: "l1", Status: "done"},

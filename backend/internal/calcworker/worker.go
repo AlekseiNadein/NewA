@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,6 +76,10 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 	jobCtx, cancel := context.WithTimeout(logCtx, jobProcessTimeout)
 	defer cancel()
 
+	if store.IsUserCatalogCipherCode(code) {
+		return w.processUserCatalogJob(jobCtx, job, code)
+	}
+
 	gsnStarted := time.Now()
 	record, err := w.gsn.GetRecordDetail(jobCtx, code, job.FgisSetID, job.District)
 	observability.ObserveCalcGSNDuration(time.Since(gsnStarted).Seconds())
@@ -125,6 +130,93 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		Total:        pricing.Total,
 		CalcJSON:     calcJSON,
 	})
+}
+
+func (w *Worker) processUserCatalogJob(ctx context.Context, job store.EstimateCalcJob, code string) error {
+	fields, err := store.ParseSourceDataPositionFields(job.RawText)
+	if err != nil {
+		observability.RecordCalcError("user_catalog_parse")
+		return fmt.Errorf("parse user catalog line %q: %w", code, err)
+	}
+
+	quantity, err := w.resolveJobQuantity(ctx, job)
+	if err != nil {
+		observability.RecordCalcError("quantity")
+		return fmt.Errorf("resolve line quantity: %w", err)
+	}
+
+	name := fields.Name
+	unit := fields.Unit
+	total := fields.Total
+	unitPrice := 0.0
+
+	if store.UserCatalogPositionNeedsLookup(fields) {
+		position, found, err := w.store.LookupUserPositionByCode(ctx, job.CompanyID, code)
+		if err != nil {
+			observability.RecordCalcError("user_catalog")
+			return fmt.Errorf("lookup user position %q: %w", code, err)
+		}
+		if !found {
+			observability.RecordCalcError("user_catalog")
+			return fmt.Errorf("user position %q not found", code)
+		}
+		if !fields.HasName {
+			name = position.Name
+		}
+		if !fields.HasUnit {
+			unit = position.Unit
+		}
+		if !fields.HasTotal {
+			unitPrice = position.Cost
+			total = unitPrice * quantity
+		}
+	}
+
+	if fields.HasTotal && total > 0 && quantity > 0 {
+		unitPrice = estimatecalc.RoundMoney(total / quantity)
+	} else if unitPrice == 0 && total > 0 && quantity > 0 {
+		unitPrice = estimatecalc.RoundMoney(total / quantity)
+	} else if unitPrice > 0 {
+		unitPrice = estimatecalc.RoundMoney(unitPrice)
+	}
+
+	record := map[string]any{
+		"code":           code,
+		"originalCode":   "",
+		"name":           name,
+		"unit":           unit,
+		"isWork":         false,
+		"unitPriceText":  formatCalcMoneyText(unitPrice),
+		"unitPriceIndex": "",
+	}
+	calcJSON, err := json.Marshal(map[string]any{
+		"record":    record,
+		"quantity":  quantity,
+		"unitPrice": unitPrice,
+		"total":     total,
+	})
+	if err != nil {
+		return fmt.Errorf("encode user catalog calc result: %w", err)
+	}
+
+	return w.store.CompleteEstimateCalcJob(ctx, job, store.EstimateLineCalcResult{
+		Code:         code,
+		OriginalCode: "",
+		Name:         name,
+		Unit:         unit,
+		Quantity:     quantity,
+		UnitPrice:    unitPrice,
+		Total:        total,
+		CalcJSON:     calcJSON,
+	})
+}
+
+func formatCalcMoneyText(value float64) string {
+	value = estimatecalc.RoundMoney(value)
+	if value == 0 {
+		return "0"
+	}
+	return strings.ReplaceAll(strconv.FormatFloat(value, 'f', 2, 64), ".", ",")
 }
 
 func (w *Worker) resolveJobQuantity(ctx context.Context, job store.EstimateCalcJob) (float64, error) {

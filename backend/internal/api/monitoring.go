@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"math"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -11,6 +12,14 @@ import (
 	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
+
+func (s *Server) handleAdminMonitoring(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, buildMonitoringSnapshot(r.Context(), s.store, s.gsn != nil && s.gsn.Configured()))
+}
 
 func buildMonitoringSnapshot(ctx context.Context, fileStore *store.FileStore, gsnConfigured bool) map[string]any {
 	authMetricsURL := envOr("APP_AUTH_METRICS_URL", "http://127.0.0.1:9091/metrics")
@@ -29,6 +38,7 @@ func buildMonitoringSnapshot(ctx context.Context, fileStore *store.FileStore, gs
 	links := map[string]string{
 		"grafana":    envOr("APP_GRAFANA_URL", "http://localhost:3000"),
 		"prometheus": envOr("APP_PROMETHEUS_URL", "http://localhost:9093"),
+		"k6":         envOr("APP_K6_GRAFANA_URL", "http://localhost:3000/d/nav-k6-load/k6-load-test"),
 		"loki":       envOr("APP_LOKI_URL", "http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22loki%22,%22queries%22:%5B%7B%22expr%22:%22%7Bjob%3D%5C%22nav%5C%22%7D%22,%22refId%22:%22A%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D"),
 		"tempo":      envOr("APP_TEMPO_URL", "http://localhost:3000/explore?orgId=1&left=%7B%22datasource%22:%22tempo%22%7D"),
 		"healthz":    "/api/healthz",
