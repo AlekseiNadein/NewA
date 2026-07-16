@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"nav-saas-mvp/backend/internal/gsn"
 	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/store"
 )
@@ -65,6 +68,100 @@ var consumerRetried atomic.Int64
 var consumerDead atomic.Int64
 var consumerFailed atomic.Int64
 var consumerDuplicates atomic.Int64
+var consumerSessions atomic.Int32
+
+type RabbitManager struct {
+	store *store.FileStore
+	gsn   *gsn.Service
+	cfg   RabbitConfig
+}
+
+func NewRabbitManager(store *store.FileStore, gsnService *gsn.Service, cfg RabbitConfig) *RabbitManager {
+	return &RabbitManager{
+		store: store,
+		gsn:   gsnService,
+		cfg:   normalizeRabbitConfig(cfg),
+	}
+}
+
+func (m *RabbitManager) Run(ctx context.Context) {
+	if !m.gsn.Configured() {
+		slog.Warn("GSN database is not configured; calc worker service is idle")
+		<-ctx.Done()
+		return
+	}
+
+	var cancel context.CancelFunc
+	currentCount := 0
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	apply := func() {
+		settings, err := m.store.GetAppSettings()
+		if err != nil {
+			slog.Warn("failed to read app settings", "error", err)
+			return
+		}
+		nextCount := store.NormalizeCalcWorkerCount(settings.CalcWorkerCount)
+		m.gsn.SetMaxOpenConns(nextCount + 4)
+		if nextCount == currentCount {
+			return
+		}
+		if cancel != nil {
+			cancel()
+		}
+		var groupCtx context.Context
+		groupCtx, cancel = context.WithCancel(ctx)
+		startRabbitConsumerGroup(groupCtx, m.store, m.gsn, m.cfg, nextCount)
+		slog.Info("rabbit calc worker group configured", "workers", nextCount, "prefetch", m.cfg.Prefetch)
+		currentCount = nextCount
+	}
+
+	apply()
+	for {
+		select {
+		case <-ctx.Done():
+			if cancel != nil {
+				cancel()
+			}
+			return
+		case <-ticker.C:
+			apply()
+		}
+	}
+}
+
+func startRabbitConsumerGroup(ctx context.Context, fileStore *store.FileStore, gsnService *gsn.Service, cfg RabbitConfig, count int) {
+	worker := New(fileStore, gsnService)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i += 1 {
+		consumerTag := fmt.Sprintf("calc-worker-rabbit-%d", i+1)
+		reportHeartbeat := i == 0
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			worker.runRabbitConsumer(ctx, cfg, consumerTag, reportHeartbeat)
+		}()
+	}
+	go func() {
+		<-ctx.Done()
+		wg.Wait()
+	}()
+}
+
+func beginConsumerSession() {
+	if consumerSessions.Add(1) == 1 {
+		consumerConnected.Store(true)
+		observability.SetRabbitConnected("consumer", true)
+	}
+}
+
+func endConsumerSession() {
+	if consumerSessions.Add(-1) == 0 {
+		consumerConnected.Store(false)
+		observability.SetRabbitConnected("consumer", false)
+	}
+}
 
 func GetConsumerStatus() ConsumerStatus {
 	status := ConsumerStatus{
@@ -88,19 +185,23 @@ func GetConsumerStatus() ConsumerStatus {
 
 func (w *Worker) RunRabbit(ctx context.Context, cfg RabbitConfig) error {
 	cfg = normalizeRabbitConfig(cfg)
+	w.runRabbitConsumer(ctx, cfg, "calc-worker-rabbit", true)
+	return nil
+}
+
+func (w *Worker) runRabbitConsumer(ctx context.Context, cfg RabbitConfig, consumerTag string, reportHeartbeat bool) {
 	for {
-		if err := w.runRabbitSession(ctx, cfg); err != nil && ctx.Err() == nil {
-			consumerConnected.Store(false)
+		if err := w.runRabbitSession(ctx, cfg, consumerTag, reportHeartbeat); err != nil && ctx.Err() == nil {
 			consumerLastError.Store(err.Error())
-			slog.Warn("rabbit consumer session failed", "error", err)
+			slog.Warn("rabbit consumer session failed", "consumer", consumerTag, "error", err)
 			select {
 			case <-ctx.Done():
-				return nil
+				return
 			case <-time.After(5 * time.Second):
 			}
 		}
 		if ctx.Err() != nil {
-			return nil
+			return
 		}
 	}
 }
@@ -154,17 +255,15 @@ func NormalizeRabbitPrefetch(value int) int {
 	return value
 }
 
-func (w *Worker) runRabbitSession(ctx context.Context, cfg RabbitConfig) error {
+func (w *Worker) runRabbitSession(ctx context.Context, cfg RabbitConfig, consumerTag string, reportHeartbeat bool) error {
 	conn, err := amqp.Dial(cfg.URL)
 	if err != nil {
 		return err
 	}
-	consumerConnected.Store(true)
+	beginConsumerSession()
 	consumerLastError.Store("")
 	consumerLastMessageUnix.Store(time.Now().UTC().Unix())
-	observability.SetRabbitConnected("consumer", true)
-	defer consumerConnected.Store(false)
-	defer observability.SetRabbitConnected("consumer", false)
+	defer endConsumerSession()
 	defer conn.Close()
 	ch, err := conn.Channel()
 	if err != nil {
@@ -177,18 +276,23 @@ func (w *Worker) runRabbitSession(ctx context.Context, cfg RabbitConfig) error {
 	if err := ch.Qos(cfg.Prefetch, 0, false); err != nil {
 		return err
 	}
-	deliveries, err := ch.Consume(cfg.MainQueue, "calc-worker-rabbit", false, false, false, false, nil)
+	deliveries, err := ch.Consume(cfg.MainQueue, consumerTag, false, false, false, false, nil)
 	if err != nil {
 		return err
 	}
-	_ = w.store.TouchQueueConsumerHeartbeat(ctx)
-	heartbeat := time.NewTicker(15 * time.Second)
-	defer heartbeat.Stop()
+	var heartbeat *time.Ticker
+	var heartbeatC <-chan time.Time
+	if reportHeartbeat {
+		_ = w.store.TouchQueueConsumerHeartbeat(ctx)
+		heartbeat = time.NewTicker(15 * time.Second)
+		defer heartbeat.Stop()
+		heartbeatC = heartbeat.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-heartbeat.C:
+		case <-heartbeatC:
 			_ = w.store.TouchQueueConsumerHeartbeat(ctx)
 			_ = w.store.SaveQueueConsumerStats(ctx, store.QueueConsumerStats{
 				Processed:  consumerProcessed.Load(),

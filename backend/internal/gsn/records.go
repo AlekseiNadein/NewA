@@ -130,6 +130,13 @@ func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district
 		return RecordDetail{}, fmt.Errorf("record code is required")
 	}
 
+	cacheKey := recordDetailCacheKey(code, fgisSetID, district)
+	if s.recordCache != nil {
+		if detail, ok := s.recordCache.get(ctx, cacheKey); ok {
+			return detail, nil
+		}
+	}
+
 	detail, recordKind, costIndicators, err := s.lookupRecordDetail(ctx, code)
 	if err != nil {
 		return RecordDetail{}, err
@@ -144,6 +151,9 @@ func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district
 		detail.Resources = resources
 		detail.HasResources = len(resources) > 0
 		normalizeRecordDetailOriginalCode(&detail)
+		if s.recordCache != nil {
+			s.recordCache.set(ctx, cacheKey, detail)
+		}
 		return detail, nil
 	}
 
@@ -155,6 +165,9 @@ func (s *Service) GetRecordDetail(ctx context.Context, code, fgisSetID, district
 	detail.UnitPriceText = unitPriceText
 	detail.UnitPriceIndex = unitPriceIndex
 	normalizeRecordDetailOriginalCode(&detail)
+	if s.recordCache != nil {
+		s.recordCache.set(ctx, cacheKey, detail)
+	}
 	return detail, nil
 }
 
@@ -218,6 +231,12 @@ func (s *Service) ListHierarchyRecords(ctx context.Context, supplementCode, hier
 	return items, nil
 }
 
+type rawRecordResource struct {
+	resourceCode string
+	quantityText string
+	number       string
+}
+
 func (s *Service) listRecordResources(ctx context.Context, recordCode, fgisSetID, district string) ([]RecordResource, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT resource_code, quantity_text
@@ -230,55 +249,93 @@ func (s *Service) listRecordResources(ctx context.Context, recordCode, fgisSetID
 	}
 	defer rows.Close()
 
-	items := make([]RecordResource, 0)
+	rawItems := make([]rawRecordResource, 0)
+	numbers := make([]string, 0)
 	for rows.Next() {
 		var resourceCode, quantityText string
 		if err := rows.Scan(&resourceCode, &quantityText); err != nil {
 			return nil, fmt.Errorf("scan record resource: %w", err)
 		}
-
 		number := resourceNumberKey(resourceCode)
-		item := RecordResource{
-			Code:         number,
-			QuantityText: quantityText,
-		}
-
+		rawItems = append(rawItems, rawRecordResource{
+			resourceCode: resourceCode,
+			quantityText: quantityText,
+			number:       number,
+		})
 		if number != "" {
-			codifier, found, err := s.lookupResourceCodifier(ctx, number)
-			if err != nil {
-				return nil, fmt.Errorf("lookup resource codifier %q: %w", number, err)
-			}
-			if found {
-				item.Name = codifier.Name
-				item.Unit = codifier.Unit
-				if codifier.Code != "" {
-					item.Code = codifier.Code
-					normInfo, ok, err := s.lookupRecordNormInfo(ctx, codifier.Code)
-					if err != nil {
-						return nil, fmt.Errorf("lookup norm info %q: %w", codifier.Code, err)
-					}
-					if ok {
-						item.OriginalCode = normInfo.OriginalCode
-						if fgisSetID != "" {
-							prices, indexes, fgisFound, err := s.lookupFGISSetRow(ctx, fgisSetID, codifier.Code)
-							if err != nil {
-								return nil, fmt.Errorf("lookup fgis set row %q: %w", codifier.Code, err)
-							}
-							if fgisFound {
-								item.UnitPriceText, item.UnitPriceIndex = resolveResourceUnitPrice(
-									prices, indexes, normInfo.CostIndicators, district,
-								)
-							}
-						}
-					}
-				}
-			}
+			numbers = append(numbers, number)
 		}
-
-		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read record resources: %w", err)
+	}
+	if len(rawItems) == 0 {
+		return nil, nil
+	}
+
+	codifiers, err := s.lookupResourceCodifiers(ctx, numbers)
+	if err != nil {
+		return nil, fmt.Errorf("lookup resource codifiers: %w", err)
+	}
+
+	codifierCodes := make([]string, 0, len(codifiers))
+	for _, codifier := range codifiers {
+		if codifier.Code != "" {
+			codifierCodes = append(codifierCodes, codifier.Code)
+		}
+	}
+
+	normInfos, err := s.lookupRecordNormInfos(ctx, codifierCodes)
+	if err != nil {
+		return nil, fmt.Errorf("lookup norm infos: %w", err)
+	}
+
+	var fgisRows map[string]fgisSetRow
+	if strings.TrimSpace(fgisSetID) != "" {
+		fgisRows, err = s.lookupFGISSetRows(ctx, fgisSetID, codifierCodes)
+		if err != nil {
+			return nil, fmt.Errorf("lookup fgis set rows: %w", err)
+		}
+	}
+
+	items := make([]RecordResource, 0, len(rawItems))
+	for _, raw := range rawItems {
+		item := RecordResource{
+			Code:         raw.number,
+			QuantityText: raw.quantityText,
+		}
+		if raw.number == "" {
+			items = append(items, item)
+			continue
+		}
+
+		codifier, found := codifiers[raw.number]
+		if !found {
+			items = append(items, item)
+			continue
+		}
+
+		item.Name = codifier.Name
+		item.Unit = codifier.Unit
+		if codifier.Code == "" {
+			items = append(items, item)
+			continue
+		}
+
+		item.Code = codifier.Code
+		normInfo, ok := normInfos[codifier.Code]
+		if !ok {
+			items = append(items, item)
+			continue
+		}
+
+		item.OriginalCode = normInfo.OriginalCode
+		if fgisRow, fgisFound := fgisRows[codifier.Code]; fgisFound {
+			item.UnitPriceText, item.UnitPriceIndex = resolveResourceUnitPrice(
+				fgisRow.Prices, fgisRow.Indexes, normInfo.CostIndicators, district,
+			)
+		}
+		items = append(items, item)
 	}
 	return items, nil
 }

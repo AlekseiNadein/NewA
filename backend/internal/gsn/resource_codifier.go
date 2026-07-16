@@ -3,8 +3,6 @@ package gsn
 import (
 	"bufio"
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -147,22 +145,43 @@ func ParseResourceCodifierFile(path string) ([]ResourceCodifierRow, error) {
 }
 
 func (s *Service) lookupResourceCodifier(ctx context.Context, number string) (ResourceCodifierRow, bool, error) {
-	number = strings.TrimSpace(number)
-	if number == "" {
-		return ResourceCodifierRow{}, false, nil
-	}
-
-	var row ResourceCodifierRow
-	err := s.db.QueryRowContext(ctx, `
-		SELECT number, code, name, unit
-		FROM gsn.resource_codifier
-		WHERE number = $1
-	`, number).Scan(&row.Number, &row.Code, &row.Name, &row.Unit)
+	rows, err := s.lookupResourceCodifiers(ctx, []string{number})
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ResourceCodifierRow{}, false, nil
-		}
 		return ResourceCodifierRow{}, false, err
 	}
-	return row, true, nil
+	row, ok := rows[strings.TrimSpace(number)]
+	return row, ok, nil
+}
+
+func (s *Service) lookupResourceCodifiers(ctx context.Context, numbers []string) (map[string]ResourceCodifierRow, error) {
+	unique := uniqueNonEmptyStrings(numbers)
+	if len(unique) == 0 {
+		return map[string]ResourceCodifierRow{}, nil
+	}
+
+	inClause, args := sqlInClause(1, unique)
+	query := fmt.Sprintf(`
+		SELECT number, code, name, unit
+		FROM gsn.resource_codifier
+		WHERE number IN (%s)
+	`, inClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query resource codifiers: %w", err)
+	}
+	defer rows.Close()
+
+	items := make(map[string]ResourceCodifierRow, len(unique))
+	for rows.Next() {
+		var row ResourceCodifierRow
+		if err := rows.Scan(&row.Number, &row.Code, &row.Name, &row.Unit); err != nil {
+			return nil, fmt.Errorf("scan resource codifier: %w", err)
+		}
+		items[row.Number] = row
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read resource codifiers: %w", err)
+	}
+	return items, nil
 }

@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS gsn.records (
 
 CREATE INDEX IF NOT EXISTS idx_gsn_records_source_file ON gsn.records(source_file);
 CREATE INDEX IF NOT EXISTS idx_gsn_records_kind ON gsn.records(record_kind);
+CREATE INDEX IF NOT EXISTS idx_gsn_records_original_code ON gsn.records(original_code) WHERE original_code <> '';
 CREATE INDEX IF NOT EXISTS idx_gsn_records_name_trgm ON gsn.records USING gin (name gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS gsn.record_resources (

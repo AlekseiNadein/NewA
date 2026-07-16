@@ -2,8 +2,6 @@ package gsn
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -132,48 +130,102 @@ func resolveResourceUnitPrice(prices, indexes, costIndicators, district string) 
 }
 
 type recordNormInfo struct {
-	OriginalCode     string
-	CostIndicators   string
+	OriginalCode   string
+	CostIndicators string
+}
+
+type fgisSetRow struct {
+	Prices  string
+	Indexes string
 }
 
 func (s *Service) lookupRecordNormInfo(ctx context.Context, code string) (recordNormInfo, bool, error) {
-	code = strings.TrimSpace(code)
-	if code == "" {
-		return recordNormInfo{}, false, nil
+	items, err := s.lookupRecordNormInfos(ctx, []string{code})
+	if err != nil {
+		return recordNormInfo{}, false, err
+	}
+	info, ok := items[strings.TrimSpace(code)]
+	return info, ok, nil
+}
+
+func (s *Service) lookupRecordNormInfos(ctx context.Context, codes []string) (map[string]recordNormInfo, error) {
+	unique := uniqueNonEmptyStrings(codes)
+	if len(unique) == 0 {
+		return map[string]recordNormInfo{}, nil
 	}
 
-	var info recordNormInfo
-	err := s.db.QueryRowContext(ctx, `
-		SELECT original_code, cost_indicators
+	inClause, args := sqlInClause(1, unique)
+	query := fmt.Sprintf(`
+		SELECT code, original_code, cost_indicators
 		FROM gsn.records
-		WHERE code = $1
-	`, code).Scan(&info.OriginalCode, &info.CostIndicators)
+		WHERE code IN (%s)
+	`, inClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return recordNormInfo{}, false, nil
-		}
-		return recordNormInfo{}, false, fmt.Errorf("query gsn record norm info: %w", err)
+		return nil, fmt.Errorf("query gsn record norm infos: %w", err)
 	}
-	return info, true, nil
+	defer rows.Close()
+
+	items := make(map[string]recordNormInfo, len(unique))
+	for rows.Next() {
+		var code string
+		var info recordNormInfo
+		if err := rows.Scan(&code, &info.OriginalCode, &info.CostIndicators); err != nil {
+			return nil, fmt.Errorf("scan gsn record norm info: %w", err)
+		}
+		items[code] = info
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read gsn record norm infos: %w", err)
+	}
+	return items, nil
 }
 
 func (s *Service) lookupFGISSetRow(ctx context.Context, setID, code string) (prices, indexes string, found bool, err error) {
-	setID = strings.TrimSpace(setID)
-	code = strings.TrimSpace(code)
-	if setID == "" || code == "" {
+	rows, err := s.lookupFGISSetRows(ctx, setID, []string{code})
+	if err != nil {
+		return "", "", false, err
+	}
+	row, ok := rows[strings.TrimSpace(code)]
+	if !ok {
 		return "", "", false, nil
 	}
+	return row.Prices, row.Indexes, true, nil
+}
 
-	err = s.db.QueryRowContext(ctx, `
-		SELECT prices, indexes
-		FROM fgis_cs.set_rows
-		WHERE set_id = $1 AND code = $2
-	`, setID, code).Scan(&prices, &indexes)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", false, nil
-		}
-		return "", "", false, fmt.Errorf("query fgis_cs set row: %w", err)
+func (s *Service) lookupFGISSetRows(ctx context.Context, setID string, codes []string) (map[string]fgisSetRow, error) {
+	setID = strings.TrimSpace(setID)
+	unique := uniqueNonEmptyStrings(codes)
+	if setID == "" || len(unique) == 0 {
+		return map[string]fgisSetRow{}, nil
 	}
-	return prices, indexes, true, nil
+
+	inClause, codeArgs := sqlInClause(2, unique)
+	args := append([]any{setID}, codeArgs...)
+	query := fmt.Sprintf(`
+		SELECT code, prices, indexes
+		FROM fgis_cs.set_rows
+		WHERE set_id = $1 AND code IN (%s)
+	`, inClause)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query fgis_cs set rows: %w", err)
+	}
+	defer rows.Close()
+
+	items := make(map[string]fgisSetRow, len(unique))
+	for rows.Next() {
+		var code string
+		var row fgisSetRow
+		if err := rows.Scan(&code, &row.Prices, &row.Indexes); err != nil {
+			return nil, fmt.Errorf("scan fgis_cs set row: %w", err)
+		}
+		items[code] = row
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read fgis_cs set rows: %w", err)
+	}
+	return items, nil
 }

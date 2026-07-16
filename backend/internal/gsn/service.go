@@ -48,7 +48,8 @@ type Region struct {
 }
 
 type Service struct {
-	db *sql.DB
+	db          *sql.DB
+	recordCache *recordDetailCache
 }
 
 func NewService(databaseURL string) (*Service, error) {
@@ -87,10 +88,19 @@ func (s *Service) Configured() bool {
 }
 
 func (s *Service) Close() error {
-	if !s.Configured() {
-		return nil
+	var err error
+	if s.recordCache != nil {
+		if closeErr := s.recordCache.close(); closeErr != nil {
+			err = closeErr
+		}
 	}
-	return s.db.Close()
+	if !s.Configured() {
+		return err
+	}
+	if closeErr := s.db.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 func (s *Service) ListSupplements(ctx context.Context) ([]Supplement, error) {

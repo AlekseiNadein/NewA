@@ -103,6 +103,21 @@ var (
 		Name: "nav_calc_consumer_heartbeat_age_seconds",
 		Help: "Age of the last calc worker heartbeat in seconds (-1 if missing).",
 	})
+
+	gsnCacheHitsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "nav_gsn_cache_hits_total",
+		Help: "Total GSN record detail cache hits.",
+	})
+
+	gsnCacheMissesTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "nav_gsn_cache_misses_total",
+		Help: "Total GSN record detail cache misses.",
+	})
+
+	gsnCacheErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "nav_gsn_cache_errors_total",
+		Help: "Total GSN record detail cache errors.",
+	})
 )
 
 func init() {
@@ -126,6 +141,9 @@ func init() {
 		consumerFailedGauge,
 		consumerDuplicatesGauge,
 		consumerHeartbeatAge,
+		gsnCacheHitsTotal,
+		gsnCacheMissesTotal,
+		gsnCacheErrorsTotal,
 	)
 }
 
@@ -203,4 +221,16 @@ func SetConsumerStats(processed, retried, dead, failed, duplicates int64) {
 
 func SetConsumerHeartbeatAge(seconds float64) {
 	consumerHeartbeatAge.Set(seconds)
+}
+
+func RecordGSNCacheHit() {
+	gsnCacheHitsTotal.Inc()
+}
+
+func RecordGSNCacheMiss() {
+	gsnCacheMissesTotal.Inc()
+}
+
+func RecordGSNCacheError() {
+	gsnCacheErrorsTotal.Inc()
 }

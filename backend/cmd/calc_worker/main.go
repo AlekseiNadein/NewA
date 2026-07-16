@@ -39,6 +39,12 @@ func main() {
 		slog.Error("failed to initialize GSN database", "error", err)
 		os.Exit(1)
 	}
+	gsn.ConfigureRedisRecordCache(
+		gsnService,
+		envBool("APP_GSN_REDIS_CACHE"),
+		env("APP_REDIS_URL", ""),
+		envDuration("APP_GSN_CACHE_TTL", gsn.DefaultRecordCacheTTL),
+	)
 	defer func() {
 		if err := gsnService.Close(); err != nil {
 			slog.Warn("failed to close GSN database", "error", err)
@@ -57,20 +63,15 @@ func main() {
 
 	slog.Info("starting estimate calc worker service", "dataPath", dataPath, "queueMode", queueMode, "rabbitPrefetch", rabbitPrefetch)
 	if queueMode == "rabbit" {
-		worker := calcworker.New(fileStore, gsnService)
 		if strings.TrimSpace(rabbitURL) == "" {
 			slog.Error("APP_RABBITMQ_URL is required in rabbit mode")
 			os.Exit(1)
 		}
-		gsnService.SetMaxOpenConns(rabbitPrefetch + 4)
-		if err := worker.RunRabbit(ctx, calcworker.RabbitConfig{
-			URL:        rabbitURL,
-			Exchange:   rabbitExchange,
-			Prefetch:   rabbitPrefetch,
-		}); err != nil {
-			slog.Error("rabbit calc worker stopped", "error", err)
-			os.Exit(1)
-		}
+		calcworker.NewRabbitManager(fileStore, gsnService, calcworker.RabbitConfig{
+			URL:      rabbitURL,
+			Exchange: rabbitExchange,
+			Prefetch: rabbitPrefetch,
+		}).Run(ctx)
 		return
 	}
 	if queueMode == "db" {
@@ -97,4 +98,26 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func envBool(key string) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch raw {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }

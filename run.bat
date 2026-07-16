@@ -24,6 +24,9 @@ set APP_DATABASE_URL=user=postgres password=postgres dbname=postgres sslmode=dis
 set APP_AUTH_DATABASE_URL=user=postgres password=postgres dbname=postgres sslmode=disable
 set APP_JWT_SECRET=dev-secret-change-me
 set APP_GSN_DATABASE_URL=user=postgres password=postgres dbname=postgres sslmode=disable
+set APP_GSN_REDIS_CACHE=1
+set APP_REDIS_URL=redis://127.0.0.1:6379/0
+set APP_GSN_CACHE_TTL=6h
 set APP_QUEUE_MODE=rabbit
 set APP_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/
 set APP_RABBITMQ_EXCHANGE=estimate.calc

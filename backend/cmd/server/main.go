@@ -66,6 +66,12 @@ func main() {
 		slog.Error("failed to initialize GSN database", "error", err)
 		os.Exit(1)
 	}
+	gsn.ConfigureRedisRecordCache(
+		gsnService,
+		envBool("APP_GSN_REDIS_CACHE"),
+		env("APP_REDIS_URL", ""),
+		envDuration("APP_GSN_CACHE_TTL", gsn.DefaultRecordCacheTTL),
+	)
 	defer func() {
 		if err := gsnService.Close(); err != nil {
 			slog.Warn("failed to close GSN database", "error", err)
@@ -135,4 +141,14 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func envBool(key string) bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch raw {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
 }
