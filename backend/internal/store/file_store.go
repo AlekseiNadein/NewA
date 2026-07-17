@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"nav-saas-mvp/backend/internal/domain"
+	"nav-saas-mvp/backend/internal/estimatecalc"
 	"nav-saas-mvp/backend/internal/observability"
 	"nav-saas-mvp/backend/internal/requestctx"
 )
@@ -31,20 +32,27 @@ var (
 )
 
 type FileStore struct {
-	mu            sync.RWMutex
-	path          string
-	treeDB        *pgxpool.Pool
-	queueMode     string
+	mu                 sync.RWMutex
+	path               string
+	treeDB             *pgxpool.Pool
+	queueMode          string
 	disableCalcEnqueue bool
-	calcStartMu   sync.Mutex
-	calcStartJobs map[string]struct{}
-	constructions map[string]domain.Construction
-	objects       map[string]domain.ConstructionObject
-	estimates     map[string]domain.Estimate
-	settings      domain.AppSettings
+	calcStartMu        sync.Mutex
+	calcStartJobs      map[string]struct{}
+	constructions      map[string]domain.Construction
+	objects            map[string]domain.ConstructionObject
+	estimates          map[string]domain.Estimate
+	settings           domain.AppSettings
+	// legacyAuth* preserves companies/users/licenses in app.json for auth ImportIfEmpty.
+	legacyCompanies json.RawMessage
+	legacyUsers     json.RawMessage
+	legacyLicenses  json.RawMessage
 }
 
 type snapshot struct {
+	Companies     json.RawMessage             `json:"companies,omitempty"`
+	Users         json.RawMessage             `json:"users,omitempty"`
+	Licenses      json.RawMessage             `json:"licenses,omitempty"`
 	Constructions []domain.Construction       `json:"constructions"`
 	Objects       []domain.ConstructionObject `json:"objects"`
 	Estimates     []domain.Estimate           `json:"estimates"`
@@ -567,8 +575,20 @@ func (s *FileStore) load() error {
 		s.estimates[estimate.ID] = estimate
 	}
 	s.settings = normalizeAppSettings(snap.Settings)
+	s.legacyCompanies = cloneRawJSON(snap.Companies)
+	s.legacyUsers = cloneRawJSON(snap.Users)
+	s.legacyLicenses = cloneRawJSON(snap.Licenses)
 
 	return nil
+}
+
+func cloneRawJSON(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(json.RawMessage, len(raw))
+	copy(out, raw)
+	return out
 }
 
 func (s *FileStore) saveLocked() error {
@@ -577,6 +597,9 @@ func (s *FileStore) saveLocked() error {
 	}
 
 	snap := snapshot{
+		Companies:     cloneRawJSON(s.legacyCompanies),
+		Users:         cloneRawJSON(s.legacyUsers),
+		Licenses:      cloneRawJSON(s.legacyLicenses),
 		Constructions: make([]domain.Construction, 0, len(s.constructions)),
 		Objects:       make([]domain.ConstructionObject, 0, len(s.objects)),
 		Estimates:     make([]domain.Estimate, 0, len(s.estimates)),
@@ -908,7 +931,7 @@ CREATE TABLE IF NOT EXISTS calc_message_receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_calc_message_receipts_estimate
     ON calc_message_receipts(estimate_id, line_id, revision);
-`
+` + estimateCalcTablesSQL
 
 	_, err := s.treeDB.Exec(ctx, sql)
 	if err != nil {
@@ -961,6 +984,20 @@ ALTER TABLE app_estimate_lines ADD PRIMARY KEY (estimate_id, id);
 func (s *FileStore) syncTreeToDB(ctx context.Context) error {
 	if s.treeDB == nil {
 		return nil
+	}
+
+	var constructionCount, objectCount, estimateCount int64
+	if err := s.treeDB.QueryRow(ctx, `
+SELECT
+	(SELECT COUNT(*) FROM app_constructions),
+	(SELECT COUNT(*) FROM app_construction_objects),
+	(SELECT COUNT(*) FROM app_estimates)`).Scan(&constructionCount, &objectCount, &estimateCount); err != nil {
+		return err
+	}
+	// PG is source of truth once migrated. Re-inserting from legacy app.json
+	// resurrected deleted empty drafts (e.g. 4000/1-1) on every restart.
+	if constructionCount+objectCount+estimateCount > 0 {
+		return s.dropLegacyTreeSnapshot()
 	}
 
 	s.mu.RLock()
@@ -1035,7 +1072,82 @@ ON CONFLICT (estimate_id, id) DO UPDATE SET
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return s.dropLegacyTreeSnapshot()
+}
+
+// dropLegacyTreeSnapshot clears constructions/objects/estimates from app.json after
+// PG migration so deleted drafts cannot be resurrected on the next restart.
+func (s *FileStore) dropLegacyTreeSnapshot() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.constructions) == 0 && len(s.objects) == 0 && len(s.estimates) == 0 {
+		return nil
+	}
+	s.constructions = map[string]domain.Construction{}
+	s.objects = map[string]domain.ConstructionObject{}
+	s.estimates = map[string]domain.Estimate{}
+	return s.saveLocked()
+}
+
+func (s *FileStore) removeEstimateFromLegacySnapshot(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.estimates[id]; !ok {
+		return nil
+	}
+	delete(s.estimates, id)
+	return s.saveLocked()
+}
+
+func (s *FileStore) removeObjectFromLegacySnapshot(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	if _, ok := s.objects[id]; ok {
+		delete(s.objects, id)
+		changed = true
+	}
+	for estimateID, estimate := range s.estimates {
+		if estimate.ObjectID == id {
+			delete(s.estimates, estimateID)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveLocked()
+}
+
+func (s *FileStore) removeConstructionFromLegacySnapshot(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	if _, ok := s.constructions[id]; ok {
+		delete(s.constructions, id)
+		changed = true
+	}
+	for objectID, object := range s.objects {
+		if object.ConstructionID != id {
+			continue
+		}
+		for estimateID, estimate := range s.estimates {
+			if estimate.ObjectID == objectID {
+				delete(s.estimates, estimateID)
+				changed = true
+			}
+		}
+		delete(s.objects, objectID)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveLocked()
 }
 
 func (s *FileStore) listConstructionsDB(ctx context.Context, companyID string, includeAll bool) ([]domain.Construction, error) {
@@ -1126,6 +1238,9 @@ func (s *FileStore) deleteConstructionDB(ctx context.Context, id, companyID stri
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	if err := s.removeConstructionFromLegacySnapshot(id); err != nil {
+		slog.Warn("failed to remove construction from legacy app.json snapshot", "id", id, "error", err)
 	}
 	return nil
 }
@@ -1229,6 +1344,9 @@ func (s *FileStore) deleteObjectDB(ctx context.Context, id, companyID string, in
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	if err := s.removeObjectFromLegacySnapshot(id); err != nil {
+		slog.Warn("failed to remove object from legacy app.json snapshot", "id", id, "error", err)
 	}
 	return nil
 }
@@ -1441,15 +1559,8 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 		return err
 	}
 
-	if err != nil {
-		return err
-	}
-
 	existingLines, err := loadStoredEstimateLines(ctx, tx, item.ID)
 	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM app_estimate_lines WHERE estimate_id = $1`, item.ID); err != nil {
 		return err
 	}
 	var calcGeneration int64
@@ -1457,7 +1568,49 @@ ON CONFLICT (id) DO UPDATE SET object_id = EXCLUDED.object_id, code = EXCLUDED.c
 		return err
 	}
 	item.CalcGeneration = calcGeneration
+
+	newIDs := make(map[string]struct{}, len(item.Items))
+	for _, line := range item.Items {
+		id := strings.TrimSpace(line.ID)
+		if id != "" {
+			newIDs[id] = struct{}{}
+		}
+	}
+	for existingID := range existingLines {
+		if _, keep := newIDs[existingID]; keep {
+			continue
+		}
+		if err := removeLineCalcFromGenerationTx(ctx, tx, item.ID, calcGeneration, existingID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+DELETE FROM calc_message_receipts WHERE estimate_id = $1 AND line_id = $2
+`, item.ID, existingID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+UPDATE estimate_calc_jobs
+SET status = 'dead', last_error = 'line removed', leased_until = NULL, locked_by = '', updated_at = now()
+WHERE estimate_id = $1 AND line_id = $2 AND status IN ('queued', 'leased')
+`, item.ID, existingID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+DELETE FROM outbox_events
+WHERE published_at IS NULL
+  AND payload->>'estimateId' = $1
+  AND payload->>'lineId' = $2
+`, item.ID, existingID); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM app_estimate_lines WHERE estimate_id = $1`, item.ID); err != nil {
+		return err
+	}
+
 	lines := ensureUniqueEstimateLineIDs(item.Items)
+	enqueueLines := make([]domain.EstimateItem, 0)
 	for i, line := range lines {
 		existing, hasExisting := existingLines[line.ID]
 		line = prepareEstimateLineForStorage(item, line, existing, hasExisting)
@@ -1470,9 +1623,79 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $
 		if err != nil {
 			return err
 		}
+
+		if shouldEnqueueEstimateLineCalc(line) {
+			isNew := !hasExisting
+			needsRecalc := isNew || !isCalcTerminalStatus(line.CalcStatus) || line.CalcStatus == ""
+			if hasExisting && existing.Revision != line.Revision {
+				needsRecalc = true
+			}
+			if needsRecalc {
+				enqueueLines = append(enqueueLines, line)
+			}
+		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	if len(enqueueLines) > 0 && !s.disableCalcEnqueue {
+		go s.enqueueEstimateLinesAfterSave(observability.DetachCorrelation(ctx), item, enqueueLines)
+	}
+	return nil
+}
+
+func (s *FileStore) enqueueEstimateLinesAfterSave(ctx context.Context, estimate domain.Estimate, lines []domain.EstimateItem) {
+	hasCalc, err := s.HasEstimateCalcLines(ctx, estimate.ID)
+	if err != nil || !hasCalc {
+		// No prior calculation state: wait for explicit StartEstimateCalc / table view.
+		return
+	}
+	tx, err := s.treeDB.Begin(ctx)
+	if err != nil {
+		slog.Warn("incremental enqueue begin failed", "estimate", estimate.ID, "error", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	if err := lockEstimateCalcState(ctx, tx, estimate.ID); err != nil {
+		slog.Warn("incremental enqueue lock failed", "estimate", estimate.ID, "error", err)
+		return
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE estimate_calc_state
+SET lines_total = lines_total + $2,
+    status = 'running',
+    updated_at = now()
+WHERE estimate_id = $1
+`, estimate.ID, len(lines)); err != nil {
+		slog.Warn("incremental enqueue state update failed", "estimate", estimate.ID, "error", err)
+		return
+	}
+	for _, line := range lines {
+		line.Revision = estimateLineRevision(estimate, line)
+		if _, err := tx.Exec(ctx, `
+UPDATE app_estimate_lines
+SET calc_status = 'queued',
+    calc_error = '',
+    calc_json = NULL,
+    unit_price = 0,
+    total = 0,
+    calculated_at = NULL,
+    revision = $3
+WHERE estimate_id = $1 AND id = $2
+`, estimate.ID, line.ID, line.Revision); err != nil {
+			slog.Warn("incremental enqueue line update failed", "estimate", estimate.ID, "line", line.ID, "error", err)
+			return
+		}
+		if err := enqueueEstimateLineCalcJobTx(ctx, tx, estimate, line, s.queueMode); err != nil {
+			slog.Warn("incremental enqueue job failed", "estimate", estimate.ID, "line", line.ID, "error", err)
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slog.Warn("incremental enqueue commit failed", "estimate", estimate.ID, "error", err)
+	}
 }
 
 func (s *FileStore) deleteEstimateDB(ctx context.Context, id, companyID string, includeAll bool) error {
@@ -1488,6 +1711,9 @@ func (s *FileStore) deleteEstimateDB(ctx context.Context, id, companyID string, 
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	if err := s.removeEstimateFromLegacySnapshot(id); err != nil {
+		slog.Warn("failed to remove estimate from legacy app.json snapshot", "id", id, "error", err)
 	}
 	return nil
 }
@@ -1648,6 +1874,7 @@ type EstimateCalcJob struct {
 	EstimateID  string
 	LineID      string
 	Revision    int64
+	Generation  int64
 	Code        string
 	FgisSetID   string
 	District    string
@@ -1667,6 +1894,7 @@ type EstimateLineCalcResult struct {
 	UnitPrice    float64
 	Total        float64
 	CalcJSON     json.RawMessage
+	Snapshot     *estimatecalc.LineCalcSnapshot
 }
 
 type EstimateCalcStatus struct {
@@ -1730,13 +1958,14 @@ WHERE id = (
     FOR UPDATE SKIP LOCKED
     LIMIT 1
 )
-RETURNING id, company_id, estimate_id, line_id, revision, payload->>'code', payload->>'fgisSetId', payload->>'district', COALESCE((payload->>'quantity')::double precision, 0), COALESCE(payload->>'rawText', ''), attempts, max_attempts
+RETURNING id, company_id, estimate_id, line_id, revision, COALESCE((payload->>'generation')::bigint, 0), payload->>'code', payload->>'fgisSetId', payload->>'district', COALESCE((payload->>'quantity')::double precision, 0), COALESCE(payload->>'rawText', ''), attempts, max_attempts
 `, time.Now().UTC().Add(lease), workerID).Scan(
 		&job.ID,
 		&job.CompanyID,
 		&job.EstimateID,
 		&job.LineID,
 		&job.Revision,
+		&job.Generation,
 		&job.Code,
 		&job.FgisSetID,
 		&job.District,
@@ -1824,6 +2053,39 @@ WHERE estimate_id = $1 AND id = $2
 		}
 	}
 	if status == "done" {
+		generation := job.Generation
+		if generation == 0 {
+			generation, err = loadEstimateGeneration(ctx, tx, job.EstimateID)
+			if err != nil {
+				return err
+			}
+		}
+		positionNo, err := loadLineSortOrder(ctx, tx, job.EstimateID, job.LineID)
+		if err != nil {
+			return err
+		}
+		snap := result.Snapshot
+		if snap == nil {
+			snap = &estimatecalc.LineCalcSnapshot{
+				Code:         result.Code,
+				OriginalCode: result.OriginalCode,
+				Name:         result.Name,
+				Unit:         result.Unit,
+				Quantity:     result.Quantity,
+				UnitPrice:    result.UnitPrice,
+				Total:        result.Total,
+			}
+		}
+		if err := applyDoneLineCalcTx(ctx, tx, lineCalcPersistInput{
+			EstimateID:   job.EstimateID,
+			Generation:   generation,
+			LineID:       job.LineID,
+			LineRevision: job.Revision,
+			PositionNo:   positionNo,
+			Snapshot:     *snap,
+		}); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `
 INSERT INTO calc_message_receipts (id, estimate_id, line_id, revision)
 VALUES ($1, $2, $3, $4)
@@ -1955,6 +2217,23 @@ func (s *FileStore) SummarizeEstimateCalcStatus(ctx context.Context, companyID, 
 	if s.treeDB == nil {
 		return EstimateCalcSummary{}, nil
 	}
+	if _, err := s.loadEstimateCalcMeta(ctx, companyID, estimateID, includeAll); err != nil {
+		return EstimateCalcSummary{}, err
+	}
+
+	var summary EstimateCalcSummary
+	err := s.treeDB.QueryRow(ctx, `
+SELECT lines_total, lines_done, lines_errors, grand_total
+FROM estimate_calc_state
+WHERE estimate_id = $1
+`, estimateID).Scan(&summary.Total, &summary.Processed, &summary.Errors, &summary.GrandTotal)
+	if err == nil && summary.Total > 0 {
+		return summary, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return summary, err
+	}
+
 	query := `
 SELECT
     COUNT(*)::int,
@@ -1971,8 +2250,7 @@ WHERE l.estimate_id = $1
 		query += ` AND e.company_id = $3`
 		args = append(args, companyID)
 	}
-	var summary EstimateCalcSummary
-	err := s.treeDB.QueryRow(ctx, query, args...).Scan(
+	err = s.treeDB.QueryRow(ctx, query, args...).Scan(
 		&summary.Total,
 		&summary.Processed,
 		&summary.GrandTotal,
@@ -2025,7 +2303,7 @@ WHERE l.estimate_id = $1
 	return errorsCount, rows.Err()
 }
 
-func (s *FileStore) StartEstimateCalc(ctx context.Context, id, companyID string, includeAll bool) error {
+func (s *FileStore) StartEstimateCalc(ctx context.Context, id, companyID string, includeAll bool, force bool) error {
 	if s.treeDB == nil {
 		return nil
 	}
@@ -2050,6 +2328,43 @@ WHERE id = $1
 		return ErrForbidden
 	}
 
+	hasCalc, err := s.HasEstimateCalcLines(ctx, id)
+	if err != nil {
+		return err
+	}
+	var stateDistrict, stateFgis string
+	var stateGen int64
+	var hasState bool
+	err = s.treeDB.QueryRow(ctx, `
+SELECT generation, district, fgis_set_id
+FROM estimate_calc_state
+WHERE estimate_id = $1
+`, id).Scan(&stateGen, &stateDistrict, &stateFgis)
+	if err == nil {
+		hasState = true
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	fullRebuild := force || !hasCalc
+	if hasState && (stateDistrict != district || stateFgis != fgisSetID) {
+		fullRebuild = true
+	}
+
+	if force || (hasState && (stateDistrict != district || stateFgis != fgisSetID)) {
+		if _, err := s.CancelEstimateCalc(ctx, companyID, id, includeAll); err != nil {
+			return err
+		}
+		err = s.treeDB.QueryRow(ctx, `
+SELECT company_id, district, fgis_set_id, calc_generation
+FROM app_estimates WHERE id = $1
+`, id).Scan(&estimateCompanyID, &district, &fgisSetID, &calcGeneration)
+		if err != nil {
+			return err
+		}
+		fullRebuild = true
+	}
+
 	estimate := domain.Estimate{
 		ID:             id,
 		CompanyID:      estimateCompanyID,
@@ -2063,7 +2378,7 @@ WHERE id = $1
 	}
 	for attempt := 0; attempt < 120; attempt++ {
 		if s.markEstimateCalcStartJob(id) {
-			go s.runEstimateCalcStart(observability.DetachCorrelation(ctx), estimate, settings.CalcStartBatchSize)
+			go s.runEstimateCalcStart(observability.DetachCorrelation(ctx), estimate, settings.CalcStartBatchSize, fullRebuild)
 			return nil
 		}
 		select {
@@ -2075,11 +2390,11 @@ WHERE id = $1
 	return fmt.Errorf("estimate calc start already in progress")
 }
 
-func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate, batchSize int) {
+func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate, batchSize int, fullRebuild bool) {
 	defer s.unmarkEstimateCalcStartJob(estimate.ID)
 	ctx, endSpan := observability.StartEstimateEnqueueSpan(ctx, estimate.ID)
 	defer endSpan()
-	if err := s.enqueueEstimateCalcBatches(ctx, estimate, batchSize); err != nil {
+	if err := s.enqueueEstimateCalcBatches(ctx, estimate, batchSize, fullRebuild); err != nil {
 		slog.Warn("estimate calc enqueue failed", "estimate", estimate.ID, "error", err)
 	}
 }
@@ -2100,11 +2415,7 @@ func (s *FileStore) unmarkEstimateCalcStartJob(estimateID string) {
 	delete(s.calcStartJobs, estimateID)
 }
 
-type estimateCalcStartLine struct {
-	line domain.EstimateItem
-}
-
-func (s *FileStore) enqueueEstimateCalcBatches(ctx context.Context, estimate domain.Estimate, batchSize int) error {
+func (s *FileStore) enqueueEstimateCalcBatches(ctx context.Context, estimate domain.Estimate, batchSize int, fullRebuild bool) error {
 	if s.disableCalcEnqueue {
 		return nil
 	}
@@ -2112,7 +2423,7 @@ func (s *FileStore) enqueueEstimateCalcBatches(ctx context.Context, estimate dom
 		batchSize = defaultAppSettings().CalcStartBatchSize
 	}
 	rows, err := s.treeDB.Query(ctx, `
-SELECT id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text
+SELECT id, line_type, source, code, original_code, name, quantity, unit, unit_price, total, raw_text, calc_status, revision
 FROM app_estimate_lines
 WHERE estimate_id = $1
 ORDER BY sort_order, id
@@ -2122,22 +2433,96 @@ ORDER BY sort_order, id
 	}
 	defer rows.Close()
 
-	lines := make([]estimateCalcStartLine, 0)
+	type startLine struct {
+		line       domain.EstimateItem
+		calcStatus string
+		revision   int64
+	}
+	lines := make([]startLine, 0)
 	for rows.Next() {
 		var line domain.EstimateItem
+		var calcStatus string
+		var revision int64
 		if err := rows.Scan(
 			&line.ID, &line.Type, &line.Source, &line.Code, &line.OriginalCode, &line.Name,
 			&line.Quantity, &line.Unit, &line.UnitPrice, &line.Total, &line.RawText,
+			&calcStatus, &revision,
 		); err != nil {
 			return err
 		}
-		lines = append(lines, estimateCalcStartLine{line: line})
+		lines = append(lines, startLine{line: line, calcStatus: calcStatus, revision: revision})
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	for batchStart := 0; batchStart < len(lines); batchStart += batchSize {
+	enqueueCandidates := make([]domain.EstimateItem, 0, len(lines))
+	for _, row := range lines {
+		line := prepareEstimateLineForStorage(estimate, row.line, storedEstimateLineCalc{}, false)
+		if !shouldEnqueueEstimateLineCalc(line) {
+			continue
+		}
+		if !fullRebuild {
+			newRevision := estimateLineRevision(estimate, line)
+			if strings.TrimSpace(row.calcStatus) == "done" && row.revision == newRevision {
+				continue
+			}
+		}
+		enqueueCandidates = append(enqueueCandidates, line)
+	}
+
+	if fullRebuild {
+		tx, err := s.treeDB.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if err := clearEstimateCalcGenerationTx(ctx, tx, estimate.ID, estimate.CalcGeneration, estimate.District, estimate.FgisSetID, len(enqueueCandidates)); err != nil {
+			_ = tx.Rollback(ctx)
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+	} else if len(enqueueCandidates) > 0 {
+		tx, err := s.treeDB.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if err := lockEstimateCalcState(ctx, tx, estimate.ID); err != nil {
+			_ = tx.Rollback(ctx)
+			return err
+		}
+		doneCount := 0
+		for _, row := range lines {
+			if strings.TrimSpace(row.calcStatus) == "done" {
+				doneCount++
+			}
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO estimate_calc_state (
+    estimate_id, generation, district, fgis_set_id, status,
+    grand_total, lines_total, lines_done, lines_errors, updated_at
+) VALUES ($1, $2, $3, $4, 'running', 0, $5, $6, 0, now())
+ON CONFLICT (estimate_id) DO UPDATE SET
+    generation = EXCLUDED.generation,
+    district = EXCLUDED.district,
+    fgis_set_id = EXCLUDED.fgis_set_id,
+    status = 'running',
+    lines_total = EXCLUDED.lines_total,
+    updated_at = now()
+`, estimate.ID, estimate.CalcGeneration, estimate.District, estimate.FgisSetID,
+			doneCount+len(enqueueCandidates), doneCount); err != nil {
+			_ = tx.Rollback(ctx)
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+	} else {
+		return nil
+	}
+
+	for batchStart := 0; batchStart < len(enqueueCandidates); batchStart += batchSize {
 		var currentGeneration int64
 		if err := s.treeDB.QueryRow(ctx, `SELECT calc_generation FROM app_estimates WHERE id = $1`, estimate.ID).Scan(&currentGeneration); err != nil {
 			return err
@@ -2147,24 +2532,20 @@ ORDER BY sort_order, id
 		}
 
 		batchEnd := batchStart + batchSize
-		if batchEnd > len(lines) {
-			batchEnd = len(lines)
+		if batchEnd > len(enqueueCandidates) {
+			batchEnd = len(enqueueCandidates)
 		}
 		tx, err := s.treeDB.Begin(ctx)
 		if err != nil {
 			return err
 		}
-		if batchStart == 0 {
+		if batchStart == 0 && fullRebuild {
 			if _, err := tx.Exec(ctx, `DELETE FROM calc_message_receipts WHERE estimate_id = $1`, estimate.ID); err != nil {
 				_ = tx.Rollback(ctx)
 				return err
 			}
 		}
-		for _, row := range lines[batchStart:batchEnd] {
-			line := prepareEstimateLineForStorage(estimate, row.line, storedEstimateLineCalc{}, false)
-			if !shouldEnqueueEstimateLineCalc(line) {
-				continue
-			}
+		for _, line := range enqueueCandidates[batchStart:batchEnd] {
 			line.Revision = estimateLineRevision(estimate, line)
 			if _, err := tx.Exec(ctx, `
 UPDATE app_estimate_lines
@@ -2277,11 +2658,12 @@ WHERE estimate_id = $1 AND line_id = $2
 	}
 	jobID := newID("calcjob")
 	payload, err := json.Marshal(map[string]any{
-		"code":      code,
-		"fgisSetId": estimate.FgisSetID,
-		"district":  estimate.District,
-		"quantity":  line.Quantity,
-		"rawText":   line.RawText,
+		"code":       code,
+		"fgisSetId":  estimate.FgisSetID,
+		"district":   estimate.District,
+		"quantity":   line.Quantity,
+		"rawText":    line.RawText,
+		"generation": estimate.CalcGeneration,
 	})
 	if err != nil {
 		return err
@@ -2316,6 +2698,7 @@ SET status = CASE
 		"estimateId":     estimate.ID,
 		"lineId":         line.ID,
 		"revision":       line.Revision,
+		"generation":     estimate.CalcGeneration,
 		"code":           code,
 		"fgisSetId":      estimate.FgisSetID,
 		"district":       estimate.District,

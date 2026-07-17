@@ -476,7 +476,8 @@ func (s *Server) handleEstimateCalcStart(w http.ResponseWriter, r *http.Request,
 	}
 
 	includeAll := claims.Role == domain.RoleSuperAdmin
-	if err := s.store.StartEstimateCalc(r.Context(), estimateID, claims.CompanyID, includeAll); err != nil {
+	force := r.URL.Query().Get("force") == "1" || strings.EqualFold(r.URL.Query().Get("force"), "true")
+	if err := s.store.StartEstimateCalc(r.Context(), estimateID, claims.CompanyID, includeAll, force); err != nil {
 		writeStoreError(w, err)
 		return
 	}

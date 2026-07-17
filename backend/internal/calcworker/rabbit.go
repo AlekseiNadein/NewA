@@ -36,6 +36,7 @@ type rabbitJobMessage struct {
 	EstimateID     string    `json:"estimateId"`
 	LineID         string    `json:"lineId"`
 	Revision       int64     `json:"revision"`
+	Generation     int64     `json:"generation"`
 	Code           string    `json:"code"`
 	FgisSetID      string    `json:"fgisSetId"`
 	District       string    `json:"district"`
@@ -372,6 +373,7 @@ func (w *Worker) handleRabbitDelivery(ctx context.Context, ch *amqp.Channel, cfg
 		EstimateID:  message.EstimateID,
 		LineID:      message.LineID,
 		Revision:    message.Revision,
+		Generation:  message.Generation,
 		Code:        message.Code,
 		FgisSetID:   message.FgisSetID,
 		District:    message.District,

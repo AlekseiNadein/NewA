@@ -103,7 +103,7 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 	}
 
 	pricingStarted := time.Now()
-	pricing, err := estimatecalc.LinePricingFromRecord(record, quantity)
+	snap, err := estimatecalc.BuildLineCalcSnapshot(record, quantity)
 	observability.ObserveCalcPricingDuration(time.Since(pricingStarted).Seconds())
 	if err != nil {
 		observability.RecordCalcError("pricing")
@@ -111,10 +111,11 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 	}
 
 	calcJSON, err := json.Marshal(map[string]any{
-		"record":    record,
-		"quantity":  pricing.Quantity,
-		"unitPrice": pricing.UnitPrice,
-		"total":     pricing.Total,
+		"record":        record,
+		"quantity":      snap.Quantity,
+		"unitPrice":     snap.UnitPrice,
+		"total":         snap.Total,
+		"resourcesText": snap.ResourcesText,
 	})
 	if err != nil {
 		return fmt.Errorf("encode calc result: %w", err)
@@ -125,10 +126,11 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		OriginalCode: record.OriginalCode,
 		Name:         record.Name,
 		Unit:         record.Unit,
-		Quantity:     pricing.Quantity,
-		UnitPrice:    pricing.UnitPrice,
-		Total:        pricing.Total,
+		Quantity:     snap.Quantity,
+		UnitPrice:    snap.UnitPrice,
+		Total:        snap.Total,
 		CalcJSON:     calcJSON,
+		Snapshot:     &snap,
 	})
 }
 

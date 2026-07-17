@@ -8071,14 +8071,16 @@ function estimateNeedsTableCalculation(estimate) {
   });
 }
 
-async function startEstimateCalculation(estimateId) {
+async function startEstimateCalculation(estimateId, options = {}) {
   if (!state.me) {
     throw new Error("Нужна авторизация для запуска расчёта");
   }
   if (!isPersistedEstimateId(estimateId)) {
     throw new Error("Смета ещё не сохранена на сервере");
   }
-  await api(`/api/estimates/${estimateId}/calc`, { method: "POST" });
+  const force = Boolean(options.force);
+  const query = force ? "?force=1" : "";
+  await api(`/api/estimates/${estimateId}/calc${query}`, { method: "POST" });
 }
 
 async function runEstimateTableCalculation(estimateId, options = {}) {

@@ -132,6 +132,8 @@ func resolveResourceUnitPrice(prices, indexes, costIndicators, district string) 
 type recordNormInfo struct {
 	OriginalCode   string
 	CostIndicators string
+	Determinant    string
+	Mass           string
 }
 
 type fgisSetRow struct {
@@ -156,7 +158,7 @@ func (s *Service) lookupRecordNormInfos(ctx context.Context, codes []string) (ma
 
 	inClause, args := sqlInClause(1, unique)
 	query := fmt.Sprintf(`
-		SELECT code, original_code, cost_indicators
+		SELECT code, original_code, cost_indicators, COALESCE(determinant, ''), COALESCE(mass, '')
 		FROM gsn.records
 		WHERE code IN (%s)
 	`, inClause)
@@ -171,7 +173,7 @@ func (s *Service) lookupRecordNormInfos(ctx context.Context, codes []string) (ma
 	for rows.Next() {
 		var code string
 		var info recordNormInfo
-		if err := rows.Scan(&code, &info.OriginalCode, &info.CostIndicators); err != nil {
+		if err := rows.Scan(&code, &info.OriginalCode, &info.CostIndicators, &info.Determinant, &info.Mass); err != nil {
 			return nil, fmt.Errorf("scan gsn record norm info: %w", err)
 		}
 		items[code] = info

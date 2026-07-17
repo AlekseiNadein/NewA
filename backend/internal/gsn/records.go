@@ -8,13 +8,15 @@ import (
 )
 
 type RecordResource struct {
-	Code          string `json:"code"`
-	OriginalCode  string `json:"originalCode,omitempty"`
-	Name          string `json:"name"`
-	Unit          string `json:"unit"`
-	QuantityText  string `json:"quantityText"`
+	Code           string `json:"code"`
+	OriginalCode   string `json:"originalCode,omitempty"`
+	Name           string `json:"name"`
+	Unit           string `json:"unit"`
+	QuantityText   string `json:"quantityText"`
 	UnitPriceText  string `json:"unitPriceText,omitempty"`
 	UnitPriceIndex string `json:"unitPriceIndex,omitempty"`
+	Determinant    string `json:"determinant,omitempty"`
+	Mass           string `json:"mass,omitempty"`
 }
 
 type RecordDetail struct {
@@ -26,6 +28,8 @@ type RecordDetail struct {
 	HasResources   bool             `json:"hasResources"`
 	UnitPriceText  string           `json:"unitPriceText,omitempty"`
 	UnitPriceIndex string           `json:"unitPriceIndex,omitempty"`
+	Determinant    string           `json:"determinant,omitempty"`
+	Mass           string           `json:"mass,omitempty"`
 	Resources      []RecordResource `json:"resources,omitempty"`
 }
 
@@ -64,10 +68,10 @@ func (s *Service) lookupRecordDetail(ctx context.Context, code string) (RecordDe
 		var detail RecordDetail
 		var recordKind, costIndicators string
 		err := s.db.QueryRowContext(ctx, `
-		SELECT code, original_code, name, unit, record_kind, cost_indicators
+		SELECT code, original_code, name, unit, COALESCE(determinant, ''), COALESCE(mass, ''), record_kind, cost_indicators
 		FROM gsn.records
 		WHERE code = $1
-	`, candidate).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
+	`, candidate).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &detail.Determinant, &detail.Mass, &recordKind, &costIndicators)
 		if err == nil {
 			return detail, recordKind, costIndicators, nil
 		}
@@ -80,10 +84,10 @@ func (s *Service) lookupRecordDetail(ctx context.Context, code string) (RecordDe
 		var detail RecordDetail
 		var recordKind, costIndicators string
 		err := s.db.QueryRowContext(ctx, `
-		SELECT code, original_code, name, unit, record_kind, cost_indicators
+		SELECT code, original_code, name, unit, COALESCE(determinant, ''), COALESCE(mass, ''), record_kind, cost_indicators
 		FROM gsn.records
 		WHERE original_code = $1
-	`, candidate).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &recordKind, &costIndicators)
+	`, candidate).Scan(&detail.Code, &detail.OriginalCode, &detail.Name, &detail.Unit, &detail.Determinant, &detail.Mass, &recordKind, &costIndicators)
 		if err == nil {
 			return detail, recordKind, costIndicators, nil
 		}
@@ -330,6 +334,8 @@ func (s *Service) listRecordResources(ctx context.Context, recordCode, fgisSetID
 		}
 
 		item.OriginalCode = normInfo.OriginalCode
+		item.Determinant = normInfo.Determinant
+		item.Mass = normInfo.Mass
 		if fgisRow, fgisFound := fgisRows[codifier.Code]; fgisFound {
 			item.UnitPriceText, item.UnitPriceIndex = resolveResourceUnitPrice(
 				fgisRow.Prices, fgisRow.Indexes, normInfo.CostIndicators, district,

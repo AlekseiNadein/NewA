@@ -143,6 +143,34 @@ WHERE estimate_id = $1
 		return 0, err
 	}
 
+	if _, err := tx.Exec(ctx, `DELETE FROM estimate_calc_line_resources WHERE estimate_id = $1`, estimateID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM estimate_calc_lines WHERE estimate_id = $1`, estimateID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM estimate_calc_resources WHERE estimate_id = $1`, estimateID); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO estimate_calc_state (
+    estimate_id, generation, district, fgis_set_id, status,
+    grand_total, lines_total, lines_done, lines_errors, updated_at
+) VALUES ($1, $2, $3, $4, '', 0, 0, 0, 0, now())
+ON CONFLICT (estimate_id) DO UPDATE SET
+    generation = EXCLUDED.generation,
+    district = EXCLUDED.district,
+    fgis_set_id = EXCLUDED.fgis_set_id,
+    status = '',
+    grand_total = 0,
+    lines_total = 0,
+    lines_done = 0,
+    lines_errors = 0,
+    updated_at = now()
+`, estimateID, estimate.CalcGeneration, estimate.District, estimate.FgisSetID); err != nil {
+		return 0, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
@@ -150,10 +178,9 @@ WHERE estimate_id = $1
 	return estimate.CalcGeneration, nil
 }
 
-// ClearEstimateCalcResultsOnClose removes stored GSN calc results when an editing session ends.
+// ClearEstimateCalcResultsOnClose is intentionally a no-op: calculated data persists across editor sessions.
 func (s *FileStore) ClearEstimateCalcResultsOnClose(ctx context.Context, companyID, estimateID string, includeAll bool) error {
-	_, err := s.CancelEstimateCalc(ctx, companyID, estimateID, includeAll)
-	return err
+	return nil
 }
 
 func (s *FileStore) listEstimateCalcLineStatuses(ctx context.Context, estimateID string) ([]EstimateCalcStatus, error) {
