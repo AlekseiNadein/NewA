@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_state (
     generation BIGINT NOT NULL DEFAULT 0,
     district TEXT NOT NULL DEFAULT '',
     fgis_set_id TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT '' CHECK (status IN ('', 'running', 'done', 'failed')),
+    status TEXT NOT NULL DEFAULT '' CHECK (status IN ('', 'starting', 'running', 'done', 'failed')),
     grand_total NUMERIC(18, 2) NOT NULL DEFAULT 0,
     lines_total INTEGER NOT NULL DEFAULT 0,
     lines_done INTEGER NOT NULL DEFAULT 0,

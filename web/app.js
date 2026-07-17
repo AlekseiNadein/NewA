@@ -209,6 +209,7 @@ const state = {
   estimateLinesExpanded: readSessionJSONObject("nav_editor_expanded", {}),
   constructionExpanded: {},
   objectExpanded: {},
+  treeCalcProgress: {},
   estimateLocks: {},
   userPositions: [],
   addPrimitiveQuantities: {},
@@ -440,6 +441,9 @@ els.navLinks.forEach((button) => {
   button.addEventListener("click", () => {
     state.section = button.dataset.section;
     renderSections();
+    if (state.section === "constructions") {
+      void refreshConstructionData().catch(() => {});
+    }
   });
 });
 
@@ -505,6 +509,18 @@ els.constructionTree.addEventListener("click", (event) => {
   const deleteButton = event.target.closest("[data-delete]");
   if (deleteButton) {
     void deleteConstructionEntity(deleteButton.dataset.delete, deleteButton.dataset.deleteId);
+    return;
+  }
+
+  const recalcButton = event.target.closest("[data-recalc]");
+  if (recalcButton) {
+    void recalculateConstructionScope(recalcButton.dataset.recalc, recalcButton.dataset.recalcId);
+    return;
+  }
+
+  const clearCalcButton = event.target.closest("[data-clear-calc]");
+  if (clearCalcButton) {
+    void clearConstructionCalcScope(clearCalcButton.dataset.clearCalc, clearCalcButton.dataset.clearCalcId);
     return;
   }
 
@@ -754,6 +770,12 @@ els.editorContent.addEventListener("click", (event) => {
   const districtButton = event.target.closest("[data-editor-district-open]");
   if (districtButton) {
     void openDistrictDialog(districtButton.dataset.editorDistrictOpen);
+    return;
+  }
+
+  const forceRecalcButton = event.target.closest("[data-editor-force-recalc]");
+  if (forceRecalcButton) {
+    void forceRecalculateOpenEstimate(forceRecalcButton.dataset.editorForceRecalc);
     return;
   }
 
@@ -1818,6 +1840,36 @@ function iconTrash() {
         stroke-linejoin="round"
       />
       <path d="M10 10v6M14 10v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+    </svg>
+  `;
+}
+
+function iconRecalc() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M8 5.5v13l11-6.5z" fill="currentColor" />
+    </svg>
+  `;
+}
+
+function iconClear() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g transform="translate(12 12) rotate(-38) translate(-12 -12)">
+        <rect
+          x="6.5"
+          y="8.5"
+          width="11"
+          height="7"
+          rx="0.6"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linejoin="round"
+        />
+        <path d="M6.5 12h11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+      </g>
+      <path d="M5 18.5h4.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
     </svg>
   `;
 }
@@ -3722,6 +3774,17 @@ function estimateCalcProgress(items, estimateId = "") {
   return { total: calcItems.length, processed, errors };
 }
 
+function isCalcSummaryComplete(summary) {
+  const total = Number(summary?.total) || 0;
+  if (total <= 0) {
+    return true;
+  }
+  const processed = Number(summary?.processed) || 0;
+  const errors = Number(summary?.errors) || 0;
+  const status = String(summary?.status || "").trim();
+  return status === "done" || processed + errors >= total;
+}
+
 function estimateCalcProgressView(items, estimateId = "") {
   const { total, processed, errors } = estimateCalcProgress(items, estimateId);
   if (!total) {
@@ -3811,18 +3874,32 @@ function applyServerCalcSummary(estimateId, estimate, summary) {
   const errors = Number(summary.errors) || 0;
   const previous = estimateCalcProgressTargets.get(key);
   const baseGrandTotal = estimateCalcProgressBaseGrandTotal(estimate?.items || []);
+  const grandTotal = baseGrandTotal + (Number(summary.grandTotal) || 0);
   estimateCalcProgressTargets.set(key, {
     total,
     processed,
     errors,
     displayed: processed,
     largeEstimate: true,
-    runningGrandTotal: baseGrandTotal + (Number(summary.grandTotal) || 0),
+    runningGrandTotal: grandTotal,
     countedDoneLineIds: previous?.countedDoneLineIds ?? new Set(),
   });
-  if (processed >= total) {
+  syncEstimateListTotal(estimateId, Number(summary.grandTotal) || 0);
+  if (processed + errors >= total || String(summary?.status || "").trim() === "done") {
     clearEstimateCalcAwaitingServer(estimateId);
   }
+}
+
+function syncEstimateListTotal(estimateId, grandTotal) {
+  const estimate = state.estimates.find((item) => sameEstimateId(item.id, estimateId));
+  if (!estimate) {
+    return;
+  }
+  const nextTotal = Number(grandTotal);
+  if (!Number.isFinite(nextTotal)) {
+    return;
+  }
+  estimate.total = nextTotal;
 }
 
 function estimateCalcItemsNeedServerSync(estimate) {
@@ -5949,7 +6026,8 @@ async function pollEstimateCalcStatus(estimateId) {
 
       const total = Number(summary?.total) || 0;
       const processed = Number(summary?.processed) || 0;
-      if (total > 0 && processed < total) {
+      const errors = Number(summary?.errors) || 0;
+      if (total > 0 && processed + errors < total) {
         return;
       }
       if (!estimateCalcItemsNeedServerSync(estimate)) {
@@ -6767,6 +6845,13 @@ function renderEstimateEditorHeader(estimate) {
         <div class="editor-estimate-total-row">
           <span class="muted">Сметная стоимость</span>
           <output class="editor-estimate-total-value">${money.format(headerGrandTotal)}</output>
+          <button
+            class="icon-button secondary editor-estimate-recalc-btn"
+            data-editor-force-recalc="${escapeHTML(estimate.id)}"
+            type="button"
+            title="Пересчитать"
+            aria-label="Пересчитать"
+          >${iconRecalc()}</button>
         </div>
         ${calcProgress}
       </div>
@@ -8071,6 +8156,38 @@ function estimateNeedsTableCalculation(estimate) {
   });
 }
 
+async function forceRecalculateOpenEstimate(estimateId) {
+  const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+  if (!estimate) {
+    return;
+  }
+  if (state.estimateViewMode !== "table") {
+    showMessage("Пересчёт доступен в табличном режиме", "error");
+    return;
+  }
+  try {
+    await abortEstimateCalcBatchSession(estimateId);
+    resetGsnLinesForTableCalculation(estimate.items);
+    restartEstimateTableCalculation(estimateId, estimate);
+    resetEstimateCalcBatchCursor(estimateId, 0);
+    markEstimateCalcAwaitingServer(estimateId);
+    syncEstimateCalcDisplayAfterReset(estimate);
+    await cancelEstimateCalculation(estimateId);
+    await persistOpenEstimate(estimateId, { requireSave: true });
+    await startEstimateCalculation(estimateId, { force: true });
+    estimateCalcPollBlockedByPersist.delete(estimateId);
+    const ctrl = getEstimateCalcBatchController(estimateId);
+    ctrl.stopped = false;
+    void runEstimateCalcBatchListener(estimateId, ctrl.session);
+    startCalcProgressAnimation(estimateId);
+    syncEstimateCalcDisplayAfterReset(estimate);
+    showMessage("Принудительный пересчёт сметы запущен", "ok");
+  } catch (error) {
+    clearEstimateCalcAwaitingServer(estimateId);
+    showMessage(error.message || "Не удалось пересчитать смету", "error");
+  }
+}
+
 async function startEstimateCalculation(estimateId, options = {}) {
   if (!state.me) {
     throw new Error("Нужна авторизация для запуска расчёта");
@@ -8081,6 +8198,315 @@ async function startEstimateCalculation(estimateId, options = {}) {
   const force = Boolean(options.force);
   const query = force ? "?force=1" : "";
   await api(`/api/estimates/${estimateId}/calc${query}`, { method: "POST" });
+}
+
+function treeCalcScopeKey(kind, id) {
+  return `${kind}:${id}`;
+}
+
+function collectEstimateIdsForScope(kind, id) {
+  if (kind === "estimate") {
+    return id ? [id] : [];
+  }
+  if (kind === "object") {
+    return state.estimates
+      .filter((estimate) => estimate.objectId === id)
+      .map((estimate) => estimate.id)
+      .filter(Boolean);
+  }
+  if (kind === "construction") {
+    const objectIds = new Set(
+      state.objects.filter((object) => object.constructionId === id).map((object) => object.id),
+    );
+    return state.estimates
+      .filter((estimate) => objectIds.has(estimate.objectId))
+      .map((estimate) => estimate.id)
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function getTreeCalcProgress(kind, id) {
+  return state.treeCalcProgress[treeCalcScopeKey(kind, id)] || null;
+}
+
+function setTreeCalcProgress(kind, id, progress) {
+  const key = treeCalcScopeKey(kind, id);
+  if (!progress) {
+    delete state.treeCalcProgress[key];
+  } else {
+    state.treeCalcProgress[key] = progress;
+  }
+}
+
+function hasConstructionCost(totalValue) {
+  return Math.abs(Number(totalValue) || 0) > 0.005;
+}
+
+function isEstimateFullyCalculated(estimate) {
+  const total = Number(estimate?.calcLinesTotal) || 0;
+  const done = Number(estimate?.calcLinesDone) || 0;
+  if (total <= 0) {
+    return true;
+  }
+  return done >= total;
+}
+
+function getScopeCalcEstimateStats(kind, id) {
+  if (kind === "estimate") {
+    return null;
+  }
+
+  const progress = getTreeCalcProgress(kind, id);
+  if (progress && !progress.done && Number(progress.estimatesTotal) > 0) {
+    return {
+      total: Number(progress.estimatesTotal) || 0,
+      calculated: Number(progress.estimatesDone) || 0,
+    };
+  }
+
+  const estimateIds = collectEstimateIdsForScope(kind, id);
+  if (!estimateIds.length) {
+    return { total: 0, calculated: 0 };
+  }
+
+  const withCalc = estimateIds
+    .map((estimateId) => state.estimates.find((item) => item.id === estimateId))
+    .filter((estimate) => estimate && (Number(estimate.calcLinesTotal) || 0) > 0);
+
+  const total = withCalc.length;
+  const calculated = withCalc.filter(isEstimateFullyCalculated).length;
+  return { total, calculated };
+}
+
+function constructionCostLevelClass(kind) {
+  if (kind === "construction") {
+    return "construction-cost-cell--construction";
+  }
+  if (kind === "object") {
+    return "construction-cost-cell--object";
+  }
+  return "construction-cost-cell--estimate";
+}
+
+function renderConstructionCostCell(kind, id, totalValue) {
+  const levelClass = constructionCostLevelClass(kind);
+  if (!hasConstructionCost(totalValue)) {
+    return `<td class="construction-cost-cell ${levelClass}"></td>`;
+  }
+
+  const progress = getTreeCalcProgress(kind, id);
+  const costText = money.format(Number(totalValue || 0));
+  const scopeStats = getScopeCalcEstimateStats(kind, id);
+  const partialScope =
+    scopeStats && scopeStats.total > 0 && scopeStats.calculated < scopeStats.total;
+  const partialHint = partialScope
+    ? `рассчитано ${scopeStats.calculated} из ${scopeStats.total} смет`
+    : "";
+  const partialClass = partialScope ? " construction-cost-partial" : "";
+
+  if (!progress || progress.done) {
+    return `<td class="construction-cost-cell ${levelClass}${partialClass}"${partialHint ? ` title="${escapeHTML(partialHint)}"` : ""}>${escapeHTML(costText)}</td>`;
+  }
+
+  const total = Math.max(1, Number(progress.total) || 1);
+  const processed = Math.min(total, Math.max(0, Number(progress.processed) || 0));
+  const pct = Math.round((processed / total) * 100);
+  return `
+    <td class="construction-cost-cell ${levelClass}${partialClass}"${partialHint ? ` title="${escapeHTML(partialHint)}"` : ""}>
+      <div class="construction-cost-with-progress">
+        <span class="construction-cost-value">${escapeHTML(costText)}</span>
+        <div class="construction-calc-progress" title="Обработано ${processed}/${total}">
+          <div class="construction-calc-progress-track">
+            <div class="construction-calc-progress-bar" style="width:${pct}%"></div>
+          </div>
+          <span class="construction-calc-progress-label">${processed}/${total}</span>
+        </div>
+      </div>
+    </td>
+  `;
+}
+
+function sumEstimateTotals(estimateIds) {
+  const idSet = new Set(estimateIds);
+  return state.estimates.reduce((sum, estimate) => {
+    if (!idSet.has(estimate.id)) {
+      return sum;
+    }
+    return sum + (Number(estimate.total) || 0);
+  }, 0);
+}
+
+function renderConstructionRecalcButton(kind, id) {
+  const progress = getTreeCalcProgress(kind, id);
+  const busy = Boolean(progress && !progress.done);
+  return `
+    <button
+      class="icon-button secondary"
+      data-recalc="${escapeHTML(kind)}"
+      data-recalc-id="${escapeHTML(id)}"
+      type="button"
+      title="Пересчитать"
+      aria-label="Пересчитать"
+      ${busy ? "disabled" : ""}
+    >${iconRecalc()}</button>
+  `;
+}
+
+function renderConstructionClearButton(kind, id, totalValue) {
+  const progress = getTreeCalcProgress(kind, id);
+  const busy = Boolean(progress && !progress.done);
+  const enabled = hasConstructionCost(totalValue) && !busy;
+  return `
+    <button
+      class="icon-button secondary"
+      data-clear-calc="${escapeHTML(kind)}"
+      data-clear-calc-id="${escapeHTML(id)}"
+      type="button"
+      title="Очистить расчетные данные"
+      aria-label="Очистить расчетные данные"
+      ${enabled ? "" : "disabled"}
+    >${iconClear()}</button>
+  `;
+}
+
+async function clearConstructionCalcScope(kind, id) {
+  const estimateIds = collectEstimateIdsForScope(kind, id);
+  if (!estimateIds.length) {
+    showMessage("Нет смет для очистки", "error");
+    return;
+  }
+  if (getTreeCalcProgress(kind, id) && !getTreeCalcProgress(kind, id).done) {
+    return;
+  }
+
+  const kindLabels = {
+    construction: "стройки",
+    object: "объекта",
+    estimate: "сметы",
+  };
+  const label = kindLabels[kind] || "элемента";
+  if (!window.confirm(`Очистить расчётные данные ${label}?`)) {
+    return;
+  }
+
+  try {
+    for (const estimateId of estimateIds) {
+      await cancelEstimateCalculation(estimateId);
+    }
+    await refreshConstructionData();
+    showMessage(
+      kind === "estimate"
+        ? "Расчётные данные сметы очищены"
+        : kind === "object"
+          ? "Расчётные данные объекта очищены"
+          : "Расчётные данные стройки очищены",
+      "ok",
+    );
+  } catch (error) {
+    showMessage(error.message || "Не удалось очистить расчётные данные", "error");
+  }
+}
+
+async function recalculateConstructionScope(kind, id) {
+  const estimateIds = collectEstimateIdsForScope(kind, id);
+  if (!estimateIds.length) {
+    showMessage("Нет смет для пересчёта", "error");
+    return;
+  }
+  if (getTreeCalcProgress(kind, id) && !getTreeCalcProgress(kind, id).done) {
+    return;
+  }
+
+  setTreeCalcProgress(kind, id, {
+    total: estimateIds.length,
+    processed: 0,
+    errors: 0,
+    done: false,
+    estimateIds,
+    estimatesTotal: estimateIds.length,
+    estimatesDone: 0,
+  });
+  renderConstructionTree();
+
+  try {
+    await Promise.all(
+      estimateIds.map(async (estimateId) => {
+        await api(`/api/estimates/${estimateId}/calc?force=1`, { method: "POST" });
+      }),
+    );
+
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (Date.now() < deadline) {
+      let processed = 0;
+      let errors = 0;
+      let linesTotal = 0;
+      let linesDone = 0;
+      let allDone = true;
+      let grandSum = 0;
+
+      for (const estimateId of estimateIds) {
+        const summary = await api(`/api/estimates/${estimateId}/calc-status?summary=1`);
+        const total = Number(summary?.total) || 0;
+        const doneCount = Number(summary?.processed) || 0;
+        const errCount = Number(summary?.errors) || 0;
+        const status = String(summary?.status || "").trim();
+        const inFlight = status === "starting" || status === "running";
+        linesTotal += total;
+        linesDone += doneCount + errCount;
+        errors += errCount;
+        grandSum += Number(summary?.grandTotal) || 0;
+
+        const estimateFinished = isCalcSummaryComplete(summary);
+        if (!estimateFinished) {
+          allDone = false;
+        } else {
+          processed += 1;
+        }
+
+        const estimate = state.estimates.find((item) => item.id === estimateId);
+        if (estimate) {
+          estimate.total = Number(summary?.grandTotal) || 0;
+        }
+      }
+
+      const progressTotal = linesTotal > 0 ? linesTotal : estimateIds.length;
+      const progressDone = linesTotal > 0 ? linesDone : processed;
+      setTreeCalcProgress(kind, id, {
+        total: progressTotal,
+        processed: progressDone,
+        errors,
+        done: allDone,
+        estimateIds,
+        grandTotal: grandSum,
+        estimatesTotal: estimateIds.length,
+        estimatesDone: processed,
+      });
+      renderConstructionTree();
+      if (allDone) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    const finalProgress = getTreeCalcProgress(kind, id);
+    if (finalProgress) {
+      setTreeCalcProgress(kind, id, null);
+    }
+    await refreshConstructionData();
+    showMessage(
+      kind === "estimate"
+        ? "Пересчёт сметы завершён"
+        : kind === "object"
+          ? "Пересчёт объекта завершён"
+          : "Пересчёт стройки завершён",
+      "ok",
+    );
+  } catch (error) {
+    setTreeCalcProgress(kind, id, null);
+    renderConstructionTree();
+    showMessage(error.message || "Не удалось выполнить пересчёт", "error");
+  }
 }
 
 async function runEstimateTableCalculation(estimateId, options = {}) {
@@ -9554,6 +9980,7 @@ function syncRunningGrandTotalFromBatch(estimateId, estimate, batch) {
   if (batch?.done && estimate) {
     enrichEditorEstimateItems(estimate.items);
     target.runningGrandTotal = estimateGrandTotalForDisplay(estimate.items || []);
+    syncEstimateListTotal(estimateId, target.runningGrandTotal);
     return;
   }
   if (batch?.grandTotal == null || !Number.isFinite(Number(batch.grandTotal))) {
@@ -9561,6 +9988,7 @@ function syncRunningGrandTotalFromBatch(estimateId, estimate, batch) {
   }
   const base = target.baseGrandTotal ?? estimateCalcProgressBaseGrandTotal(estimate?.items || []);
   target.runningGrandTotal = base + Number(batch.grandTotal);
+  syncEstimateListTotal(estimateId, target.runningGrandTotal);
 }
 
 function mergeEstimateCalcStateFromSaved(localItems, savedItems) {
@@ -10602,7 +11030,7 @@ function constructionEntityDeleteMessage(kind, entity) {
   return message;
 }
 
-function renderConstructionEntityIconActions(kind, id) {
+function renderConstructionEntityIconActions(kind, id, totalValue) {
   return `
     <button
       class="icon-button secondary"
@@ -10612,6 +11040,8 @@ function renderConstructionEntityIconActions(kind, id) {
       title="Изменить"
       aria-label="Изменить"
     >${iconPencil()}</button>
+    ${renderConstructionRecalcButton(kind, id)}
+    ${renderConstructionClearButton(kind, id, totalValue)}
     <button
       class="icon-button secondary icon-button-danger"
       data-delete="${escapeHTML(kind)}"
@@ -10623,7 +11053,7 @@ function renderConstructionEntityIconActions(kind, id) {
   `;
 }
 
-function renderEstimateTreeActions(id) {
+function renderEstimateTreeActions(id, totalValue) {
   return `
     <button
       class="secondary construction-add-btn"
@@ -10631,6 +11061,8 @@ function renderEstimateTreeActions(id) {
       data-edit-id="${escapeHTML(id)}"
       type="button"
     >Редактировать</button>
+    ${renderConstructionRecalcButton("estimate", id)}
+    ${renderConstructionClearButton("estimate", id, totalValue)}
     <button
       class="icon-button secondary icon-button-danger"
       data-delete="estimate"
@@ -10859,11 +11291,18 @@ function renderConstructionTree() {
   const rows = [
     `
       <tr class="construction-toolbar">
-        <td colspan="4">
+        <td colspan="5">
           <button class="secondary construction-add-btn" data-add="construction" type="button">
             + Добавить стройку
           </button>
         </td>
+      </tr>
+      <tr class="construction-header-row">
+        <th class="construction-level-cell">Уровень</th>
+        <th class="construction-code-cell">Шифр</th>
+        <th class="construction-name-cell">Наименование</th>
+        <th class="construction-cost-cell">Стоимость</th>
+        <th class="construction-actions-cell"></th>
       </tr>
     `,
   ];
@@ -10905,6 +11344,8 @@ function renderConstructionRow(construction, hasChildren, expanded) {
         type="button"
       >${expanded ? "-" : "+"}</button>`
     : `<span class="tree-toggle-placeholder"></span>`;
+  const estimateIds = collectEstimateIdsForScope("construction", construction.id);
+  const total = sumEstimateTotals(estimateIds);
 
   return `
     <tr class="construction-table-row">
@@ -10912,7 +11353,8 @@ function renderConstructionRow(construction, hasChildren, expanded) {
         <div class="construction-level-inner">${toggle}<span>Стройка</span></div>
       </td>
       <td class="construction-code-cell">${escapeHTML(construction.code || "")}</td>
-      <td>${escapeHTML(construction.name)}</td>
+      <td class="construction-name-cell" title="${escapeHTML(construction.name)}">${escapeHTML(construction.name)}</td>
+      ${renderConstructionCostCell("construction", construction.id, total)}
       <td class="construction-actions-cell">
         <div class="construction-actions">
           <button
@@ -10922,7 +11364,7 @@ function renderConstructionRow(construction, hasChildren, expanded) {
             type="button"
           >+ Добавить объект</button>
           <div class="construction-icon-actions">
-            ${renderConstructionEntityIconActions("construction", construction.id)}
+            ${renderConstructionEntityIconActions("construction", construction.id, total)}
           </div>
         </div>
       </td>
@@ -10938,6 +11380,8 @@ function renderObjectRow(object, hasChildren, expanded, constructionOpen) {
         type="button"
       >${expanded ? "-" : "+"}</button>`
     : `<span class="tree-toggle-placeholder"></span>`;
+  const estimateIds = collectEstimateIdsForScope("object", object.id);
+  const total = sumEstimateTotals(estimateIds);
 
   return `
     <tr class="construction-table-row ${constructionOpen ? "" : "hidden"}">
@@ -10945,7 +11389,8 @@ function renderObjectRow(object, hasChildren, expanded, constructionOpen) {
         <div class="construction-level-inner">${toggle}<span>Объект</span></div>
       </td>
       <td class="construction-code-cell">${escapeHTML(object.code || "")}</td>
-      <td>${escapeHTML(object.name)}</td>
+      <td class="construction-name-cell" title="${escapeHTML(object.name)}">${escapeHTML(object.name)}</td>
+      ${renderConstructionCostCell("object", object.id, total)}
       <td class="construction-actions-cell">
         <div class="construction-actions">
           <button
@@ -10955,7 +11400,7 @@ function renderObjectRow(object, hasChildren, expanded, constructionOpen) {
             type="button"
           >+ Добавить смету</button>
           <div class="construction-icon-actions">
-            ${renderConstructionEntityIconActions("object", object.id)}
+            ${renderConstructionEntityIconActions("object", object.id, total)}
           </div>
         </div>
       </td>
@@ -10972,7 +11417,7 @@ function renderEstimateRow(estimate, visible) {
           title="${escapeHTML(lockHint)}"
           aria-label="${escapeHTML(lockHint)}"
         >${iconLock()}</span>`
-    : `<div class="construction-actions construction-estimate-actions">${renderEstimateTreeActions(estimate.id)}</div>`;
+    : `<div class="construction-actions construction-estimate-actions">${renderEstimateTreeActions(estimate.id, estimate.total)}</div>`;
 
   return `
     <tr class="construction-table-row ${visible ? "" : "hidden"}">
@@ -10980,7 +11425,8 @@ function renderEstimateRow(estimate, visible) {
         <div class="construction-level-inner"><span class="tree-toggle-placeholder"></span><span>Смета</span></div>
       </td>
       <td class="construction-code-cell">${escapeHTML(estimate.code || "")}</td>
-      <td>${escapeHTML(estimate.title)}</td>
+      <td class="construction-name-cell" title="${escapeHTML(estimate.title)}">${escapeHTML(estimate.title)}</td>
+      ${renderConstructionCostCell("estimate", estimate.id, estimate.total)}
       <td class="construction-actions-cell">
         ${actionControl}
       </td>

@@ -93,6 +93,8 @@ type Estimate struct {
 	Status          EstimateStatus `json:"status"`
 	Items           []EstimateItem `json:"items"`
 	Total           float64        `json:"total"`
+	CalcLinesTotal  int            `json:"calcLinesTotal,omitempty"`
+	CalcLinesDone   int            `json:"calcLinesDone,omitempty"`
 	CreatedAt       time.Time      `json:"createdAt"`
 	UpdatedAt       time.Time      `json:"updatedAt"`
 }

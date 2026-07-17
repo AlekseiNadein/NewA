@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"nav-saas-mvp/backend/internal/domain"
 	"nav-saas-mvp/backend/internal/estimatecalc"
 )
 
@@ -15,7 +17,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_state (
     generation BIGINT NOT NULL DEFAULT 0,
     district TEXT NOT NULL DEFAULT '',
     fgis_set_id TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT '' CHECK (status IN ('', 'running', 'done', 'failed')),
+    status TEXT NOT NULL DEFAULT '' CHECK (status IN ('', 'starting', 'running', 'done', 'failed')),
     grand_total NUMERIC(18, 2) NOT NULL DEFAULT 0,
     lines_total INTEGER NOT NULL DEFAULT 0,
     lines_done INTEGER NOT NULL DEFAULT 0,
@@ -287,12 +289,109 @@ SET generation = $2,
     grand_total = grand_total - $3 + $4,
     lines_done = GREATEST(0, lines_done + $5),
     status = CASE
-        WHEN GREATEST(0, lines_done + $5) >= lines_total AND lines_total > 0 THEN 'done'
+        WHEN lines_total > 0 AND GREATEST(0, lines_done + $5) + lines_errors >= lines_total THEN 'done'
         ELSE 'running'
     END,
     updated_at = now()
 WHERE estimate_id = $1
 `, in.EstimateID, in.Generation, oldTotal, in.Snapshot.Total, deltaDone)
+	return err
+}
+
+func (s *FileStore) reconcileEstimateCalcStateIfIdle(ctx context.Context, estimateID string) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	tx, err := s.treeDB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	err = tx.QueryRow(ctx, `
+SELECT COALESCE(status, '')
+FROM estimate_calc_state
+WHERE estimate_id = $1
+FOR UPDATE
+`, estimateID).Scan(&status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	status = strings.TrimSpace(status)
+	if status != "running" && status != "starting" {
+		return nil
+	}
+	if err := reconcileEstimateCalcStateTx(ctx, tx, estimateID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func reconcileEstimateCalcStateTx(ctx context.Context, tx pgx.Tx, estimateID string) error {
+	var pendingLines, pendingJobs, pendingOutbox int
+	err := tx.QueryRow(ctx, `
+SELECT
+    (SELECT COUNT(*)::int
+     FROM app_estimate_lines
+     WHERE estimate_id = $1
+       AND line_type = $2
+       AND source = 'gsn'
+       AND calc_status IN ('queued', 'leased')
+       AND COALESCE(NULLIF(TRIM(code), ''), NULLIF(TRIM(original_code), '')) IS NOT NULL),
+    (SELECT COUNT(*)::int
+     FROM estimate_calc_jobs
+     WHERE estimate_id = $1
+       AND status IN ('queued', 'leased')),
+    (SELECT COUNT(*)::int
+     FROM outbox_events
+     WHERE published_at IS NULL
+       AND payload->>'estimateId' = $1)
+`, estimateID, string(domain.EstimateLinePosition)).Scan(&pendingLines, &pendingJobs, &pendingOutbox)
+	if err != nil {
+		return err
+	}
+	if pendingLines > 0 || pendingJobs > 0 || pendingOutbox > 0 {
+		return nil
+	}
+
+	var total, done, failed int
+	var grandTotal float64
+	err = tx.QueryRow(ctx, `
+SELECT
+    COUNT(*)::int,
+    COUNT(*) FILTER (WHERE calc_status = 'done')::int,
+    COUNT(*) FILTER (WHERE calc_status IN ('failed', 'dead'))::int,
+    COALESCE(SUM(total) FILTER (WHERE calc_status = 'done'), 0)
+FROM app_estimate_lines
+WHERE estimate_id = $1
+    AND line_type = $2
+    AND source = 'gsn'
+    AND COALESCE(NULLIF(TRIM(code), ''), NULLIF(TRIM(original_code), '')) IS NOT NULL
+`, estimateID, string(domain.EstimateLinePosition)).Scan(&total, &done, &failed, &grandTotal)
+	if err != nil {
+		return err
+	}
+
+	newStatus := "running"
+	if total == 0 || done+failed >= total {
+		newStatus = "done"
+	}
+
+	_, err = tx.Exec(ctx, `
+UPDATE estimate_calc_state
+SET lines_total = $2,
+    lines_done = $3,
+    lines_errors = $4,
+    grand_total = $5,
+    status = $6,
+    updated_at = now()
+WHERE estimate_id = $1
+  AND status IN ('running', 'starting', 'done')
+`, estimateID, total, done, failed, grandTotal, newStatus)
 	return err
 }
 

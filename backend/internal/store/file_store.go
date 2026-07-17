@@ -937,7 +937,51 @@ CREATE INDEX IF NOT EXISTS idx_calc_message_receipts_estimate
 	if err != nil {
 		return err
 	}
-	return s.migrateEstimateLinesCompositePK(ctx)
+	if err := s.migrateEstimateLinesCompositePK(ctx); err != nil {
+		return err
+	}
+	return s.migrateEstimateCalcStateStartingStatus(ctx)
+}
+
+func (s *FileStore) migrateEstimateCalcStateStartingStatus(ctx context.Context) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	var allowsStarting bool
+	err := s.treeDB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class t ON t.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = current_schema()
+      AND t.relname = 'estimate_calc_state'
+      AND c.conname = 'estimate_calc_state_status_check'
+      AND pg_get_constraintdef(c.oid) LIKE '%starting%'
+)`).Scan(&allowsStarting)
+	if err != nil {
+		return err
+	}
+	if allowsStarting {
+		return nil
+	}
+	var tableExists bool
+	if err := s.treeDB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name = 'estimate_calc_state'
+)`).Scan(&tableExists); err != nil {
+		return err
+	}
+	if !tableExists {
+		return nil
+	}
+	_, err = s.treeDB.Exec(ctx, `
+ALTER TABLE estimate_calc_state DROP CONSTRAINT IF EXISTS estimate_calc_state_status_check;
+ALTER TABLE estimate_calc_state ADD CONSTRAINT estimate_calc_state_status_check
+    CHECK (status IN ('', 'starting', 'running', 'done', 'failed'));
+`)
+	return err
 }
 
 func (s *FileStore) migrateEstimateLinesCompositePK(ctx context.Context) error {
@@ -1367,13 +1411,43 @@ func (s *FileStore) listEstimatesSummaryDB(ctx context.Context, companyID string
 }
 
 func (s *FileStore) listEstimateHeadersDB(ctx context.Context, companyID string, includeAll bool) ([]domain.Estimate, error) {
-	query := `SELECT id, company_id, object_id, code, title, description, district, fgis_set_id, status, total, created_at, updated_at FROM app_estimates`
+	query := `
+SELECT e.id, e.company_id, e.object_id, e.code, e.title, e.description, e.district, e.fgis_set_id, e.status,
+    CASE
+        WHEN cs.estimate_id IS NOT NULL AND cs.lines_total > 0 THEN cs.grand_total
+        ELSE COALESCE((
+            SELECT SUM(l.total)
+            FROM app_estimate_lines l
+            WHERE l.estimate_id = e.id
+              AND l.calc_status = 'done'
+        ), e.total)
+    END,
+    COALESCE((
+        SELECT COUNT(*)::int
+        FROM app_estimate_lines l
+        WHERE l.estimate_id = e.id
+          AND l.line_type = 'position'
+          AND LOWER(COALESCE(l.source, '')) = 'gsn'
+          AND COALESCE(NULLIF(TRIM(l.code), ''), NULLIF(TRIM(l.original_code), '')) IS NOT NULL
+    ), 0),
+    COALESCE((
+        SELECT COUNT(*)::int
+        FROM app_estimate_lines l
+        WHERE l.estimate_id = e.id
+          AND l.line_type = 'position'
+          AND LOWER(COALESCE(l.source, '')) = 'gsn'
+          AND l.calc_status IN ('done', 'failed', 'dead')
+          AND COALESCE(NULLIF(TRIM(l.code), ''), NULLIF(TRIM(l.original_code), '')) IS NOT NULL
+    ), 0),
+    e.created_at, e.updated_at
+FROM app_estimates e
+LEFT JOIN estimate_calc_state cs ON cs.estimate_id = e.id`
 	args := []any{}
 	if !includeAll {
-		query += ` WHERE company_id = $1`
+		query += ` WHERE e.company_id = $1`
 		args = append(args, companyID)
 	}
-	query += ` ORDER BY code, id`
+	query += ` ORDER BY e.code, e.id`
 	rows, err := s.treeDB.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -1383,7 +1457,7 @@ func (s *FileStore) listEstimateHeadersDB(ctx context.Context, companyID string,
 	items := []domain.Estimate{}
 	for rows.Next() {
 		var item domain.Estimate
-		if err := rows.Scan(&item.ID, &item.CompanyID, &item.ObjectID, &item.Code, &item.Title, &item.Description, &item.District, &item.FgisSetID, &item.Status, &item.Total, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.CompanyID, &item.ObjectID, &item.Code, &item.Title, &item.Description, &item.District, &item.FgisSetID, &item.Status, &item.Total, &item.CalcLinesTotal, &item.CalcLinesDone, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -1919,6 +1993,7 @@ type EstimateCalcSummary struct {
 	Processed  int     `json:"processed"`
 	Errors     int     `json:"errors"`
 	GrandTotal float64 `json:"grandTotal"`
+	Status     string  `json:"status,omitempty"`
 }
 
 func (s *FileStore) EstimateLineQuantityContext(ctx context.Context, estimateID, lineID string) (quantity float64, rawText string, err error) {
@@ -2173,6 +2248,11 @@ WHERE estimate_id = $1 AND id = $2
 			return err
 		}
 	}
+	if lineStatus == "dead" {
+		if err := reconcileEstimateCalcStateTx(ctx, tx, job.EstimateID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 
@@ -2223,12 +2303,27 @@ func (s *FileStore) SummarizeEstimateCalcStatus(ctx context.Context, companyID, 
 
 	var summary EstimateCalcSummary
 	err := s.treeDB.QueryRow(ctx, `
-SELECT lines_total, lines_done, lines_errors, grand_total
+SELECT lines_total, lines_done, lines_errors, grand_total, COALESCE(status, '')
 FROM estimate_calc_state
 WHERE estimate_id = $1
-`, estimateID).Scan(&summary.Total, &summary.Processed, &summary.Errors, &summary.GrandTotal)
-	if err == nil && summary.Total > 0 {
-		return summary, nil
+`, estimateID).Scan(&summary.Total, &summary.Processed, &summary.Errors, &summary.GrandTotal, &summary.Status)
+	if err == nil {
+		status := strings.TrimSpace(summary.Status)
+		if status == "starting" || status == "running" {
+			if recErr := s.reconcileEstimateCalcStateIfIdle(ctx, estimateID); recErr == nil {
+				err = s.treeDB.QueryRow(ctx, `
+SELECT lines_total, lines_done, lines_errors, grand_total, COALESCE(status, '')
+FROM estimate_calc_state
+WHERE estimate_id = $1
+`, estimateID).Scan(&summary.Total, &summary.Processed, &summary.Errors, &summary.GrandTotal, &summary.Status)
+			}
+		}
+		if err == nil {
+			status = strings.TrimSpace(summary.Status)
+			if summary.Total > 0 || status == "starting" || status == "running" {
+				return summary, nil
+			}
+		}
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return summary, err
@@ -2378,6 +2473,21 @@ FROM app_estimates WHERE id = $1
 	}
 	for attempt := 0; attempt < 120; attempt++ {
 		if s.markEstimateCalcStartJob(id) {
+			if _, err := s.treeDB.Exec(ctx, `
+INSERT INTO estimate_calc_state (
+    estimate_id, generation, district, fgis_set_id, status,
+    grand_total, lines_total, lines_done, lines_errors, updated_at
+) VALUES ($1, $2, $3, $4, 'starting', 0, 0, 0, 0, now())
+ON CONFLICT (estimate_id) DO UPDATE SET
+    generation = EXCLUDED.generation,
+    district = EXCLUDED.district,
+    fgis_set_id = EXCLUDED.fgis_set_id,
+    status = 'starting',
+    updated_at = now()
+`, estimate.ID, estimate.CalcGeneration, estimate.District, estimate.FgisSetID); err != nil {
+				s.unmarkEstimateCalcStartJob(id)
+				return err
+			}
 			go s.runEstimateCalcStart(observability.DetachCorrelation(ctx), estimate, settings.CalcStartBatchSize, fullRebuild)
 			return nil
 		}
@@ -2480,8 +2590,21 @@ ORDER BY sort_order, id
 			_ = tx.Rollback(ctx)
 			return err
 		}
+		if len(enqueueCandidates) == 0 {
+			if _, err := tx.Exec(ctx, `
+UPDATE estimate_calc_state
+SET status = 'done', updated_at = now()
+WHERE estimate_id = $1
+`, estimate.ID); err != nil {
+				_ = tx.Rollback(ctx)
+				return err
+			}
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return err
+		}
+		if len(enqueueCandidates) == 0 {
+			return nil
 		}
 	} else if len(enqueueCandidates) > 0 {
 		tx, err := s.treeDB.Begin(ctx)
@@ -2519,6 +2642,13 @@ ON CONFLICT (estimate_id) DO UPDATE SET
 			return err
 		}
 	} else {
+		if _, err := s.treeDB.Exec(ctx, `
+UPDATE estimate_calc_state
+SET status = 'done', updated_at = now()
+WHERE estimate_id = $1 AND status = 'starting'
+`, estimate.ID); err != nil {
+			return err
+		}
 		return nil
 	}
 
