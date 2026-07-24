@@ -1,0 +1,13 @@
+.git
+.cursor
+.old
+backups
+data
+docs
+tools
+*.exe
+*.log
+tmp-*
+06_10_*
+*.txt
+*.jpg

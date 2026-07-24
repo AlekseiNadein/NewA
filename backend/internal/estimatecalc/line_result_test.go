@@ -35,6 +35,9 @@ func TestBuildLineCalcSnapshotWork(t *testing.T) {
 	if snap.ResourcesText != "С1111-0301-0062.8/М1234-0001.8" {
 		t.Fatalf("resourcesText = %q", snap.ResourcesText)
 	}
+	if snap.Determinant != "" {
+		t.Fatalf("work line determinant = %q, want empty", snap.Determinant)
+	}
 }
 
 func TestBuildLineCalcSnapshotResourcePosition(t *testing.T) {
@@ -61,8 +64,37 @@ func TestBuildLineCalcSnapshotResourcePosition(t *testing.T) {
 	if snap.Resources[0].Consumption != 3 || snap.Resources[0].Determinant != "X" {
 		t.Fatalf("resource = %+v", snap.Resources[0])
 	}
+	if snap.Determinant != "X" {
+		t.Fatalf("line determinant = %q, want X", snap.Determinant)
+	}
 	if snap.ResourcesText != "С1084-0303-0032.3" {
 		t.Fatalf("resourcesText = %q", snap.ResourcesText)
+	}
+}
+
+func TestApplyDeterminantAssignment(t *testing.T) {
+	snap := LineCalcSnapshot{
+		Code:        "С1084-0303-0032",
+		Determinant: "X",
+		Resources: []ResourceContribution{
+			{Code: "С1084-0303-0032", Determinant: "X", Consumption: 3},
+			{Code: "М1234-0001", Determinant: "A", Consumption: 1},
+		},
+	}
+	ApplyDeterminantAssignment(&snap, "14")
+	if snap.Determinant != "14" {
+		t.Fatalf("line determinant = %q, want 14", snap.Determinant)
+	}
+	if snap.Resources[0].Determinant != "14" {
+		t.Fatalf("self resource determinant = %q, want 14", snap.Resources[0].Determinant)
+	}
+	if snap.Resources[1].Determinant != "A" {
+		t.Fatalf("nested resource determinant = %q, want A", snap.Resources[1].Determinant)
+	}
+
+	ApplyDeterminantAssignment(&snap, "  ")
+	if snap.Determinant != "14" {
+		t.Fatalf("empty assignment should not clear determinant, got %q", snap.Determinant)
 	}
 }
 

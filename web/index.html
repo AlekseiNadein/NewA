@@ -31,68 +31,20 @@
         <div class="hero-brand">
           <img class="hero-logo" src="/Abc_Icon.ico" alt="" width="64" height="64" />
           <div>
-            <p class="eyebrow">Автоматизация выпуска смет на платформе SaaS 2026.6</p>
+            <p class="eyebrow">Автоматизация выпуска смет на платформе SaaS 2026.7</p>
             <h2>ABC-RU WEB</h2>
           </div>
         </div>
-        <button id="logoutButton" class="secondary hidden">Выйти</button>
+        <div class="hero-actions">
+          <a id="projectStatusButton" class="secondary button-link hidden" href="/projectStatusDesktop/">Состояние проектов</a>
+          <button id="logoutButton" class="secondary hidden">Выйти</button>
+        </div>
       </section>
 
-      <section id="loginView" class="card login-card">
-        <h2>Вход</h2>
-        <p class="muted">Укажите ФИО или e-mail и пароль. Компания нужна при входе по ФИО; при входе по e-mail её можно не заполнять.</p>
-        <form id="loginForm" class="grid-form" method="post" action="#" onsubmit="return false">
-          <label>
-            Компания
-            <input name="companyName" type="text" autocomplete="organization" />
-          </label>
-          <label>
-            ФИО или e-mail
-            <input name="name" type="text" autocomplete="username" required />
-          </label>
-          <label>
-            Пароль
-            <input name="password" type="password" autocomplete="current-password" required />
-          </label>
-          <button type="submit">Войти</button>
-        </form>
-        <p class="auth-switch">
-          Нет учётной записи?
-          <button id="showRegisterButton" class="link-button" type="button">Зарегистрироваться</button>
-        </p>
+      <section id="loginView" class="card login-card hidden" hidden>
+        <p class="muted">Перенаправление на единую страницу входа…</p>
       </section>
-
-      <section id="registerView" class="card login-card hidden">
-        <h2>Регистрация</h2>
-        <p class="muted">После регистрации администратор проверит заявку и откроет доступ к системе.</p>
-        <form id="registerForm" class="stack-form register-form" method="post" action="#" onsubmit="return false">
-          <label>
-            Компания
-            <input name="companyName" type="text" autocomplete="organization" required />
-          </label>
-          <label>
-            ФИО пользователя
-            <input name="name" type="text" autocomplete="name" required />
-          </label>
-          <label>
-            E-mail
-            <input name="email" type="email" autocomplete="email" required />
-          </label>
-          <label>
-            Пароль
-            <input name="password" type="password" autocomplete="new-password" required />
-          </label>
-          <label>
-            Повтор пароля
-            <input name="passwordConfirm" type="password" autocomplete="new-password" required />
-          </label>
-          <button type="submit">Зарегистрироваться</button>
-        </form>
-        <p class="auth-switch">
-          Уже есть учётная запись?
-          <button id="showLoginButton" class="link-button" type="button">Войти</button>
-        </p>
-      </section>
+      <section id="registerView" class="card login-card hidden" hidden></section>
 
       <section id="appView" class="app-shell hidden">
         <aside class="sidebar card">
@@ -345,7 +297,6 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-    <script src="/login-draft.js?v=20260629c"></script>
-    <script src="/app.js?v=20260703d"></script>
+    <script src="/app.js?v=20260718a"></script>
   </body>
 </html>

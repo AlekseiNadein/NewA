@@ -96,7 +96,7 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		return fmt.Errorf("read GSN record %q: %w", code, err)
 	}
 
-	quantity, err := w.resolveJobQuantity(jobCtx, job)
+	quantity, rawText, err := w.resolveJobQuantity(jobCtx, job)
 	if err != nil {
 		observability.RecordCalcError("quantity")
 		return fmt.Errorf("resolve line quantity: %w", err)
@@ -109,6 +109,7 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		observability.RecordCalcError("pricing")
 		return fmt.Errorf("price record %q: %w", code, err)
 	}
+	estimatecalc.ApplyDeterminantAssignment(&snap, store.SourceDataDeterminantFromRawText(rawText))
 
 	calcJSON, err := json.Marshal(map[string]any{
 		"record":        record,
@@ -135,16 +136,19 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 }
 
 func (w *Worker) processUserCatalogJob(ctx context.Context, job store.EstimateCalcJob, code string) error {
-	fields, err := store.ParseSourceDataPositionFields(job.RawText)
-	if err != nil {
-		observability.RecordCalcError("user_catalog_parse")
-		return fmt.Errorf("parse user catalog line %q: %w", code, err)
-	}
-
-	quantity, err := w.resolveJobQuantity(ctx, job)
+	quantity, rawText, err := w.resolveJobQuantity(ctx, job)
 	if err != nil {
 		observability.RecordCalcError("quantity")
 		return fmt.Errorf("resolve line quantity: %w", err)
+	}
+	if strings.TrimSpace(rawText) == "" {
+		rawText = job.RawText
+	}
+
+	fields, err := store.ParseSourceDataPositionFields(rawText)
+	if err != nil {
+		observability.RecordCalcError("user_catalog_parse")
+		return fmt.Errorf("parse user catalog line %q: %w", code, err)
 	}
 
 	name := fields.Name
@@ -182,11 +186,35 @@ func (w *Worker) processUserCatalogJob(ctx context.Context, job store.EstimateCa
 		unitPrice = estimatecalc.RoundMoney(unitPrice)
 	}
 
+	determinant := store.SourceDataDeterminantFromRawText(rawText)
+	snap := estimatecalc.LineCalcSnapshot{
+		Code:         code,
+		OriginalCode: "",
+		Name:         name,
+		Unit:         unit,
+		Determinant:  determinant,
+		Quantity:     quantity,
+		UnitPrice:    unitPrice,
+		Total:        total,
+	}
+	if determinant != "" {
+		snap.Resources = []estimatecalc.ResourceContribution{{
+			Code:          code,
+			Determinant:   determinant,
+			Consumption:   quantity,
+			Name:          name,
+			Unit:          unit,
+			EstimatePrice: unitPrice,
+		}}
+		snap.ResourcesText = estimatecalc.FormatResourcesText(snap.Resources)
+	}
+
 	record := map[string]any{
 		"code":           code,
 		"originalCode":   "",
 		"name":           name,
 		"unit":           unit,
+		"determinant":    determinant,
 		"isWork":         false,
 		"unitPriceText":  formatCalcMoneyText(unitPrice),
 		"unitPriceIndex": "",
@@ -210,6 +238,7 @@ func (w *Worker) processUserCatalogJob(ctx context.Context, job store.EstimateCa
 		UnitPrice:    unitPrice,
 		Total:        total,
 		CalcJSON:     calcJSON,
+		Snapshot:     &snap,
 	})
 }
 
@@ -221,10 +250,10 @@ func formatCalcMoneyText(value float64) string {
 	return strings.ReplaceAll(strconv.FormatFloat(value, 'f', 2, 64), ".", ",")
 }
 
-func (w *Worker) resolveJobQuantity(ctx context.Context, job store.EstimateCalcJob) (float64, error) {
+func (w *Worker) resolveJobQuantity(ctx context.Context, job store.EstimateCalcJob) (float64, string, error) {
 	storedQty := job.Quantity
 	rawText := job.RawText
-	if storedQty <= 0 && strings.TrimSpace(rawText) == "" {
+	if storedQty <= 0 || strings.TrimSpace(rawText) == "" {
 		lineQty, lineRaw, err := w.store.EstimateLineQuantityContext(ctx, job.EstimateID, job.LineID)
 		if err == nil {
 			if storedQty <= 0 {
@@ -235,7 +264,8 @@ func (w *Worker) resolveJobQuantity(ctx context.Context, job store.EstimateCalcJ
 			}
 		}
 	}
-	return store.ResolveEstimateLineQuantity(storedQty, rawText)
+	quantity, err := store.ResolveEstimateLineQuantity(storedQty, rawText)
+	return quantity, rawText, err
 }
 
 type Manager struct {

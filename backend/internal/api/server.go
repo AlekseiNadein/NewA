@@ -477,11 +477,14 @@ func (s *Server) handleEstimateCalcStart(w http.ResponseWriter, r *http.Request,
 
 	includeAll := claims.Role == domain.RoleSuperAdmin
 	force := r.URL.Query().Get("force") == "1" || strings.EqualFold(r.URL.Query().Get("force"), "true")
-	if err := s.store.StartEstimateCalc(r.Context(), estimateID, claims.CompanyID, includeAll, force); err != nil {
+	generation, err := s.store.StartEstimateCalc(r.Context(), estimateID, claims.CompanyID, includeAll, force)
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"generation": generation,
+	})
 }
 
 func (s *Server) handleEstimateCalcBatch(w http.ResponseWriter, r *http.Request, estimateID string) {

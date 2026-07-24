@@ -243,6 +243,7 @@ let editorOpeningEstimateId = null;
 let estimateCalcAwaitingServer = new Set();
 const estimateCalcProgressTargets = new Map();
 let estimateCalcBatchControllers = new Map();
+const estimateCalcRestartCoalesce = new Map();
 let estimateCalcApplyToken = 0;
 let estimateCalcProgressAnimFrame = 0;
 let editorTableInteractionEnabled = false;
@@ -254,6 +255,7 @@ const estimateTableRowRefreshPendingIds = new Map();
 const LARGE_ESTIMATE_CALC_LINE_THRESHOLD = 250;
 const LARGE_ESTIMATE_CALC_STATUS_POLL_MS = 2000;
 const LARGE_ESTIMATE_CALC_APPLY_CHUNK = 120;
+const ESTIMATE_CALC_RESTART_DEBOUNCE_MS = 200;
 let loadAppRequestId = 0;
 let loadAppSuppressMissingSession = true;
 let licenseGateVersion = 0;
@@ -278,6 +280,7 @@ const els = {
   registerView: document.querySelector("#registerView"),
   appView: document.querySelector("#appView"),
   logoutButton: document.querySelector("#logoutButton"),
+  projectStatusButton: document.querySelector("#projectStatusButton"),
   loginForm: document.querySelector("#loginForm"),
   registerForm: document.querySelector("#registerForm"),
   showRegisterButton: document.querySelector("#showRegisterButton"),
@@ -339,62 +342,21 @@ const els = {
   message: document.querySelector("#message"),
 };
 
-els.loginForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const credentials = formData(els.loginForm);
-  saveLoginDraft(LOGIN_DRAFT_KEY, credentials);
-
-  try {
-    const result = await api("/api/auth/login", {
-      method: "POST",
-      body: credentials,
-    });
-    if (!result.access?.app) {
-      await api("/api/auth/logout", { method: "POST" }).catch(() => {});
-      throw new Error("Доступ к системе не открыт. Ожидайте подтверждения администратора");
-    }
-
-    loadAppRequestId += 1;
-    const requestId = loadAppRequestId;
-    state.me = result.user;
-    localStorage.removeItem("nav_token");
-    localStorage.removeItem("nav_admin_token");
-    renderShell();
-    showMessage("Вход выполнен", "ok");
-    await bootstrapAppData(requestId);
-  } catch (error) {
-    applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
-    showMessage(error.message, "error");
+function redirectToUnifiedLogin(reason) {
+  if (window.location.pathname === "/login" || window.location.pathname === "/login.html") {
+    return;
   }
-});
+  const next = `${window.location.pathname}${window.location.search}${window.location.hash}` || "/";
+  const url = new URL("/login", window.location.origin);
+  url.searchParams.set("next", next.startsWith("/") ? next : "/");
+  if (reason) {
+    url.searchParams.set("reason", reason);
+  }
+  window.location.replace(url.pathname + url.search);
+}
 
 bootstrapLoginForm();
 void loadApp();
-
-els.registerForm?.addEventListener("submit", async (event) => {
-  event.preventDefault();
-
-  const data = formData(els.registerForm);
-  if (data.password !== data.passwordConfirm) {
-    showMessage("Пароли не совпадают", "error");
-    return;
-  }
-
-  try {
-    const result = await api("/api/auth/register", {
-      method: "POST",
-      body: data,
-    });
-    els.registerForm.reset();
-    showAuthScreen("login");
-    showMessage(result.message || "Заявка отправлена", "ok");
-  } catch (error) {
-    showMessage(error.message, "error");
-  }
-});
-
-els.showRegisterButton?.addEventListener("click", () => showAuthScreen("register"));
-els.showLoginButton?.addEventListener("click", () => showAuthScreen("login"));
 
 els.logoutButton?.addEventListener("click", async () => {
   await releaseAllEstimateLocks();
@@ -412,8 +374,7 @@ els.logoutButton?.addEventListener("click", async () => {
   state.appSettingsLoaded = false;
   localStorage.removeItem("nav_token");
   localStorage.removeItem("nav_admin_token");
-  renderShell();
-  applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
+  redirectToUnifiedLogin("logout");
 });
 
 window.addEventListener("beforeunload", () => {
@@ -1064,15 +1025,14 @@ async function loadApp() {
       localStorage.removeItem("nav_token");
       localStorage.removeItem("nav_admin_token");
     }
+    if (unauthorized) {
+      redirectToUnifiedLogin(hadSession ? "expired" : "required");
+      return;
+    }
     renderShell();
-    applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
-    if (unauthorized && hadSession) {
-      showMessage("Сессия истекла, войдите снова", "error");
-    } else if (!unauthorized) {
-      const hideMissingSession = suppressMissingSession && /missing session/i.test(message);
-      if (!hideMissingSession) {
-        showMessage(message, "error");
-      }
+    const hideMissingSession = suppressMissingSession && /missing session/i.test(message);
+    if (!hideMissingSession) {
+      showMessage(message, "error");
     }
   }
 }
@@ -1146,17 +1106,14 @@ function userRoleLabel(user) {
 
 function renderShell() {
   const loggedIn = Boolean(state.me);
-  els.loginView.classList.toggle("hidden", loggedIn || state.authScreen !== "login");
-  els.registerView.classList.toggle("hidden", loggedIn || state.authScreen !== "register");
+  els.loginView?.classList.add("hidden");
+  els.registerView?.classList.add("hidden");
   els.appView.classList.toggle("hidden", !loggedIn);
   els.logoutButton.classList.toggle("hidden", !loggedIn);
+  els.projectStatusButton?.classList.toggle("hidden", !loggedIn);
 
   if (!loggedIn) {
-    if (!state.authScreen) {
-      showAuthScreen("login");
-    } else {
-      applyLoginDraft(els.loginForm, LOGIN_DRAFT_KEY);
-    }
+    redirectToUnifiedLogin("required");
     return;
   }
 
@@ -3507,10 +3464,15 @@ function estimateCalcInProgress(estimateId, items, target = null) {
 }
 
 function getCalcProgressGrandTotalForDisplay(target, items, estimateId = "") {
+  const itemsTotal = estimateGrandTotalForDisplay(items);
   if (estimateCalcInProgress(estimateId, items, target) && target?.countedDoneLineIds) {
-    return target.runningGrandTotal ?? 0;
+    const running = Number(target.runningGrandTotal);
+    if (Number.isFinite(running) && running > 0) {
+      return running;
+    }
+    return itemsTotal;
   }
-  return estimateGrandTotalForDisplay(items);
+  return itemsTotal;
 }
 
 function isGsnCalcStatusEntry(item, status) {
@@ -3867,7 +3829,9 @@ function applyServerCalcSummary(estimateId, estimate, summary) {
     return;
   }
   const total = Number(summary.total) || 0;
-  if (!total) {
+  const status = String(summary?.status || "").trim();
+  const summaryGrandTotal = Number(summary.grandTotal) || 0;
+  if (!total && status !== "done" && summaryGrandTotal <= 0) {
     return;
   }
   const processed = Number(summary.processed) || 0;
@@ -4254,15 +4218,37 @@ function extractSourceDataPositionCipher(firstField) {
 
 function extractSourceDataPositionOriginalCode(cipherField) {
   const raw = String(cipherField || "").trim();
-  const open = raw.indexOf("(");
+  let searchFrom = 0;
+  while (searchFrom < raw.length) {
+    const open = raw.indexOf("(", searchFrom);
+    if (open < 0) {
+      return "";
+    }
+    const close = raw.indexOf(")", open + 1);
+    if (close < 0) {
+      return "";
+    }
+    const inner = raw.slice(open + 1, close).trim();
+    // (=...) is determinant assignment, not original code.
+    if (!inner.startsWith("=")) {
+      return inner;
+    }
+    searchFrom = close + 1;
+  }
+  return "";
+}
+
+function extractSourceDataDeterminantAssignment(cipherField) {
+  const raw = String(cipherField || "").trim();
+  const open = raw.indexOf("(=");
   if (open < 0) {
     return "";
   }
-  const close = raw.indexOf(")", open + 1);
+  const close = raw.indexOf(")", open + 2);
   if (close < 0) {
     return "";
   }
-  return raw.slice(open + 1, close).trim();
+  return raw.slice(open + 2, close).trim();
 }
 
 function parseSourceDataLocalizedNumber(raw) {
@@ -5046,7 +5032,39 @@ async function reconcileEstimateCalcStatusesFromServer(estimateId, { refreshTabl
     const response = await api(`/api/estimates/${estimateId}/calc-status${large ? "?lite=1" : ""}`);
     const statuses = response.items || [];
     enrichEditorEstimateItems(estimate.items);
-    const pairs = collectEstimateCalcStatusPairsToApply(estimate.items, statuses);
+    let pairs = collectEstimateCalcStatusPairsToApply(estimate.items, statuses);
+    if (!pairs.length && estimateHasInFlightGsnCalc(estimate.items)) {
+      pairs = matchCalcStatusesToItems(estimate.items, statuses).filter(({ item, status }) => {
+        if (!estimateLineNeedsGsnCalc(item)) {
+          return false;
+        }
+        return estimateCalcTerminalStatus(String(status?.status || "").trim());
+      });
+    }
+    if (!pairs.length) {
+      try {
+        const summary = await api(`/api/estimates/${estimateId}/calc-status?summary=1`);
+        if (isCalcSummaryComplete(summary) && Number(summary.grandTotal) > 0) {
+          applyServerCalcSummary(estimateId, estimate, summary);
+          const retry = await api(`/api/estimates/${estimateId}/calc-status${large ? "?lite=1" : ""}`);
+          const retryStatuses = retry.items || [];
+          pairs = collectEstimateCalcStatusPairsToApply(estimate.items, retryStatuses);
+          if (!pairs.length) {
+            pairs = matchCalcStatusesToItems(estimate.items, retryStatuses).filter(({ item, status }) => {
+              if (!estimateLineNeedsGsnCalc(item)) {
+                return false;
+              }
+              return estimateCalcTerminalStatus(String(status?.status || "").trim());
+            });
+          }
+          if (pairs.length) {
+            statuses = retryStatuses;
+          }
+        }
+      } catch {
+        // summary fallback is best-effort
+      }
+    }
     if (!pairs.length) {
       return false;
     }
@@ -5676,6 +5694,7 @@ function getEstimateCalcBatchController(estimateId) {
       listenerPromise: null,
       session: 0,
       cursor: { applied: 0, generation: 0 },
+      fetchAbort: null,
     };
     estimateCalcBatchControllers.set(estimateId, ctrl);
   }
@@ -5691,6 +5710,10 @@ async function abortEstimateCalcBatchSession(estimateId) {
   const ctrl = getEstimateCalcBatchController(estimateId);
   ctrl.session += 1;
   ctrl.stopped = true;
+  if (ctrl.fetchAbort) {
+    ctrl.fetchAbort.abort();
+    ctrl.fetchAbort = null;
+  }
   stopCalcProgressAnimation();
   estimateTableRowRefreshPendingIds.delete(estimateId);
   const pending = ctrl.listenerPromise;
@@ -5769,6 +5792,9 @@ async function applyEstimateCalcBatchResponse(estimate, batch, { expectedGenerat
 
   if (!pairs.length) {
     ensureEstimateCalcProgressTarget(estimate.id, estimate);
+    if (batch.done) {
+      await reconcileEstimateCalcStatusesFromServer(estimate.id);
+    }
     syncRunningGrandTotalFromBatch(estimate.id, estimate, batch);
     updateCalcProgressTarget(estimate.id, batchProgress, estimate, { useProgressOnly: true });
     if (
@@ -5853,7 +5879,23 @@ async function runEstimateCalcBatchListener(estimateId, listenSession) {
           generation: String(ctrl.cursor.generation || 0),
           wait: shouldWait ? "1" : "0",
         });
-        const batch = await api(`/api/estimates/${estimateId}/calc-batch?${params.toString()}`);
+        const fetchAbort = new AbortController();
+        ctrl.fetchAbort = fetchAbort;
+        let batch;
+        try {
+          batch = await api(`/api/estimates/${estimateId}/calc-batch?${params.toString()}`, {
+            signal: fetchAbort.signal,
+          });
+        } catch (error) {
+          if (error?.name === "AbortError") {
+            break;
+          }
+          throw error;
+        } finally {
+          if (ctrl.fetchAbort === fetchAbort) {
+            ctrl.fetchAbort = null;
+          }
+        }
         if (ctrl.stopped || ctrl.session !== session) {
           break;
         }
@@ -5956,10 +5998,10 @@ async function startEstimateCalcBatchListener(estimateId) {
   void runEstimateCalcBatchListener(estimateId, ctrl.session);
 }
 
-async function restartEstimateCalculationAfterContextChange(estimateId) {
+async function runFastEstimateCalculationRestart(estimateId, options = {}) {
   const estimate = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
   if (!estimate || state.estimateViewMode !== "table") {
-    return;
+    return null;
   }
 
   await abortEstimateCalcBatchSession(estimateId);
@@ -5970,32 +6012,88 @@ async function restartEstimateCalculationAfterContextChange(estimateId) {
   syncEstimateCalcDisplayAfterReset(estimate);
 
   try {
-    await cancelEstimateCalculation(estimateId);
-  } catch (error) {
-    clearEstimateCalcAwaitingServer(estimateId);
-    showMessage(error.message || "Не удалось отменить расчёт сметы", "error");
-    return;
-  }
-
-  try {
+    estimateCalcPollBlockedByPersist.add(estimateId);
     await persistOpenEstimate(estimateId, { requireSave: true });
-    await startEstimateCalculation(estimateId);
+    const response = await startEstimateCalculation(estimateId, { force: true });
+    resetEstimateCalcBatchCursor(estimateId, response?.generation || 0);
     estimateCalcPollBlockedByPersist.delete(estimateId);
     const ctrl = getEstimateCalcBatchController(estimateId);
     ctrl.stopped = false;
     void runEstimateCalcBatchListener(estimateId, ctrl.session);
     startCalcProgressAnimation(estimateId);
     syncEstimateCalcDisplayAfterReset(estimate);
+    await reconcileEstimateCalcStatusesFromServer(estimateId);
+    if (options.successMessage) {
+      showMessage(options.successMessage, "ok");
+    }
+    return response;
   } catch (error) {
-    clearEstimateCalcAwaitingServer(estimateId);
-    showMessage(error.message || "Не удалось перезапустить расчёт сметы", "error");
-    // Попытка поднять listener даже при ошибке старта — batch может догнать уже идущий расчёт.
+    estimateCalcPollBlockedByPersist.delete(estimateId);
+    const current = state.openEstimates.find((item) => sameEstimateId(item.id, estimateId));
+    await reconcileEstimateCalcStatusesFromServer(estimateId).catch(() => {});
+    if (current && estimateHasInFlightGsnCalc(current.items)) {
+      markEstimateCalcAwaitingServer(estimateId);
+    } else {
+      clearEstimateCalcAwaitingServer(estimateId);
+    }
     const ctrl = getEstimateCalcBatchController(estimateId);
     if (!ctrl.listenerPromise) {
       ctrl.stopped = false;
       void runEstimateCalcBatchListener(estimateId, ctrl.session);
     }
+    if (options.errorMessage !== false) {
+      showMessage(error.message || options.errorMessage || "Не удалось перезапустить расчёт сметы", "error");
+    }
+    throw error;
   }
+}
+
+function getEstimateCalcRestartCoalesceEntry(estimateId) {
+  let entry = estimateCalcRestartCoalesce.get(estimateId);
+  if (!entry) {
+    entry = { timer: 0, pending: false, inflight: null };
+    estimateCalcRestartCoalesce.set(estimateId, entry);
+  }
+  return entry;
+}
+
+async function coalescedRestartEstimateCalculation(estimateId) {
+  const entry = getEstimateCalcRestartCoalesceEntry(estimateId);
+  if (entry.inflight) {
+    entry.pending = true;
+    return entry.inflight;
+  }
+
+  entry.inflight = (async () => {
+    do {
+      entry.pending = false;
+      await runFastEstimateCalculationRestart(estimateId, { errorMessage: false });
+    } while (entry.pending);
+  })();
+
+  try {
+    await entry.inflight;
+  } catch (error) {
+    showMessage(error.message || "Не удалось перезапустить расчёт сметы", "error");
+  } finally {
+    entry.inflight = null;
+  }
+}
+
+function scheduleRestartEstimateCalculationAfterContextChange(estimateId) {
+  const entry = getEstimateCalcRestartCoalesceEntry(estimateId);
+  entry.pending = true;
+  if (entry.timer) {
+    window.clearTimeout(entry.timer);
+  }
+  entry.timer = window.setTimeout(() => {
+    entry.timer = 0;
+    void coalescedRestartEstimateCalculation(estimateId);
+  }, ESTIMATE_CALC_RESTART_DEBOUNCE_MS);
+}
+
+async function restartEstimateCalculationAfterContextChange(estimateId) {
+  scheduleRestartEstimateCalculationAfterContextChange(estimateId);
 }
 
 async function pollEstimateCalcStatus(estimateId) {
@@ -8166,25 +8264,11 @@ async function forceRecalculateOpenEstimate(estimateId) {
     return;
   }
   try {
-    await abortEstimateCalcBatchSession(estimateId);
-    resetGsnLinesForTableCalculation(estimate.items);
-    restartEstimateTableCalculation(estimateId, estimate);
-    resetEstimateCalcBatchCursor(estimateId, 0);
-    markEstimateCalcAwaitingServer(estimateId);
-    syncEstimateCalcDisplayAfterReset(estimate);
-    await cancelEstimateCalculation(estimateId);
-    await persistOpenEstimate(estimateId, { requireSave: true });
-    await startEstimateCalculation(estimateId, { force: true });
-    estimateCalcPollBlockedByPersist.delete(estimateId);
-    const ctrl = getEstimateCalcBatchController(estimateId);
-    ctrl.stopped = false;
-    void runEstimateCalcBatchListener(estimateId, ctrl.session);
-    startCalcProgressAnimation(estimateId);
-    syncEstimateCalcDisplayAfterReset(estimate);
-    showMessage("Принудительный пересчёт сметы запущен", "ok");
-  } catch (error) {
-    clearEstimateCalcAwaitingServer(estimateId);
-    showMessage(error.message || "Не удалось пересчитать смету", "error");
+    await runFastEstimateCalculationRestart(estimateId, {
+      successMessage: "Принудительный пересчёт сметы запущен",
+    });
+  } catch {
+    // runFastEstimateCalculationRestart already shows the error message.
   }
 }
 
@@ -8197,7 +8281,7 @@ async function startEstimateCalculation(estimateId, options = {}) {
   }
   const force = Boolean(options.force);
   const query = force ? "?force=1" : "";
-  await api(`/api/estimates/${estimateId}/calc${query}`, { method: "POST" });
+  return api(`/api/estimates/${estimateId}/calc${query}`, { method: "POST" });
 }
 
 function treeCalcScopeKey(kind, id) {
@@ -10181,6 +10265,9 @@ async function persistOpenEstimate(estimateId, options = {}) {
         if (idChanges.size) {
           remapEstimateTableLineIds(editorEstimate, idChanges);
         }
+        if (estimateHasInFlightGsnCalc(editorEstimate.items)) {
+          void reconcileEstimateCalcStatusesFromServer(estimateId);
+        }
       } else if (Array.isArray(updated.items)) {
         const localItems = editorEstimate.items || [];
         const localById = new Map(localItems.map((item) => [item.id, item]));
@@ -11460,12 +11547,15 @@ async function api(path, options = {}) {
     headers,
     credentials: "include",
     body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: options.signal,
   });
 
   const isJSON = response.headers.get("content-type")?.includes("application/json");
   const payload = isJSON ? await response.json() : null;
   if (!response.ok) {
-    throw new Error(payload?.error || `HTTP ${response.status}`);
+    const error = new Error(payload?.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }

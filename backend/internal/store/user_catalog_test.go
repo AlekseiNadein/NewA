@@ -28,6 +28,9 @@ func TestParseSourceDataPositionFieldsWithIndexMarker(t *testing.T) {
 	if fields.SourceCode != "ТПрайс-лист" {
 		t.Fatalf("source code = %q", fields.SourceCode)
 	}
+	if got := SourceDataDeterminantFromRawText(raw); got != "14" {
+		t.Fatalf("determinant = %q, want 14", got)
+	}
 	if !fields.HasTotal || fields.Total != 359 {
 		t.Fatalf("total = %v hasTotal=%v", fields.Total, fields.HasTotal)
 	}
@@ -39,6 +42,26 @@ func TestParseSourceDataPositionFieldsWithIndexMarker(t *testing.T) {
 	}
 	if UserCatalogPositionNeedsLookup(fields) {
 		t.Fatal("expected complete source data, lookup not needed")
+	}
+}
+
+func TestExtractSourceDataDeterminantAssignment(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"ТПрайс-лист(=14)", "14"},
+		{"СТПрайс подрядчика(=13)", "13"},
+		{"С1084-0303-0032(=12)", "12"},
+		{"С1084-0303-0032 (KLink=Е0624-003-02)", ""},
+		{"Е0624-004-06 (РМ59092РМ60193)", ""},
+		{"Е0624-004-06 (РМ1)(=9)", "9"},
+		{"CODE", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := ExtractSourceDataDeterminantAssignment(tc.in); got != tc.want {
+			t.Fatalf("ExtractSourceDataDeterminantAssignment(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 

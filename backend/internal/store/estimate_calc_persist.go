@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_lines (
     original_code TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL DEFAULT '',
     unit TEXT NOT NULL DEFAULT '',
+    determinant TEXT NOT NULL DEFAULT '',
     quantity NUMERIC(18, 6) NOT NULL DEFAULT 0,
     unit_price NUMERIC(18, 2) NOT NULL DEFAULT 0,
     total NUMERIC(18, 2) NOT NULL DEFAULT 0,
@@ -48,6 +49,8 @@ CREATE INDEX IF NOT EXISTS idx_estimate_calc_lines_estimate_gen
     ON estimate_calc_lines(estimate_id, generation);
 CREATE INDEX IF NOT EXISTS idx_estimate_calc_lines_line
     ON estimate_calc_lines(estimate_id, line_id);
+
+ALTER TABLE estimate_calc_lines ADD COLUMN IF NOT EXISTS determinant TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS estimate_calc_line_resources (
     estimate_id TEXT NOT NULL,
@@ -75,7 +78,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_resources (
     resource_code TEXT NOT NULL,
     determinant TEXT NOT NULL DEFAULT '',
     total_consumption NUMERIC(18, 6) NOT NULL DEFAULT 0,
-    estimate_price NUMERIC(18, 4),
+    estimate_price NUMERIC(18, 4) NOT NULL DEFAULT 0,
     selling_price NUMERIC(18, 4),
     transport_cost NUMERIC(18, 4),
     name TEXT NOT NULL DEFAULT '',
@@ -84,7 +87,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_resources (
     cargo_class TEXT NOT NULL DEFAULT '',
     corrections TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (estimate_id, generation, resource_code, determinant)
+    PRIMARY KEY (estimate_id, generation, resource_code, determinant, estimate_price)
 );
 CREATE INDEX IF NOT EXISTS idx_estimate_calc_resources_estimate_gen
     ON estimate_calc_resources(estimate_id, generation);
@@ -128,7 +131,7 @@ WHERE estimate_id = $1 AND generation = $2 AND line_id = $3 AND calc_status = 'd
 	}
 
 	rows, err := tx.Query(ctx, `
-SELECT resource_code, determinant, consumption
+SELECT resource_code, determinant, consumption, COALESCE(estimate_price, 0)
 FROM estimate_calc_line_resources
 WHERE estimate_id = $1 AND generation = $2 AND line_id = $3
 `, estimateID, generation, lineID)
@@ -140,11 +143,12 @@ WHERE estimate_id = $1 AND generation = $2 AND line_id = $3
 	type delta struct {
 		code, determinant string
 		consumption       float64
+		estimatePrice     float64
 	}
 	deltas := make([]delta, 0)
 	for rows.Next() {
 		var d delta
-		if err := rows.Scan(&d.code, &d.determinant, &d.consumption); err != nil {
+		if err := rows.Scan(&d.code, &d.determinant, &d.consumption, &d.estimatePrice); err != nil {
 			return 0, false, err
 		}
 		deltas = append(deltas, d)
@@ -156,19 +160,19 @@ WHERE estimate_id = $1 AND generation = $2 AND line_id = $3
 	for _, d := range deltas {
 		tag, err := tx.Exec(ctx, `
 UPDATE estimate_calc_resources
-SET total_consumption = total_consumption - $5,
+SET total_consumption = total_consumption - $6,
     updated_at = now()
-WHERE estimate_id = $1 AND generation = $2 AND resource_code = $3 AND determinant = $4
-`, estimateID, generation, d.code, d.determinant, d.consumption)
+WHERE estimate_id = $1 AND generation = $2 AND resource_code = $3 AND determinant = $4 AND estimate_price = $5
+`, estimateID, generation, d.code, d.determinant, d.estimatePrice, d.consumption)
 		if err != nil {
 			return 0, false, err
 		}
 		if tag.RowsAffected() > 0 {
 			if _, err := tx.Exec(ctx, `
 DELETE FROM estimate_calc_resources
-WHERE estimate_id = $1 AND generation = $2 AND resource_code = $3 AND determinant = $4
+WHERE estimate_id = $1 AND generation = $2 AND resource_code = $3 AND determinant = $4 AND estimate_price = $5
   AND total_consumption <= 0
-`, estimateID, generation, d.code, d.determinant); err != nil {
+`, estimateID, generation, d.code, d.determinant, d.estimatePrice); err != nil {
 				return 0, false, err
 			}
 		}
@@ -193,12 +197,12 @@ func addLineCalcContributionsTx(ctx context.Context, tx pgx.Tx, in lineCalcPersi
 	_, err := tx.Exec(ctx, `
 INSERT INTO estimate_calc_lines (
     estimate_id, generation, line_id, line_revision, position_no,
-    code, original_code, name, unit, quantity, unit_price, total,
+    code, original_code, name, unit, determinant, quantity, unit_price, total,
     resources_text, calc_status, calc_error, calculated_at
 ) VALUES (
     $1, $2, $3, $4, $5,
-    $6, $7, $8, $9, $10, $11, $12,
-    $13, 'done', '', now()
+    $6, $7, $8, $9, $10, $11, $12, $13,
+    $14, 'done', '', now()
 )
 ON CONFLICT (estimate_id, generation, line_id) DO UPDATE SET
     line_revision = EXCLUDED.line_revision,
@@ -207,6 +211,7 @@ ON CONFLICT (estimate_id, generation, line_id) DO UPDATE SET
     original_code = EXCLUDED.original_code,
     name = EXCLUDED.name,
     unit = EXCLUDED.unit,
+    determinant = EXCLUDED.determinant,
     quantity = EXCLUDED.quantity,
     unit_price = EXCLUDED.unit_price,
     total = EXCLUDED.total,
@@ -216,7 +221,8 @@ ON CONFLICT (estimate_id, generation, line_id) DO UPDATE SET
     calculated_at = now()
 `, in.EstimateID, in.Generation, in.LineID, in.LineRevision, in.PositionNo,
 		in.Snapshot.Code, in.Snapshot.OriginalCode, in.Snapshot.Name, in.Snapshot.Unit,
-		in.Snapshot.Quantity, in.Snapshot.UnitPrice, in.Snapshot.Total, in.Snapshot.ResourcesText)
+		in.Snapshot.Determinant, in.Snapshot.Quantity, in.Snapshot.UnitPrice, in.Snapshot.Total,
+		in.Snapshot.ResourcesText)
 	if err != nil {
 		return err
 	}
@@ -246,9 +252,8 @@ INSERT INTO estimate_calc_resources (
     total_consumption, estimate_price, selling_price, transport_cost,
     name, unit, mass, cargo_class, corrections, updated_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
-ON CONFLICT (estimate_id, generation, resource_code, determinant) DO UPDATE SET
+ON CONFLICT (estimate_id, generation, resource_code, determinant, estimate_price) DO UPDATE SET
     total_consumption = estimate_calc_resources.total_consumption + EXCLUDED.total_consumption,
-    estimate_price = COALESCE(EXCLUDED.estimate_price, estimate_calc_resources.estimate_price),
     selling_price = COALESCE(EXCLUDED.selling_price, estimate_calc_resources.selling_price),
     transport_cost = COALESCE(EXCLUDED.transport_cost, estimate_calc_resources.transport_cost),
     name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE estimate_calc_resources.name END,

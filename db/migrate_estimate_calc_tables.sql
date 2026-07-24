@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_lines (
     original_code TEXT NOT NULL DEFAULT '',
     name TEXT NOT NULL DEFAULT '',
     unit TEXT NOT NULL DEFAULT '',
+    determinant TEXT NOT NULL DEFAULT '',
     quantity NUMERIC(18, 6) NOT NULL DEFAULT 0,
     unit_price NUMERIC(18, 2) NOT NULL DEFAULT 0,
     total NUMERIC(18, 2) NOT NULL DEFAULT 0,
@@ -33,6 +34,8 @@ CREATE TABLE IF NOT EXISTS estimate_calc_lines (
     calculated_at TIMESTAMPTZ,
     PRIMARY KEY (estimate_id, generation, line_id)
 );
+
+ALTER TABLE estimate_calc_lines ADD COLUMN IF NOT EXISTS determinant TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_estimate_calc_lines_estimate_gen
     ON estimate_calc_lines(estimate_id, generation);
 CREATE INDEX IF NOT EXISTS idx_estimate_calc_lines_line
@@ -64,7 +67,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_resources (
     resource_code TEXT NOT NULL,
     determinant TEXT NOT NULL DEFAULT '',
     total_consumption NUMERIC(18, 6) NOT NULL DEFAULT 0,
-    estimate_price NUMERIC(18, 4),
+    estimate_price NUMERIC(18, 4) NOT NULL DEFAULT 0,
     selling_price NUMERIC(18, 4),
     transport_cost NUMERIC(18, 4),
     name TEXT NOT NULL DEFAULT '',
@@ -73,7 +76,7 @@ CREATE TABLE IF NOT EXISTS estimate_calc_resources (
     cargo_class TEXT NOT NULL DEFAULT '',
     corrections TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (estimate_id, generation, resource_code, determinant)
+    PRIMARY KEY (estimate_id, generation, resource_code, determinant, estimate_price)
 );
 CREATE INDEX IF NOT EXISTS idx_estimate_calc_resources_estimate_gen
     ON estimate_calc_resources(estimate_id, generation);

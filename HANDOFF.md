@@ -14,10 +14,11 @@ run.bat
 
 | Процесс | Как запускается | Порт / роль |
 |---------|-----------------|-------------|
-| **Nginx** | `run.bat` → `scripts/restart-nginx.bat` | `:8080` — единая точка входа (UI + маршрутизация auth/app) |
+| **Nginx** | `run.bat` → `scripts/restart-nginx.bat` | `:8080` — единая точка входа (UI + маршрутизация auth/app/ProjectStatus) |
 | **Auth service** | `run.bat` → `scripts/restart-auth-server.bat` | `:8081` — login, users, companies, licenses |
 | **API + frontend** | `run.bat` (основной процесс в текущем окне) | `:8090` — бизнес-API, статика (доступ через nginx `:8080`) |
 | **Сервис расчёта** | `run.bat` → `scripts/restart-calc-worker.bat` | фон — очередь `estimate_calc_jobs`, расчёт позиций ГСН |
+| **ProjectStatus** | отдельно, репозиторий `C:\Codex\ProjectStatus` | `:8100` — «Состояние проектов»; публично только через nginx |
 
 Ручной запуск (отладка, отдельное окно с логом в консоли):
 
@@ -41,9 +42,11 @@ run.bat
 
 **Observability (отдельно от `run.bat`):** нужен **Docker Desktop** + `scripts\start-observability.bat`. Подробности — раздел [Observability](#observability-2026-07-01).
 
-**Проверка после `run.bat`:** четыре компонента — `nginx.exe` на `:8080`, `nav-auth-server.exe` на `:8081`, `nav-server.exe` на `:8090`, `nav-calc-worker.exe`; в логе worker нет `GSN database is not configured`.
+**Проверка после `run.bat`:** четыре компонента NAV — `nginx.exe` на `:8080`, `nav-auth-server.exe` на `:8081`, `nav-server.exe` на `:8090`, `nav-calc-worker.exe`; в логе worker нет `GSN database is not configured`.  
+**ProjectStatus** (`:8100`) в `run.bat` не входит — поднимается отдельно; без него `/projectStatusDesktop/` через nginx даёт `502`.
 
 Логин (рабочая база): **Система** / **nadein.av@yandex.ru** / **admin123**  
+Единая страница входа: `http://localhost:8080/login` (для NAV и ProjectStatus).  
 Демо из README (**admin@example.com**) в `data/app.json` может отсутствовать; в форме подставляется из черновика `localStorage`.
 
 | Env | Назначение |
@@ -51,7 +54,7 @@ run.bat
 | `APP_ADDR` | внутренний порт app-сервера (`:8090`); публичный вход — nginx `:8080` |
 | `APP_DATA_PATH` | legacy JSON snapshot: **только** settings (если нет PG); сметы/стройки — в `APP_DATABASE_URL` |
 | `APP_AUTH_DATABASE_URL` | **auth-контур**: `auth.companies`, `auth.users`, `auth.company_licenses` (по умолчанию = `APP_DATABASE_URL`) |
-| `APP_JWT_SECRET` | общий секрет JWT для app и auth (обязательно одинаковый при раздельных процессах) |
+| `APP_JWT_SECRET` | общий секрет JWT для app, auth **и ProjectStatus** (обязательно одинаковый) |
 | `APP_DATABASE_URL` | стройки, объекты, сметы, строки, очередь расчёта, `app_settings` |
 | `APP_GSN_DATABASE_URL` | `gsn.*`, `fgis_cs.*` |
 | `APP_LOG_LEVEL` | `info` / `debug` / `warn` / `error` (observability) |
@@ -70,12 +73,90 @@ run.bat
 Импорт справочников (не при старте): `import_regions`, `import_resource_codifier`, `import_fgis_cs`.  
 Принудительный импорт users/companies из JSON: `go run .\backend\cmd\migrate_auth` (нужен `APP_AUTH_DATABASE_URL`).
 
+## Состояние проектов / ProjectStatus (2026-07-18)
+
+Смежный сервис аналитики и статуса строек. **Отдельный репозиторий:** `C:\Codex\ProjectStatus`.  
+Подробный контракт интеграции с NAV: `RESOURCE_ANALYTICS_SERVICE_CONTEXT.md`.
+
+### Назначение
+
+- UI «Состояние проектов»: дерево стройка → объект → смета;
+- GraphQL BFF поверх read-only `APP_DATABASE_URL`;
+- дальнейшее расширение: аналитика ресурсов по `estimate_calc_*`, команды пересчёта через NAV API;
+- **не** публикует в RabbitMQ и **не** пишет в calc-таблицы / outbox.
+
+### Публичные URL (nginx `:8080`)
+
+| URL | Назначение |
+|-----|------------|
+| `/projectStatusDesktop/` | desktop UI |
+| `/projectStatusMobile/` | mobile UI |
+| `/api/project-status/graphql` | GraphQL (прокси на `:8100` `/api/graphql`) |
+| `/login?next=/projectStatusDesktop/` | единый вход NAV (cookie `nav_session`) |
+
+Redirect без trailing slash: `/projectStatusDesktop` → `/projectStatusDesktop/` (и mobile аналогично).  
+Маршруты в `deploy/nginx.conf` (`upstream project_status` → `127.0.0.1:8100`).
+
+### Процесс и env
+
+| Параметр | Значение |
+|----------|----------|
+| Репозиторий | `C:\Codex\ProjectStatus` |
+| Entry | `cmd/project-status` → `project-status.exe` |
+| Порт | `PORT` или default `:8100` |
+| Обязательные env | `APP_DATABASE_URL`, `APP_JWT_SECRET` (**тот же**, что у NAV) |
+| Health | `GET http://127.0.0.1:8100/healthz` |
+
+Запуск (пример):
+
+```powershell
+cd C:\Codex\ProjectStatus
+$env:PORT = '8100'
+$env:APP_DATABASE_URL = '<как в run.bat>'
+$env:APP_JWT_SECRET = 'dev-secret-change-me'
+go run .\cmd\project-status
+# или уже собранный project-status.exe с теми же env
+```
+
+### Auth
+
+- Issuer — только NAV auth (`POST /api/auth/login` → cookie `nav_session`, `Path=/`).
+- ProjectStatus только **верифицирует** JWT (`internal/auth`); при `401` UI редиректит на `/login?next=...`.
+- Tenant = `claims.companyId`; `companyId` из клиентских аргументов не принимается.
+
+### Ключевые пути ProjectStatus
+
+| Область | Путь |
+|---------|------|
+| HTTP entry | `cmd/project-status/main.go` |
+| JWT middleware | `internal/auth/jwt.go` |
+| GraphQL schema | `schema/project-status.graphqls` |
+| Resolvers | `internal/graphql/` |
+| SQL / store | `internal/store/postgres.go`, `sql/queries.sql` |
+| UI | `web/` (общий bundle для desktop и mobile prefix) |
+| ADR | `docs/decisions.md` |
+| Зеркало nginx | `deploy/nginx.project-status.conf` |
+
+### Инварианты
+
+1. `companyId` только из проверенного JWT.
+2. Актуальность расчёта: `generation = app_estimates.calc_generation`.
+3. Ключ агрегата ресурса: `(resource_code, determinant, estimate_price)` — цены не усреднять.
+4. Нет прямой записи в очередь расчёта / Rabbit / GSN.
+5. Пересчёт — только через NAV API во время пользовательского запроса (см. durable-контракт в `RESOURCE_ANALYTICS_SERVICE_CONTEXT.md`).
+
+### Текущий MVP
+
+- Реализовано: дерево строек через GraphQL `constructions`, единый login.
+- В схеме уже заложены analytics / recalculation; реализация расширяется в ProjectStatus, не отдельным desktop/mobile API.
+
 ## Auth-контур (фаза 4, 2026-06-30)
 
-- **nginx** на `:8080` — единая точка входа; auth-маршруты → `:8081`, остальное → app `:8090`.
+- **nginx** на `:8080` — единая точка входа; auth-маршруты → `:8081`, ProjectStatus → `:8100`, остальное → app `:8090`.
 - Go reverse proxy (`internal/api/proxy.go`, `APP_AUTH_SERVICE_URL`) **удалён**.
 - Конфиг: `deploy/nginx.conf`; установка nginx: `scripts/setup-nginx.bat`.
 - App-сервис отдаёт только бизнес-API и статику; auth API — только через auth-сервис.
+- Единый login UI: `web/login.html` + `web/login.js` (`/login` через nginx → `login.html`).
 
 ## Auth-контур (фаза 3, 2026-06-30)
 
@@ -536,6 +617,8 @@ web/app.js — isUserCatalogCipherCode, estimateLineUserCatalogNeedsLookup, esti
 
 **Шифр для ГСН** (`extractSourceDataPositionCipher`): обрезка 1-го поля по ближайшему из `(`, пробел, `#`. Полный шифр с модификаторами хранится в `sourceCode` / `rawText`.
 
+**Поправка `(=...)` после шифра** — присвоение определителя при расчёте (`ExtractSourceDataDeterminantAssignment` / `ApplyDeterminantAssignment`). Пример: `ТПрайс-лист(=14)` → `determinant=14` в `estimate_calc_lines` и во вкладе ресурса. Группы вида `(РМ...)` / `(KLink=...)` определителем не являются.
+
 **Объём (2-е поле)** — парсится **только на backend** при `normalizeEstimateItem` из `rawText`:
 
 - Арифметическое выражение (часто в скобках).
@@ -575,7 +658,11 @@ run.bat, run-auth.bat, run-calc-worker.bat
 scripts/restart-{auth-server,calc-worker,nginx}.bat
 scripts/{purge,replay}-rabbit-dlq.bat, rabbit-queue-status.bat, smoke-rabbit-calc.ps1, load-rabbit-calc.ps1, rollback-queue-db.bat, wait-release-ready.ps1
 RABBITMQ_MIGRATION_PLAN.md
+RESOURCE_ANALYTICS_SERVICE_CONTEXT.md
+.cursor/rules/project-status.mdc
 ```
+
+Смежный репозиторий (не в этом tree): `C:\Codex\ProjectStatus` — см. раздел [Состояние проектов / ProjectStatus](#состояние-проектов--projectstatus-2026-07-18).
 
 ## Админка (`/admin`)
 

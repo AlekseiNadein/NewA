@@ -29,6 +29,7 @@ type LineCalcSnapshot struct {
 	OriginalCode  string
 	Name          string
 	Unit          string
+	Determinant   string
 	Quantity      float64
 	UnitPrice     float64
 	Total         float64
@@ -48,6 +49,7 @@ func BuildLineCalcSnapshot(record gsn.RecordDetail, quantity float64) (LineCalcS
 		OriginalCode: strings.TrimSpace(record.OriginalCode),
 		Name:         strings.TrimSpace(record.Name),
 		Unit:         strings.TrimSpace(record.Unit),
+		Determinant:  strings.TrimSpace(record.Determinant),
 		Quantity:     pricing.Quantity,
 		UnitPrice:    pricing.UnitPrice,
 		Total:        pricing.Total,
@@ -120,6 +122,26 @@ func BuildLineCalcSnapshot(record gsn.RecordDetail, quantity float64) (LineCalcS
 
 func resourceAggKey(code, determinant string) string {
 	return code + "\x00" + determinant
+}
+
+// ApplyDeterminantAssignment sets the line determinant from a source-data (=...) correction.
+// For a resource position (self as the only resource with the same code), the resource
+// determinant is updated too. Nested work resources keep their own determinants.
+func ApplyDeterminantAssignment(snap *LineCalcSnapshot, determinant string) {
+	if snap == nil {
+		return
+	}
+	determinant = strings.TrimSpace(determinant)
+	if determinant == "" {
+		return
+	}
+	snap.Determinant = determinant
+	lineCode := strings.TrimSpace(snap.Code)
+	for i := range snap.Resources {
+		if strings.TrimSpace(snap.Resources[i].Code) == lineCode {
+			snap.Resources[i].Determinant = determinant
+		}
+	}
 }
 
 // FormatResourcesText builds "код.расход/код.расход" using comma decimals.

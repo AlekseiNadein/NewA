@@ -1,0 +1,34 @@
+---
+description: Подсистема «Состояние проектов» (ProjectStatus) — смежный сервис
+globs:
+alwaysApply: true
+---
+
+# ProjectStatus / Состояние проектов
+
+Смежный сервис живёт **не** в этом monorepo.
+
+| | |
+|--|--|
+| Репозиторий | `C:\Codex\ProjectStatus` |
+| Процесс | `project-status.exe` / `go run .\cmd\project-status` |
+| Внутренний порт | `:8100` |
+| Публичный вход | nginx `:8080` |
+
+## Публичные маршруты (NewA `deploy/nginx.conf`)
+
+- `/projectStatusDesktop/`, `/projectStatusMobile/`
+- `/api/project-status/graphql` → upstream `:8100` `/api/graphql`
+- `/login?next=...` — единый вход NAV (cookie `nav_session`)
+
+## Интеграция
+
+- Read-only `APP_DATABASE_URL` (стройки, `estimate_calc_*`).
+- Тот же `APP_JWT_SECRET`, что у NAV auth/app.
+- Расчёт смет — только через NAV API; не писать в Rabbit/`outbox_events`/`estimate_calc_jobs`.
+- Контракт и SQL: `RESOURCE_ANALYTICS_SERVICE_CONTEXT.md` в NewA; ADR — `C:\Codex\ProjectStatus\docs\decisions.md`.
+
+## При правках NewA
+
+- Меняя nginx/auth/login/JWT/calc tables — проверяй совместимость с ProjectStatus.
+- `run.bat` **не** стартует ProjectStatus; без `:8100` UI даёт `502`.

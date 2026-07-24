@@ -1,10 +1,14 @@
-# Контекст для смежного сервиса аналитики ресурсов
+# Контекст: подсистема «Состояние проектов» (ProjectStatus)
 
-Дата фиксации контекста: 2026-07-17.
+Дата фиксации контекста: 2026-07-17 (обновлено 2026-07-18).
+
+**Реализация:** отдельный репозиторий `C:\Codex\ProjectStatus`  
+**Краткий handoff в NAV:** раздел «Состояние проектов / ProjectStatus» в `HANDOFF.md`  
+**Правило агента:** `.cursor/rules/project-status.mdc`
 
 ## Цель
 
-Новый сервис должен:
+Подсистема ProjectStatus должна:
 
 1. получать доступный пользователю список строек;
 2. после выбора стройки показывать аналитику по ресурсам всех входящих в неё смет;
@@ -25,13 +29,13 @@
 ## Текущая топология
 
 ```text
-клиент нового сервиса
+клиент (desktop / mobile)
         |
         v
-новый analytics service
-   | read-only SQL                         | HTTP + JWT
+ProjectStatus (:8100)  ← репозиторий C:\Codex\ProjectStatus
+   | read-only SQL                         | HTTP + JWT (verify only)
    v                                      v
-APP_DATABASE_URL                     nginx :8080 / NAV API
+APP_DATABASE_URL                     nginx :8080 / NAV API + /login
    ^                                      |
    | результаты                           | outbox
 calc_worker <--- RabbitMQ <--- outbox publisher
@@ -46,9 +50,122 @@ APP_GSN_DATABASE_URL (gsn.*, fgis_cs.*)
 - auth service `:8081`;
 - NAV API `:8090`, обычно доступен через nginx;
 - `nav-calc-worker.exe` — без HTTP-порта;
+- **ProjectStatus** `:8100` — отдельно от `run.bat`;
 - RabbitMQ — `estimate.calc.main`, retry-очереди и DLQ.
 
 Локальные параметры запуска находятся в `run.bat` и `scripts/run-calc-worker-exec.bat`. Не переносить содержащиеся там dev credentials в новый репозиторий.
+
+## Публичные точки входа нового сервиса
+
+Через существующий nginx `:8080` публикуются два явных варианта интерфейса:
+
+- `http://localhost:8080/projectStatusDesktop/` — desktop UI;
+- `http://localhost:8080/projectStatusMobile/` — mobile UI.
+
+URL без завершающего `/` должны отвечать постоянным redirect:
+
+- `/projectStatusDesktop` → `/projectStatusDesktop/`;
+- `/projectStatusMobile` → `/projectStatusMobile/`.
+
+Явные адреса предпочтительнее автоматического определения устройства:
+ссылки стабильны, оба варианта можно открыть на любом устройстве, а nginx
+не зависит от ненадёжного анализа `User-Agent`.
+
+### Внутреннее размещение
+
+Базовый вариант — один процесс нового сервиса, например
+`project-status-service :8100`, который отдаёт оба frontend bundle и BFF API:
+
+```text
+nginx :8080
+  /projectStatusDesktop/  -> project-status-service:8100/projectStatusDesktop/
+  /projectStatusMobile/   -> project-status-service:8100/projectStatusMobile/
+  /api/project-status/graphql -> project-status-service:8100/api/graphql
+```
+
+Порт `:8100` — предлагаемый внутренний default; наружу он не публикуется.
+Если desktop и mobile будут отдельными процессами, публичные URL сохраняются,
+а меняются только nginx upstream.
+
+### Реализованный nginx routing
+
+Дополнение к `deploy/nginx.conf`:
+
+```nginx
+upstream project_status {
+    server 127.0.0.1:8100;
+}
+
+server {
+    # существующий listen 8080 и остальные location
+
+    location = /projectStatusDesktop {
+        return 308 /projectStatusDesktop/;
+    }
+
+    location ^~ /projectStatusDesktop/ {
+        proxy_pass http://project_status;
+        include proxy_params.conf;
+    }
+
+    location = /projectStatusMobile {
+        return 308 /projectStatusMobile/;
+    }
+
+    location ^~ /projectStatusMobile/ {
+        proxy_pass http://project_status;
+        include proxy_params.conf;
+    }
+
+    location = /api/project-status/graphql {
+        proxy_pass http://project_status/api/graphql;
+        include proxy_params.conf;
+    }
+}
+```
+
+У `proxy_pass` для UI намеренно нет завершающего URI: upstream получает
+исходный base path. Frontend обязан быть собран соответственно с base URL
+`/projectStatusDesktop/` или `/projectStatusMobile/`; ссылки на JS/CSS,
+manifest, service worker и client-side routes не должны начинаться от `/`.
+
+GraphQL endpoint проксируется с внешнего
+`/api/project-status/graphql` на внутренний `/api/graphql`.
+
+### SPA fallback
+
+Если варианты являются SPA, fallback должен выполняться внутри нового сервиса:
+
+```text
+GET /projectStatusDesktop/* -> desktop index.html
+GET /projectStatusMobile/*  -> mobile index.html
+```
+
+При этом реальные отсутствующие assets (`.js`, `.css`, изображения) должны
+возвращать `404`, а не `index.html`, иначе ошибки сборки маскируются HTML-ответом.
+
+### Авторизация на новых URL
+
+- единая страница входа: `http://localhost:8080/login?next=/projectStatusDesktop/`;
+- `nav_session` уже имеет `Path=/`, поэтому cookie доступна обоим UI;
+- запросы остаются same-origin относительно `localhost:8080`;
+- desktop и mobile при `401` редиректят на `/login` с `next` на свой base path;
+- BFF проверяет тот же NAV JWT и применяет тот же `companyId` tenant scope;
+- токены не передаются через query string;
+- nginx не принимает решений о правах — authorization остаётся в сервисе.
+
+### API нового сервиса
+
+Публичная точка:
+
+```text
+POST /api/project-status/graphql
+```
+
+Реализация находится в `C:\Codex\ProjectStatus\`. Оба UI используют одну
+GraphQL-схему; различается только представление. В текущем MVP публичная схема
+содержит дерево строек. Resource analytics и durable recalculation должны быть
+добавлены в эту же схему, без отдельного desktop/mobile API.
 
 ## Модель данных
 
@@ -82,6 +199,9 @@ app_constructions
 
 - `estimate_calc_state` — текущее состояние расчёта сметы;
 - `estimate_calc_lines` — рассчитанный snapshot позиции;
+  поля включают `code`, `original_code`, `name`, `unit`, `determinant` (определитель
+  из нормативной базы / `gsn.records.determinant`), `quantity`, `unit_price`,
+  `total`, `resources_text`, `calc_status`;
 - `estimate_calc_line_resources` — вклад ресурса в конкретную позицию;
 - `estimate_calc_resources` — агрегат ресурса по смете.
 
@@ -597,7 +717,9 @@ JWT содержит `sub`, `companyId`, `role`, `authorized`, `exp`. Все б�
 2. Нет готового HTTP endpoint аналитики ресурсов по стройке.
 3. Нет service-to-service auth.
 4. `selling_price`, `transport_cost`, `cargo_class`, `corrections` присутствуют в схеме, но текущий GSN snapshot обычно их не заполняет.
-5. Пользовательские позиции (`ТПрайс...`, `СТПрайс...`) рассчитываются без GSN resources и сейчас создают snapshot строки без ресурсных вкладов.
+5. Пользовательские позиции (`ТПрайс...`, `СТПрайс...`) рассчитываются без GSN resources.
+   Поправка `(=N)` после шифра задаёт определитель и создаёт вклад ресурса `(code, determinant=N)`.
+   Без `(=...)` snapshot строки может остаться без ресурсных вкладов.
 6. Нет тестов persistence/конкурентного обновления `estimate_calc_*`; есть unit-тесты построения `LineCalcSnapshot`.
 7. Текущие SQL-индексы оптимизированы в основном под `estimate_id + generation`. После замеров может понадобиться индекс для drill-down по `resource_code`.
 8. Для смет, рассчитанных до появления `estimate_calc_*`, возможен только

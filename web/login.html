@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Вход — ABC-RU WEB</title>
+    <link rel="icon" href="/Abc_Icon.ico" type="image/x-icon" />
+    <link rel="stylesheet" href="/styles.css?v=20260718a" />
+    <script>
+      (function () {
+        try {
+          var url = new URL(window.location.href);
+          var dirty = false;
+          ["password", "passwordConfirm", "companyName", "name", "email"].forEach(function (key) {
+            if (url.searchParams.has(key)) {
+              url.searchParams.delete(key);
+              dirty = true;
+            }
+          });
+          if (dirty) {
+            var query = url.searchParams.toString();
+            history.replaceState(null, "", url.pathname + (query ? "?" + query : "") + url.hash);
+          }
+        } catch (_) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-brand">
+          <img class="hero-logo" src="/Abc_Icon.ico" alt="" width="64" height="64" />
+          <div>
+            <p class="eyebrow">Автоматизация выпуска смет на платформе SaaS 2026.7</p>
+            <h2>ABC-RU WEB</h2>
+          </div>
+        </div>
+      </section>
+
+      <section id="loginView" class="card login-card">
+        <h2>Вход</h2>
+        <p class="muted">
+          Единый вход для основной системы и статуса проекта. Компания нужна при входе по ФИО; при входе по e-mail её можно не заполнять.
+        </p>
+        <form id="loginForm" class="grid-form" method="post" action="#" onsubmit="return false">
+          <label>
+            Компания
+            <input name="companyName" type="text" autocomplete="organization" />
+          </label>
+          <label>
+            ФИО или e-mail
+            <input name="name" type="text" autocomplete="username" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button type="submit">Войти</button>
+        </form>
+        <p class="auth-switch">
+          Нет учётной записи?
+          <button id="showRegisterButton" class="link-button" type="button">Зарегистрироваться</button>
+        </p>
+      </section>
+
+      <section id="registerView" class="card login-card hidden">
+        <h2>Регистрация</h2>
+        <p class="muted">После регистрации администратор проверит заявку и откроет доступ к системе.</p>
+        <form id="registerForm" class="stack-form register-form" method="post" action="#" onsubmit="return false">
+          <label>
+            Компания
+            <input name="companyName" type="text" autocomplete="organization" required />
+          </label>
+          <label>
+            ФИО пользователя
+            <input name="name" type="text" autocomplete="name" required />
+          </label>
+          <label>
+            E-mail
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <label>
+            Пароль
+            <input name="password" type="password" autocomplete="new-password" required />
+          </label>
+          <label>
+            Повтор пароля
+            <input name="passwordConfirm" type="password" autocomplete="new-password" required />
+          </label>
+          <button type="submit">Зарегистрироваться</button>
+        </form>
+        <p class="auth-switch">
+          Уже есть учётная запись?
+          <button id="showLoginButton" class="link-button" type="button">Войти</button>
+        </p>
+      </section>
+
+      <div id="message" class="message hidden"></div>
+    </main>
+
+    <script src="/login-draft.js?v=20260629c"></script>
+    <script src="/login.js?v=20260718a"></script>
+  </body>
+</html>

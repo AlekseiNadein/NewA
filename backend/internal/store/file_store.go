@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"nav-saas-mvp/backend/internal/domain"
 	"nav-saas-mvp/backend/internal/estimatecalc"
@@ -940,7 +941,10 @@ CREATE INDEX IF NOT EXISTS idx_calc_message_receipts_estimate
 	if err := s.migrateEstimateLinesCompositePK(ctx); err != nil {
 		return err
 	}
-	return s.migrateEstimateCalcStateStartingStatus(ctx)
+	if err := s.migrateEstimateCalcStateStartingStatus(ctx); err != nil {
+		return err
+	}
+	return s.migrateEstimateCalcResourcesPricePK(ctx)
 }
 
 func (s *FileStore) migrateEstimateCalcStateStartingStatus(ctx context.Context) error {
@@ -1021,6 +1025,74 @@ SELECT EXISTS (
 	_, err = s.treeDB.Exec(ctx, `
 ALTER TABLE app_estimate_lines DROP CONSTRAINT IF EXISTS app_estimate_lines_pkey;
 ALTER TABLE app_estimate_lines ADD PRIMARY KEY (estimate_id, id);
+`)
+	return err
+}
+
+func (s *FileStore) migrateEstimateCalcResourcesPricePK(ctx context.Context) error {
+	if s.treeDB == nil {
+		return nil
+	}
+	var hasPricePK bool
+	err := s.treeDB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+      AND tc.table_schema = kcu.table_schema
+    WHERE tc.table_schema = current_schema()
+      AND tc.table_name = 'estimate_calc_resources'
+      AND tc.constraint_type = 'PRIMARY KEY'
+      AND kcu.column_name = 'estimate_price'
+)`).Scan(&hasPricePK)
+	if err != nil {
+		return err
+	}
+	if hasPricePK {
+		return nil
+	}
+	var tableExists bool
+	if err := s.treeDB.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = current_schema() AND table_name = 'estimate_calc_resources'
+)`).Scan(&tableExists); err != nil {
+		return err
+	}
+	if !tableExists {
+		return nil
+	}
+	_, err = s.treeDB.Exec(ctx, `
+ALTER TABLE estimate_calc_resources DROP CONSTRAINT IF EXISTS estimate_calc_resources_pkey;
+ALTER TABLE estimate_calc_resources ALTER COLUMN estimate_price SET DEFAULT 0;
+UPDATE estimate_calc_resources SET estimate_price = COALESCE(estimate_price, 0);
+ALTER TABLE estimate_calc_resources ALTER COLUMN estimate_price SET NOT NULL;
+DELETE FROM estimate_calc_resources;
+INSERT INTO estimate_calc_resources (
+    estimate_id, generation, resource_code, determinant,
+    total_consumption, estimate_price, selling_price, transport_cost,
+    name, unit, mass, cargo_class, corrections, updated_at
+)
+SELECT
+    lr.estimate_id,
+    lr.generation,
+    lr.resource_code,
+    lr.determinant,
+    SUM(lr.consumption),
+    COALESCE(lr.estimate_price, 0),
+    MAX(lr.selling_price),
+    MAX(lr.transport_cost),
+    COALESCE(MAX(lr.name) FILTER (WHERE lr.name <> ''), ''),
+    COALESCE(MAX(lr.unit) FILTER (WHERE lr.unit <> ''), ''),
+    COALESCE(MAX(lr.mass) FILTER (WHERE lr.mass <> ''), ''),
+    COALESCE(MAX(lr.cargo_class) FILTER (WHERE lr.cargo_class <> ''), ''),
+    COALESCE(MAX(lr.corrections) FILTER (WHERE lr.corrections <> ''), ''),
+    now()
+FROM estimate_calc_line_resources lr
+GROUP BY lr.estimate_id, lr.generation, lr.resource_code, lr.determinant, COALESCE(lr.estimate_price, 0);
+ALTER TABLE estimate_calc_resources
+    ADD PRIMARY KEY (estimate_id, generation, resource_code, determinant, estimate_price);
 `)
 	return err
 }
@@ -2398,12 +2470,12 @@ WHERE l.estimate_id = $1
 	return errorsCount, rows.Err()
 }
 
-func (s *FileStore) StartEstimateCalc(ctx context.Context, id, companyID string, includeAll bool, force bool) error {
+func (s *FileStore) StartEstimateCalc(ctx context.Context, id, companyID string, includeAll bool, force bool) (int64, error) {
 	if s.treeDB == nil {
-		return nil
+		return 0, nil
 	}
 	if s.disableCalcEnqueue {
-		return nil
+		return 0, nil
 	}
 
 	var estimateCompanyID, district, fgisSetID string
@@ -2415,17 +2487,17 @@ WHERE id = $1
 `, id).Scan(&estimateCompanyID, &district, &fgisSetID, &calcGeneration)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
+			return 0, ErrNotFound
 		}
-		return err
+		return 0, err
 	}
 	if !includeAll && estimateCompanyID != companyID {
-		return ErrForbidden
+		return 0, ErrForbidden
 	}
 
 	hasCalc, err := s.HasEstimateCalcLines(ctx, id)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var stateDistrict, stateFgis string
 	var stateGen int64
@@ -2438,7 +2510,7 @@ WHERE estimate_id = $1
 	if err == nil {
 		hasState = true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return err
+		return 0, err
 	}
 
 	fullRebuild := force || !hasCalc
@@ -2447,15 +2519,24 @@ WHERE estimate_id = $1
 	}
 
 	if force || (hasState && (stateDistrict != district || stateFgis != fgisSetID)) {
-		if _, err := s.CancelEstimateCalc(ctx, companyID, id, includeAll); err != nil {
-			return err
+		var cancelGen int64
+		for attempt := 0; attempt < 5; attempt++ {
+			cancelGen, err = s.CancelEstimateCalc(ctx, companyID, id, includeAll)
+			if err == nil {
+				break
+			}
+			if !isPgDeadlock(err) || attempt == 4 {
+				return 0, err
+			}
+			time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
 		}
+		_ = cancelGen
 		err = s.treeDB.QueryRow(ctx, `
 SELECT company_id, district, fgis_set_id, calc_generation
 FROM app_estimates WHERE id = $1
 `, id).Scan(&estimateCompanyID, &district, &fgisSetID, &calcGeneration)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		fullRebuild = true
 	}
@@ -2469,7 +2550,7 @@ FROM app_estimates WHERE id = $1
 	}
 	settings, err := s.GetAppSettings()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for attempt := 0; attempt < 120; attempt++ {
 		if s.markEstimateCalcStartJob(id) {
@@ -2483,21 +2564,25 @@ ON CONFLICT (estimate_id) DO UPDATE SET
     district = EXCLUDED.district,
     fgis_set_id = EXCLUDED.fgis_set_id,
     status = 'starting',
+    grand_total = 0,
+    lines_total = 0,
+    lines_done = 0,
+    lines_errors = 0,
     updated_at = now()
 `, estimate.ID, estimate.CalcGeneration, estimate.District, estimate.FgisSetID); err != nil {
 				s.unmarkEstimateCalcStartJob(id)
-				return err
+				return 0, err
 			}
 			go s.runEstimateCalcStart(observability.DetachCorrelation(ctx), estimate, settings.CalcStartBatchSize, fullRebuild)
-			return nil
+			return estimate.CalcGeneration, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return 0, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("estimate calc start already in progress")
+	return 0, fmt.Errorf("estimate calc start already in progress")
 }
 
 func (s *FileStore) runEstimateCalcStart(ctx context.Context, estimate domain.Estimate, batchSize int, fullRebuild bool) {
@@ -3337,3 +3422,7 @@ func validEstimateLineType(lineType string) bool {
 	}
 }
 
+func isPgDeadlock(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+}
