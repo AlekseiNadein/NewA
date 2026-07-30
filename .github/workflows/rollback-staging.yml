@@ -67,4 +67,4 @@ jobs:
           SMOKE_COMPANY_NAME: ${{ secrets.SMOKE_COMPANY_NAME }}
           SMOKE_USER_NAME: ${{ secrets.SMOKE_USER_NAME }}
           SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
-        run: sh scripts/smoke-staging-write.sh
+        run: bash scripts/smoke-staging-write.sh

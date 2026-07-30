@@ -136,7 +136,7 @@ jobs:
           IMAGE_REPOSITORY: ${{ needs.publish.outputs.image }}
           IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
         run: |
-          sh scripts/deploy-staging.sh
+          bash scripts/deploy-staging.sh
           kubectl -n newa-staging rollout status deployment/nav-auth --timeout=300s
           kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
           kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
@@ -163,14 +163,14 @@ jobs:
       - name: Select Kubernetes context
         if: vars.KUBE_CONTEXT != ''
         run: kubectl config use-context "${{ vars.KUBE_CONTEXT }}"
-      - run: sh scripts/verify-staging.sh
-      - run: sh scripts/smoke-staging-write.sh
-      - run: sh scripts/assert-staging-rbac.sh
+      - run: bash scripts/verify-staging.sh
+      - run: bash scripts/smoke-staging-write.sh
+      - run: bash scripts/assert-staging-rbac.sh
       - name: Record last known good
         env:
           CI_COMMIT_SHA: ${{ github.sha }}
           CI_PIPELINE_ID: ${{ github.run_id }}
-        run: sh scripts/resolve-last-known-good.sh
+        run: bash scripts/resolve-last-known-good.sh
       - uses: actions/upload-artifact@v4
         with:
           name: staging-release-evidence
