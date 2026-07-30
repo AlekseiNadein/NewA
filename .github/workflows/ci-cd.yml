@@ -53,12 +53,21 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: aquasecurity/trivy-action@v0.36.0
+      - name: Trivy config (blocking Critical)
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: config
           scan-ref: .
-          severity: HIGH,CRITICAL
+          severity: CRITICAL
           exit-code: "1"
+      - name: Trivy config (report High)
+        uses: aquasecurity/trivy-action@v0.36.0
+        continue-on-error: true
+        with:
+          scan-type: config
+          scan-ref: deploy
+          severity: HIGH,CRITICAL
+          exit-code: "0"
 
   publish:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'

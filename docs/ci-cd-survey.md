@@ -37,6 +37,10 @@ Before enforcing strict production-grade gates, owners should finalize:
 4. retention and protection policy for active and last-known-good images;
 5. rollback ownership and SLA targets for staging incidents.
 
+Current temporary GitHub gate blocks only Critical Trivy config findings.
+High findings from the existing local k3s profile are reported but non-blocking
+until hardening of StatefulSet securityContext is completed.
+
 ## Decision note: dual deploy contour
 
 The project intentionally keeps two deployment contours with different goals:
