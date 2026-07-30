@@ -32,6 +32,7 @@ jobs:
       - uses: azure/setup-kubectl@v4
       - run: kubectl kustomize deploy/k3s > /dev/null
       - run: kubectl kustomize deploy/environments/staging > /dev/null
+      - run: test -f deploy/environments/staging/rbac.yaml
 
   test:
     runs-on: ubuntu-latest
@@ -52,7 +53,7 @@ jobs:
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: config
           scan-ref: .

@@ -4,7 +4,6 @@ kind: Kustomization
 namespace: newa-staging
 
 resources:
-  - rbac.yaml
   - ../../k3s
 
 patches:
