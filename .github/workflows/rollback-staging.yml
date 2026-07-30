@@ -60,7 +60,7 @@ jobs:
           kubectl -n newa-staging set image deployment/nav-api nav-api="$TARGET_IMAGE"
           kubectl -n newa-staging set image deployment/nav-auth nav-auth="$TARGET_IMAGE"
           kubectl -n newa-staging set image deployment/nav-calc-worker nav-calc-worker="$TARGET_IMAGE"
-          sh scripts/verify-staging.sh
+          bash scripts/verify-staging.sh
       - name: Verify write scenario
         env:
           STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}

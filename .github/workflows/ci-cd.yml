@@ -172,6 +172,7 @@ jobs:
           CI_PIPELINE_ID: ${{ github.run_id }}
         run: bash scripts/resolve-last-known-good.sh
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: staging-release-evidence
           path: out/last-known-good.env
