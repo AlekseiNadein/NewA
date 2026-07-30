@@ -1,0 +1,70 @@
+name: Rollback staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Optional image@digest; defaults to cluster last-known-good
+        required: false
+        type: string
+      exercise:
+        description: First verify failure with a nonexistent image
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: newa-staging
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on:
+      - self-hosted
+      - Linux
+      - newa-staging
+    environment: staging
+    env:
+      KUBECONFIG: /home/alexey/.kube/newa-staging-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Kubernetes context
+        if: vars.KUBE_CONTEXT != ''
+        run: kubectl config use-context "${{ vars.KUBE_CONTEXT }}"
+      - id: target
+        env:
+          REQUESTED_IMAGE: ${{ inputs.image }}
+        run: |
+          image="$REQUESTED_IMAGE"
+          if [ -z "$image" ]; then
+            image="$(kubectl -n newa-staging get configmap newa-release-state -o jsonpath='{.data.image}')"
+          fi
+          test -n "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Exercise expected rollout failure
+        if: inputs.exercise
+        run: |
+          kubectl -n newa-staging set image deployment/nav-api \
+            nav-api=registry.invalid/newa/nav-saas:does-not-exist
+          if kubectl -n newa-staging rollout status deployment/nav-api --timeout=120s; then
+            echo "Invalid image unexpectedly became ready" >&2
+            exit 1
+          fi
+      - name: Restore selected release
+        env:
+          TARGET_IMAGE: ${{ steps.target.outputs.image }}
+        run: |
+          kubectl -n newa-staging set image deployment/nav-api nav-api="$TARGET_IMAGE"
+          kubectl -n newa-staging set image deployment/nav-auth nav-auth="$TARGET_IMAGE"
+          kubectl -n newa-staging set image deployment/nav-calc-worker nav-calc-worker="$TARGET_IMAGE"
+          sh scripts/verify-staging.sh
+      - name: Verify write scenario
+        env:
+          STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+          SMOKE_COMPANY_NAME: ${{ secrets.SMOKE_COMPANY_NAME }}
+          SMOKE_USER_NAME: ${{ secrets.SMOKE_USER_NAME }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+        run: sh scripts/smoke-staging-write.sh

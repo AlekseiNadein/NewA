@@ -20,3 +20,28 @@ rollback:staging:
     - kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
     - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
     - sh scripts/verify-staging.sh
+
+rollback:exercise:
+  stage: rollback
+  image: bitnami/kubectl:1.33
+  resource_group: newa-staging
+  environment:
+    name: staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: false
+  script:
+    - test -n "$KUBE_CONTEXT"
+    - test -n "$LAST_KNOWN_GOOD_IMAGE"
+    - kubectl config use-context "$KUBE_CONTEXT"
+    - BAD_IMAGE="${EXERCISE_BAD_IMAGE:-registry.invalid/newa/nav-saas:does-not-exist}"
+    - kubectl -n newa-staging set image deployment/nav-api nav-api="$BAD_IMAGE"
+    - |
+      if kubectl -n newa-staging rollout status deployment/nav-api --timeout=120s; then
+        echo "Rollback exercise failed: bad image unexpectedly rolled out" >&2
+        exit 1
+      fi
+    - kubectl -n newa-staging set image deployment/nav-api nav-api="$LAST_KNOWN_GOOD_IMAGE"
+    - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
+    - sh scripts/verify-staging.sh

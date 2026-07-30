@@ -10,6 +10,7 @@ stages:
   - validate
   - test
   - build
+  - scan
   - publish
   - deploy
   - verify

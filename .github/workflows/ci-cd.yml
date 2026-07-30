@@ -1,0 +1,164 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.ref == 'refs/heads/main' && 'newa-staging' || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.25.0"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go mod download
+      - run: go vet ./backend/...
+      - uses: azure/setup-kubectl@v4
+      - run: kubectl kustomize deploy/k3s > /dev/null
+      - run: kubectl kustomize deploy/environments/staging > /dev/null
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test ./backend/... -count=1
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs:
+      - validate
+      - test
+      - security
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}/nav-saas" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.run_id }}
+
+  deploy:
+    needs:
+      - publish
+    runs-on:
+      - self-hosted
+      - Linux
+      - newa-staging
+    environment: staging
+    env:
+      KUBECONFIG: /home/alexey/.kube/newa-staging-ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Kubernetes context
+        if: vars.KUBE_CONTEXT != ''
+        run: kubectl config use-context "${{ vars.KUBE_CONTEXT }}"
+      - name: Configure GHCR pull credential
+        env:
+          GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+        run: |
+          test -n "$GHCR_PULL_USERNAME"
+          test -n "$GHCR_PULL_TOKEN"
+          kubectl -n newa-staging create secret docker-registry newa-registry-pull \
+            --docker-server=ghcr.io \
+            --docker-username="$GHCR_PULL_USERNAME" \
+            --docker-password="$GHCR_PULL_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+      - name: Deploy immutable image
+        env:
+          IMAGE_REPOSITORY: ${{ needs.publish.outputs.image }}
+          IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          sh scripts/deploy-staging.sh
+          kubectl -n newa-staging rollout status deployment/nav-auth --timeout=300s
+          kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
+          kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
+
+  verify:
+    needs:
+      - publish
+      - deploy
+    runs-on:
+      - self-hosted
+      - Linux
+      - newa-staging
+    environment: staging
+    env:
+      KUBECONFIG: /home/alexey/.kube/newa-staging-ci
+      IMAGE_REPOSITORY: ${{ needs.publish.outputs.image }}
+      IMAGE_DIGEST: ${{ needs.publish.outputs.digest }}
+      STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+      SMOKE_COMPANY_NAME: ${{ secrets.SMOKE_COMPANY_NAME }}
+      SMOKE_USER_NAME: ${{ secrets.SMOKE_USER_NAME }}
+      SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Kubernetes context
+        if: vars.KUBE_CONTEXT != ''
+        run: kubectl config use-context "${{ vars.KUBE_CONTEXT }}"
+      - run: sh scripts/verify-staging.sh
+      - run: sh scripts/smoke-staging-write.sh
+      - run: sh scripts/assert-staging-rbac.sh
+      - name: Record last known good
+        env:
+          CI_COMMIT_SHA: ${{ github.sha }}
+          CI_PIPELINE_ID: ${{ github.run_id }}
+        run: sh scripts/resolve-last-known-good.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-release-evidence
+          path: out/last-known-good.env

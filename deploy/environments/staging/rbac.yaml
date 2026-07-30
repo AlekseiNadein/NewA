@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: newa-staging
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: newa-ci-deploy
+  namespace: newa-staging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: newa-ci-deploy
+  namespace: newa-staging
+rules:
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - secrets
+      - services
+      - serviceaccounts
+      - pods
+      - pods/log
+      - persistentvolumeclaims
+      - events
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/status
+      - statefulsets
+      - statefulsets/status
+      - replicasets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: newa-ci-deploy
+  namespace: newa-staging
+subjects:
+  - kind: ServiceAccount
+    name: newa-ci-deploy
+    namespace: newa-staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: newa-ci-deploy
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: newa-ci-deploy-token
+  namespace: newa-staging
+  annotations:
+    kubernetes.io/service-account.name: newa-ci-deploy
+type: kubernetes.io/service-account-token

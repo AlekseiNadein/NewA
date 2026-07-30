@@ -2,27 +2,27 @@
 
 ## Scope
 
-Deploy path for `main` branch to Kubernetes staging namespace `newa-staging` through GitLab CI.
+Deploy path for `main` branch to Kubernetes staging namespace `newa-staging`.
+GitHub Actions is the temporary active CI/CD platform; GitLab configuration is
+retained for future use.
+This runbook does not replace local k3s release flow from `deploy/k3s/README.md`.
 
 ## Prerequisites
 
-- GitLab project has Kubernetes Agent configured and available context in `KUBE_CONTEXT`.
-- Protected CI variables are configured:
-  - `KUBE_CONTEXT`
-  - `STAGING_REGISTRY_USER`
-  - `STAGING_REGISTRY_PASSWORD`
-  - optional `STAGING_BASE_URL` for HTTP smoke health check
-- Registry publish credentials for CI are available via standard GitLab variables.
+- GitHub self-hosted runner with labels `linux` and `newa-staging` is registered
+  inside the k3s network.
+- GitHub Environment `staging`, variables and secrets are configured according
+  to `docs/github-actions-setup.md`.
+- Runner kubeconfig uses a namespace-scoped identity, not `cluster-admin`.
 
 ## Pipeline flow
 
-1. `validate:*` jobs verify Go code and kustomize rendering.
-2. `test:go-unit` runs unit tests.
-3. `build:affected` determines impacted components.
-4. `publish:image` builds and pushes immutable image tagged by commit SHA and records digest.
-5. `deploy:staging` applies manifests with digest-pinned image and waits for rollout.
-6. `verify-staging.sh` confirms rollout and optional health endpoint.
-7. `resolve-last-known-good.sh` records candidate as last known good metadata artifact.
+1. `validate`, `test` and `security` run on GitHub-hosted runners.
+2. `publish` builds and pushes an immutable SHA-tagged image to GHCR.
+3. `deploy` applies the digest-pinned image and waits for rollout.
+4. `verify` runs health, write-smoke and RBAC negative checks.
+5. `resolve-last-known-good.sh` records the verified digest in the cluster and
+   uploads release evidence.
 
 ## Manual checks after deploy
 

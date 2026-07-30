@@ -4,7 +4,12 @@ kind: Kustomization
 namespace: newa-staging
 
 resources:
+  - rbac.yaml
   - ../../k3s
 
 patches:
   - path: patch-app-deployments.yaml
+  - path: patch-ingress-host.yaml
+    target:
+      kind: Ingress
+      name: nav

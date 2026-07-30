@@ -11,15 +11,28 @@ Use rollback when deploy has already changed cluster state and one of the follow
 
 ## Inputs
 
-- `KUBE_CONTEXT` CI variable.
-- `LAST_KNOWN_GOOD_IMAGE` (format: `registry/repository@sha256:<digest>`).
+- Optional explicit image in format `registry/repository@sha256:<digest>`.
+- Without an explicit image, ConfigMap `newa-release-state` supplies the last
+  successfully verified digest.
 
-## Procedure (GitLab manual job)
+## Procedure (GitHub Actions)
 
-1. Start `rollback:staging` manual job in pipeline for `main`.
-2. Job updates `nav-api`, `nav-auth`, `nav-calc-worker` to `LAST_KNOWN_GOOD_IMAGE`.
-3. Job waits for rollout completion in `newa-staging`.
-4. Job runs `scripts/verify-staging.sh`.
+1. Open `Actions → Rollback staging → Run workflow`.
+2. Optionally enter a specific image digest.
+3. Job updates `nav-api`, `nav-auth`, `nav-calc-worker` to the selected image.
+4. Job waits for rollout completion in `newa-staging`.
+5. Job runs health and write-scenario verification.
+
+## Controlled rollback exercise
+
+Enable input `exercise` in the manual workflow to validate rollback mechanics:
+
+1. sets intentionally invalid image for `nav-api`;
+2. confirms rollout does not become ready;
+3. restores `LAST_KNOWN_GOOD_IMAGE`;
+4. reruns verification.
+
+Optional variable: `EXERCISE_BAD_IMAGE` (defaults to a non-existent registry image).
 
 ## Post-rollback actions
 

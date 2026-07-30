@@ -36,3 +36,26 @@ Before enforcing strict production-grade gates, owners should finalize:
 3. approved smoke-test list for release gates;
 4. retention and protection policy for active and last-known-good images;
 5. rollback ownership and SLA targets for staging incidents.
+
+## Decision note: dual deploy contour
+
+The project intentionally keeps two deployment contours with different goals:
+
+- local release contour (`deploy/k3s`, namespace `nav`) for standalone WSL-based
+  deployment, diagnostics, and quick environment restore without external
+  registry dependency;
+- CI staging contour (`deploy/environments/staging`, namespace `newa-staging`)
+  for immutable digest-based deployment from GitLab pipeline with rollout/verify
+  gates.
+
+These contours are complementary and should not override each other.
+
+## Decision note: temporary GitHub platform
+
+Until GitLab access is available, GitHub Actions is the active CI/CD executor
+and GHCR is the image registry. A self-hosted Linux runner inside the k3s
+network replaces the GitLab Agent transport for staging jobs. GitLab files are
+retained but are not the active execution path.
+
+The temporary runner must use namespace-scoped Kubernetes credentials and must
+never execute untrusted pull-request code.

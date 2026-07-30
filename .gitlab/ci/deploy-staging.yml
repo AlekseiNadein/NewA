@@ -28,7 +28,24 @@ deploy:staging:
     - kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
     - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
     - kubectl -n newa-staging get deploy -o wide
+
+verify:staging:
+  stage: verify
+  image: bitnami/kubectl:1.33
+  needs:
+    - deploy:staging
+    - publish:image
+  resource_group: newa-staging
+  environment:
+    name: staging
+    deployment_tier: staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - test -n "$KUBE_CONTEXT"
+    - kubectl config use-context "$KUBE_CONTEXT"
     - sh scripts/verify-staging.sh
+    - sh scripts/assert-staging-rbac.sh
     - sh scripts/resolve-last-known-good.sh
   artifacts:
     when: always
