@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nav
+
+resources:
+  - rbac.yaml
+  - storage.yaml
+  - workloads.yaml
+  - ingress.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - prometheus.yml
+      - nav-alerts.yml
+  - name: loki-config
+    files:
+      - loki.yaml
+  - name: tempo-config
+    files:
+      - tempo.yaml
+  - name: otel-collector-config
+    files:
+      - otel-collector.yaml
+  - name: alloy-config
+    files:
+      - config.alloy
+  - name: grafana-datasources
+    files:
+      - datasources.yml
+  - name: grafana-dashboard-provider
+    files:
+      - dashboards.yml
+  - name: grafana-dashboards
+    files:
+      - nav-overview.json
+      - k6-load.json

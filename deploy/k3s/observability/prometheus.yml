@@ -1,0 +1,29 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: nav-api
+    static_configs:
+      - targets: ["nav-api:9090"]
+        labels:
+          service: nav-api
+
+  - job_name: nav-auth
+    static_configs:
+      - targets: ["nav-auth:9091"]
+        labels:
+          service: nav-auth
+
+  - job_name: nav-calc-worker
+    static_configs:
+      - targets: ["nav-calc-worker:9092"]
+        labels:
+          service: nav-calc-worker
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]

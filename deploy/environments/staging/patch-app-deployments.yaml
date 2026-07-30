@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nav-api
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  revisionHistoryLimit: 10
+  template:
+    spec:
+      imagePullSecrets:
+        - name: newa-registry-pull
+      containers:
+        - name: nav-api
+          imagePullPolicy: Always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nav-auth
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  revisionHistoryLimit: 10
+  template:
+    spec:
+      imagePullSecrets:
+        - name: newa-registry-pull
+      containers:
+        - name: nav-auth
+          imagePullPolicy: Always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nav-calc-worker
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  revisionHistoryLimit: 10
+  template:
+    spec:
+      imagePullSecrets:
+        - name: newa-registry-pull
+      containers:
+        - name: nav-calc-worker
+          imagePullPolicy: Always

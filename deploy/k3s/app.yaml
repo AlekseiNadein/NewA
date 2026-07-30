@@ -56,6 +56,17 @@ spec:
     spec:
       securityContext:
         fsGroup: 10001
+      initContainers:
+        - name: wait-dependencies
+          image: postgres:17-bookworm
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              until pg_isready -h postgres -U nav -d nav; do sleep 2; done
+              until (: >/dev/tcp/rabbitmq/5672) 2>/dev/null; do sleep 2; done
+              until (: >/dev/tcp/redis/6379) 2>/dev/null; do sleep 2; done
       containers:
         - name: nav-api
           image: nav-saas:dev
@@ -86,17 +97,19 @@ spec:
               port: http
             failureThreshold: 30
             periodSeconds: 5
+            timeoutSeconds: 10
           readinessProbe:
             httpGet:
               path: /api/healthz
               port: http
             periodSeconds: 10
+            timeoutSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /api/healthz
+            tcpSocket:
               port: http
             initialDelaySeconds: 20
             periodSeconds: 20
+            timeoutSeconds: 3
           resources:
             requests:
               cpu: 200m
@@ -127,6 +140,15 @@ spec:
     spec:
       securityContext:
         fsGroup: 10001
+      initContainers:
+        - name: wait-dependencies
+          image: postgres:17-bookworm
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              until pg_isready -h postgres -U nav -d nav; do sleep 2; done
       containers:
         - name: nav-auth
           image: nav-saas:dev
@@ -195,6 +217,17 @@ spec:
     spec:
       securityContext:
         fsGroup: 10001
+      initContainers:
+        - name: wait-dependencies
+          image: postgres:17-bookworm
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              until pg_isready -h postgres -U nav -d nav; do sleep 2; done
+              until (: >/dev/tcp/rabbitmq/5672) 2>/dev/null; do sleep 2; done
+              until (: >/dev/tcp/redis/6379) 2>/dev/null; do sleep 2; done
       containers:
         - name: nav-calc-worker
           image: nav-saas:dev
@@ -262,3 +295,10 @@ data:
   APP_LOG_FORMAT: json
   APP_AUTH_METRICS_URL: http://nav-auth:9091/metrics
   APP_WORKER_METRICS_URL: http://nav-calc-worker:9092/metrics
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_TRACES_SAMPLER_ARG: "1"
+  APP_GRAFANA_URL: /grafana/
+  APP_PROMETHEUS_URL: /prometheus/
+  APP_K6_GRAFANA_URL: /grafana/d/nav-k6-load/k6-load-test
+  APP_LOKI_URL: /grafana/explore
+  APP_TEMPO_URL: /grafana/explore

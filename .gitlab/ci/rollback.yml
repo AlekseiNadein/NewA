@@ -1,0 +1,22 @@
+rollback:staging:
+  stage: rollback
+  image: bitnami/kubectl:1.33
+  resource_group: newa-staging
+  environment:
+    name: staging
+    action: stop
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: false
+  script:
+    - test -n "$KUBE_CONTEXT"
+    - test -n "$LAST_KNOWN_GOOD_IMAGE"
+    - kubectl config use-context "$KUBE_CONTEXT"
+    - kubectl -n newa-staging set image deployment/nav-api nav-api="$LAST_KNOWN_GOOD_IMAGE"
+    - kubectl -n newa-staging set image deployment/nav-auth nav-auth="$LAST_KNOWN_GOOD_IMAGE"
+    - kubectl -n newa-staging set image deployment/nav-calc-worker nav-calc-worker="$LAST_KNOWN_GOOD_IMAGE"
+    - kubectl -n newa-staging rollout status deployment/nav-auth --timeout=300s
+    - kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
+    - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
+    - sh scripts/verify-staging.sh

@@ -31,4 +31,4 @@ alwaysApply: true
 ## При правках NewA
 
 - Меняя nginx/auth/login/JWT/calc tables — проверяй совместимость с ProjectStatus.
-- `run.bat` **не** стартует ProjectStatus; без `:8100` UI даёт `502`.
+- `run.bat` поднимает ProjectStatus через `scripts/restart-project-status.bat` (репозиторий `C:\Codex\ProjectStatus`, `:8100`); без него UI даёт `502`.

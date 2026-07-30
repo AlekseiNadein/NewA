@@ -1,0 +1,77 @@
+discovery.kubernetes "nav_pods" {
+	role = "pod"
+
+	namespaces {
+		names = ["nav"]
+	}
+}
+
+discovery.relabel "nav_pods" {
+	targets = discovery.kubernetes.nav_pods.targets
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_app"]
+		regex         = "nav-api|nav-auth|nav-calc-worker|project-status"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_namespace"]
+		target_label  = "namespace"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_name"]
+		target_label  = "pod"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_container_name"]
+		target_label  = "container"
+	}
+
+	rule {
+		source_labels = ["__meta_kubernetes_pod_label_app"]
+		target_label  = "service"
+	}
+
+	rule {
+		replacement  = "nav"
+		target_label = "job"
+	}
+}
+
+loki.source.kubernetes "nav_pods" {
+	targets    = discovery.relabel.nav_pods.output
+	forward_to = [loki.process.nav_logs.receiver]
+}
+
+loki.process "nav_logs" {
+	stage.json {
+		expressions = {
+			level       = "level",
+			service     = "service",
+			msg         = "msg",
+			request_id  = "request_id",
+			estimate_id = "estimate_id",
+			line_id     = "line_id",
+			code        = "code",
+			trace_id    = "trace_id",
+			span_id     = "span_id",
+		}
+	}
+
+	stage.labels {
+		values = {
+			level = "",
+		}
+	}
+
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

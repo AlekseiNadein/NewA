@@ -73,6 +73,270 @@ run.bat
 Импорт справочников (не при старте): `import_regions`, `import_resource_codifier`, `import_fgis_cs`.  
 Принудительный импорт users/companies из JSON: `go run .\backend\cmd\migrate_auth` (нужен `APP_AUTH_DATABASE_URL`).
 
+## Деплой в k3s (актуально на 2026-07-27)
+
+Это второй способ запуска NAV, отдельный от Windows-профиля `run.bat`.
+Одноузловой k3s работает внутри WSL2-дистрибутива `Ubuntu-24.04`, доступ из
+Windows организован через Docker-прокси. Базовый профиль и инструкции находятся
+в `deploy/k3s/`.
+
+### Проверенное живое состояние
+
+Снимок кластера на 2026-07-27:
+
+| Параметр | Значение |
+|----------|----------|
+| Node | `nadein-envyi5`, `Ready` |
+| k3s | `v1.36.2+k3s1` |
+| WSL node IP | `172.21.18.205` (может измениться после перезапуска WSL) |
+| Namespace | `nav` |
+| Ingress | встроенный Traefik, host `nav.local` |
+| Windows URL | `http://127.0.0.1:8088` через контейнер `nav-k3s-proxy` |
+| Постоянное хранилище | `local-path`: PostgreSQL 20 GiB, RabbitMQ 5 GiB, Redis 2 GiB |
+
+В `Ready` находятся:
+
+- `nav-api`, `nav-auth`, `nav-calc-worker`;
+- PostgreSQL 17, RabbitMQ 4.1, Redis 8;
+- `project-status` из соседнего репозитория `C:\Codex\ProjectStatus`;
+- системные CoreDNS, Traefik, metrics-server и local-path-provisioner.
+
+Все основные workload имеют по одному экземпляру. Это локальный
+single-node-профиль, не HA и не production topology.
+
+### Запуск после перезагрузки Windows
+
+Основная команда из корня проекта:
+
+```bat
+start-nav.bat
+```
+
+Скрипт:
+
+1. проверяет и при необходимости запускает Docker Desktop;
+2. вызывает `deploy/k3s/start-wsl-k3s.ps1`;
+3. удерживает WSL запущенным через скрытый `flock ... sleep infinity` и проверяет
+   `systemctl is-active k3s`;
+4. ждёт `Ready` у node и всех pod в namespace `nav`;
+5. заново определяет IP WSL;
+6. пересоздаёт `nav-k3s-proxy` (`nginx:latest`, `restart=unless-stopped`,
+   `127.0.0.1:8088 -> <WSL-IP>:80`);
+7. проверяет `GET /api/healthz` через Traefik с заголовком `Host: nav.local`.
+
+Прокси нужно обновлять после смены IP WSL. Отдельный Linux-вариант:
+
+```bash
+./deploy/k3s/start-windows-proxy.sh
+```
+
+Шаблон nginx для него — `deploy/k3s/windows-proxy.conf.template`.
+
+### Сборка и повторный деплой NAV
+
+Из WSL:
+
+```bash
+cd /mnt/c/NAV/Cursor/NewA
+chmod +x deploy/k3s/deploy.sh
+./deploy/k3s/deploy.sh
+```
+
+`deploy.sh` собирает локальный образ `nav-saas:dev`, сохраняет его в tar,
+импортирует в containerd k3s, создаёт/повторно использует `nav-secrets`,
+применяет `deploy/k3s/kustomization.yaml` и ждёт rollout.
+
+Внешний registry сейчас не используется: `imagePullPolicy: Never`. Если у
+текущего пользователя нет прямого доступа к socket containerd, реализован
+fallback без интерактивного `sudo`: локальный бинарник k3s и socket монтируются
+в одноразовый контейнер уже собранного образа, из которого выполняется
+`ctr images import`.
+
+При первом deploy rollout restart не вызывается; при повторном — перезапускаются
+`nav-api`, `nav-auth`, `nav-calc-worker`. Таймаут ожидания stateful-сервисов
+увеличен до 600 секунд.
+
+### Устойчивость старта
+
+В `deploy/k3s/app.yaml` добавлены init containers:
+
+- `nav-api` ждёт PostgreSQL, RabbitMQ и Redis;
+- `nav-auth` ждёт PostgreSQL;
+- `nav-calc-worker` ждёт PostgreSQL, RabbitMQ и Redis.
+
+Для `nav-api` startup/readiness HTTP probes получили увеличенные timeout, а
+liveness переведён на TCP, чтобы временно медленный `/api/healthz` не создавал
+цикл рестартов. Для RabbitMQ увеличены timeout probes и порог liveness failures.
+Метрики сервисов опубликованы внутри кластера:
+
+| Service | Metrics |
+|---------|---------|
+| `nav-api` | `http://nav-api:9090/metrics` |
+| `nav-auth` | `http://nav-auth:9091/metrics` |
+| `nav-calc-worker` | `http://nav-calc-worker:9092/metrics` |
+
+`nav-api` получает внутренние URL auth/worker metrics через `nav-config`.
+
+### Секреты и данные
+
+Secret `nav-secrets` содержит подключения к PostgreSQL/RabbitMQ и общий JWT
+secret. Значения в документацию и Git не сохранять. Повторный deploy сохраняет
+существующий secret и PVC.
+
+Ротация PostgreSQL выполняется согласованно в БД и Kubernetes Secret:
+
+```bash
+./deploy/k3s/rotate-postgres-password.sh
+```
+
+Скрипт после изменения пароля обновляет secret и перезапускает три NAV
+deployment. Перед переносом/удалением namespace необходимо отдельно сохранить
+БД и secret во внешнем защищённом хранилище. Процедура dump/restore описана в
+`deploy/k3s/README.md`.
+
+### Маршрутизация
+
+Основной ingress `deploy/k3s/ingress.yaml` направляет auth endpoints в
+`nav-auth`, остальные пути — в `nav-api`. Для совместимости с текущим Traefik
+используется annotation `kubernetes.io/ingress.class: traefik`. Маршрут
+`/api/me` имеет `pathType: Prefix`.
+
+ProjectStatus фактически развёрнут в кластере отдельным deployment с образом
+`project-status:dev` и `imagePullPolicy: Never`. Он:
+
+- использует `APP_DATABASE_URL` и `APP_JWT_SECRET` из общего `nav-secrets`;
+- вызывает пересчёт по
+  `http://nav-api:8090/api/estimates/{estimateId}/calc?force=1`;
+- работает non-root с read-only root filesystem;
+- доступен через отдельный ingress по `/projectStatusDesktop`,
+  `/projectStatusMobile` и `/api/project-status/graphql`.
+
+Важно: манифесты ProjectStatus принадлежат соседнему репозиторию и не входят в
+`deploy/k3s/kustomization.yaml` этого проекта. Поэтому повторный deploy NAV его
+не создаёт и не обновляет. Ограничение в конце `deploy/k3s/README.md` о том, что
+ProjectStatus не включён в этот репозиторий, относится именно к исходным
+манифестам, а не к фактическому состоянию текущего кластера.
+
+### Observability в k3s
+
+Полный стек перенесён в `deploy/k3s/observability/` и развёрнут в текущем
+кластере 2026-07-27:
+
+| Компонент | Роль | Хранение |
+|-----------|------|----------|
+| Prometheus | scrape трёх NAV `/metrics`, пять alert rules | PVC 5 GiB, 7 дней / 4 GB |
+| Grafana | provisioned datasources, `NAV Overview` и `k6 Load Test` | PVC 1 GiB |
+| Loki | централизованные JSON pod logs | PVC 5 GiB, 7 дней |
+| Tempo | distributed traces | PVC 5 GiB, 7 дней |
+| OTel Collector | OTLP HTTP/gRPC → Tempo | stateless |
+| Alloy | Kubernetes pod logs API → Loki | stateless |
+
+Публичный доступ через тот же Traefik и Windows proxy:
+
+- `http://127.0.0.1:8088/grafana/`;
+- `http://127.0.0.1:8088/prometheus/`.
+
+Локальные данные Grafana: `admin` / `admin`. Для общего окружения пароль
+задаётся через `GRAFANA_ADMIN_PASSWORD` и хранится в
+`observability-secrets/GRAFANA_ADMIN_PASSWORD`. Дашборд k6 доступен по
+`/grafana/d/nav-k6-load/k6-load-test`; Prometheus принимает его метрики через
+`/prometheus/api/v1/write`. Prometheus в локальном профиле
+не имеет аутентификации; ingress нельзя публиковать во внешнюю сеть. Loki,
+Tempo, OTel Collector и Alloy доступны только внутри кластера.
+
+Alloy читает только pod с `app=nav-api|nav-auth|nav-calc-worker|project-status`
+в namespace `nav` через Kubernetes API. Privileged mode и hostPath не
+используются. Логи продолжают быть доступны через `kubectl logs`.
+
+NAV получает `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`.
+Порядок rollout в скриптах: storage/query backends → collectors → NAV telemetry
+producers. Это предотвращает startup backlog и потерю первых trace/log batches.
+
+Проверено end-to-end 2026-07-27:
+
+- Prometheus: `up=1` для `nav-api`, `nav-auth`, `nav-calc-worker`;
+- Loki: запрос `{job="nav"}` возвращает JSON-логи NAV с `trace_id`;
+- Tempo: поиск возвращает traces `nav-api`, включая `GET /api/healthz`;
+- Grafana `/grafana/api/health` и Prometheus `/prometheus/-/ready` через ingress
+  отвечают HTTP 200;
+- после стабилизации в Alloy и OTel Collector нет export errors.
+
+Установка поверх работающего NAV без пересборки образа:
+
+```bash
+./deploy/k3s/deploy-observability.sh
+```
+
+Основной `deploy/k3s/deploy.sh` также устанавливает и обновляет observability.
+При первом запуске загрузка шести образов в отдельный containerd k3s может
+занять несколько минут.
+
+Проверка metrics через Kubernetes API proxy:
+
+```bash
+k3s kubectl get --raw \
+  /api/v1/namespaces/nav/services/http:nav-api:9090/proxy/metrics
+k3s kubectl get --raw \
+  /api/v1/namespaces/nav/services/http:nav-auth:9091/proxy/metrics
+k3s kubectl get --raw \
+  /api/v1/namespaces/nav/services/http:nav-calc-worker:9092/proxy/metrics
+```
+
+Prometheus rules обнаруживают недоступность NAV service, потерю RabbitMQ
+connection, непустую DLQ, устаревший heartbeat worker и outbox backlog.
+Alertmanager/внешние email/webhook-уведомления пока не добавлены.
+
+### Диагностика и обслуживание
+
+Из Windows команды выполняются через WSL:
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -u root -- k3s kubectl get nodes -o wide
+wsl.exe -d Ubuntu-24.04 -u root -- k3s kubectl get pods,svc,ingress,pvc -A
+wsl.exe -d Ubuntu-24.04 -u root -- k3s kubectl -n nav logs deployment/nav-api --tail=100
+wsl.exe -d Ubuntu-24.04 -u root -- k3s kubectl -n nav logs deployment/nav-auth --tail=100
+wsl.exe -d Ubuntu-24.04 -u root -- k3s kubectl -n nav logs deployment/nav-calc-worker --tail=100
+docker ps --filter name=nav-k3s-proxy
+```
+
+Локальный Windows `kubectl` сам по себе сейчас не настроен: current-context
+отсутствует. Для Lens/API-доступа заготовлен
+`deploy/k3s/configure-lens-portproxy.ps1`: он создаёт Windows portproxy
+`127.0.0.1:6443 -> <WSL-IP>:6443` и требует административных прав.
+
+Пошаговый upgrade старого k3s до текущей цепочки minor-версий реализован в
+`deploy/k3s/upgrade-k3s-minors.sh`. Запускать только от root. Скрипт обновляет
+по одной minor-версии, после каждой ждёт node/Traefik и проверяет NAV ingress.
+Он содержит WSL workaround: перед upgrade размонтирует `/Docker/host`, потому
+что старые kubelet не разбирают mount source с пробелом в `C:\Program Files`.
+
+### Оставшиеся ограничения и следующие шаги
+
+- нет TLS, внешнего secret manager, registry и HA;
+- все stateful workload привязаны к единственному WSL node через `local-path`;
+- нет автоматического backup/restore PVC и disaster-recovery процедуры;
+- ProjectStatus не управляется kustomization этого репозитория;
+- observability работает в single-binary/local-storage режиме без HA,
+  Alertmanager и backup;
+- `start-nav.bat` жёстко привязан к distro `Ubuntu-24.04` и node
+  `nadein-envyi5`;
+- после смены WSL IP нужно обновлять Windows proxy/API portproxy;
+- начальный `admin@example.com / admin123` допустим только для bootstrap и
+  должен быть немедленно изменён.
+
+Ключевые файлы текущих наработок:
+
+```text
+start-nav.bat
+deploy/k3s/{README.md,deploy.sh,kustomization.yaml,app.yaml,ingress.yaml}
+deploy/k3s/{postgres.yaml,rabbitmq.yaml,redis.yaml,storage.yaml}
+deploy/k3s/{deploy-observability.sh,observability/}
+deploy/k3s/{start-wsl-k3s.ps1,start-windows-proxy.sh,windows-proxy.conf.template}
+deploy/k3s/{configure-lens-portproxy.ps1,upgrade-k3s-minors.sh}
+deploy/k3s/rotate-postgres-password.sh
+deploy/k3s/smoke-observability.sh
+```
+
 ## Состояние проектов / ProjectStatus (2026-07-18)
 
 Смежный сервис аналитики и статуса строек. **Отдельный репозиторий:** `C:\Codex\ProjectStatus`.  

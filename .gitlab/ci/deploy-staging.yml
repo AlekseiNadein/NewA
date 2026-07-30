@@ -1,0 +1,36 @@
+deploy:staging:
+  stage: deploy
+  image: bitnami/kubectl:1.33
+  needs:
+    - publish:image
+  resource_group: newa-staging
+  environment:
+    name: staging
+    deployment_tier: staging
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - test -n "$KUBE_CONTEXT"
+    - test -n "$IMAGE_REPOSITORY"
+    - test -n "$IMAGE_DIGEST"
+    - kubectl config use-context "$KUBE_CONTEXT"
+    - kubectl create namespace newa-staging --dry-run=client -o yaml | kubectl apply -f -
+    - |
+      if [ -n "$STAGING_REGISTRY_USER" ] && [ -n "$STAGING_REGISTRY_PASSWORD" ]; then
+        kubectl -n newa-staging create secret docker-registry newa-registry-pull \
+          --docker-server="$CI_REGISTRY" \
+          --docker-username="$STAGING_REGISTRY_USER" \
+          --docker-password="$STAGING_REGISTRY_PASSWORD" \
+          --dry-run=client -o yaml | kubectl apply -f -
+      fi
+    - kubectl kustomize deploy/environments/staging | sed "s|image: nav-saas:dev|image: ${IMAGE_REPOSITORY}@${IMAGE_DIGEST}|g" | kubectl apply -f -
+    - kubectl -n newa-staging rollout status deployment/nav-auth --timeout=300s
+    - kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
+    - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
+    - kubectl -n newa-staging get deploy -o wide
+    - sh scripts/verify-staging.sh
+    - sh scripts/resolve-last-known-good.sh
+  artifacts:
+    when: always
+    paths:
+      - out/last-known-good.env

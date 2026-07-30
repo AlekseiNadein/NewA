@@ -24,8 +24,9 @@ alwaysApply: true
 | Auth service | `:8081` | `scripts/restart-auth-server.bat` |
 | API + frontend | `:8090` | `run.bat` (основной процесс) |
 | Сервис расчёта смет | — | `scripts/restart-calc-worker.bat` |
+| ProjectStatus | `:8100` | `scripts/restart-project-status.bat` |
 
-`run.bat` **автоматически** перезапускает auth, calc worker и nginx перед стартом API.
+`run.bat` **автоматически** перезапускает auth, calc worker, ProjectStatus и nginx перед стартом API.
 
 ## Запускать сервер только с указанием окружения
 
@@ -44,7 +45,7 @@ alwaysApply: true
 ## Как перезапускать
 
 1. Останови текущий процесс на `:8090` (или `data\nav-server.exe`), если он запущен.
-2. Запусти backend **только** через `run.bat` (он перезапустит auth, calc worker, nginx и выставит все переменные):
+2. Запусти backend **только** через `run.bat` (он перезапустит auth, calc worker, ProjectStatus, nginx и выставит все переменные):
 
 ```powershell
 cd C:\NAV\Cursor\NewA
@@ -53,11 +54,12 @@ cd C:\NAV\Cursor\NewA
 
 Если нужен фоновый запуск без `run.bat` — сначала задай те же `APP_*` переменные, затем запускай бинарник.
 
-3. После `run.bat` убедись, что поднялись **все четыре** компонента:
+3. После `run.bat` убедись, что поднялись **все** компоненты:
    - `nginx.exe` слушает `:8080`, ответ на `http://localhost:8080`
    - `nav-auth-server.exe` слушает `:8081`
    - `nav-server.exe` слушает `:8090`
    - `nav-calc-worker.exe` запущен (нет ошибки `GSN database is not configured` в логе worker)
+   - `project-status.exe` слушает `:8100`, `GET http://127.0.0.1:8100/healthz` → `{"status":"ok"}`
    - GSN доступен в UI (нет ошибки `GSN database is not configured`)
 
 ## После перезапуска

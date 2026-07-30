@@ -1,0 +1,174 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "none" } },
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "targets": [{ "expr": "up", "legendFormat": "{{job}}" }],
+      "title": "Service Up",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum(rate(nav_http_requests_total[5m])) by (route)",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "title": "HTTP Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nav_http_request_duration_seconds_bucket[5m])) by (le, route))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "title": "HTTP Latency p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "targets": [
+        { "expr": "nav_outbox_pending", "legendFormat": "outbox pending" },
+        { "expr": "nav_rabbit_queue_depth{queue=\"estimate.calc.dlq\"}", "legendFormat": "DLQ" },
+        { "expr": "nav_rabbit_queue_depth{queue=\"estimate.calc.main\"}", "legendFormat": "main queue" }
+      ],
+      "title": "Queue Depths",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 5,
+      "targets": [
+        { "expr": "nav_rabbit_connected", "legendFormat": "{{role}}" },
+        { "expr": "nav_calc_consumer_heartbeat_age_seconds", "legendFormat": "heartbeat age" }
+      ],
+      "title": "Rabbit / Consumer Health",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "sum(rate(nav_calc_processed_total[5m])) by (result)",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "title": "Calc Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nav_calc_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "total p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nav_calc_gsn_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "gsn p95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(nav_calc_pricing_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "pricing p95"
+        }
+      ],
+      "title": "Calc Duration p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum(rate(nav_calc_errors_total[5m])) by (stage)",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "title": "Calc Errors by Stage",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 28 },
+      "id": 9,
+      "targets": [
+        { "expr": "nav_calc_consumer_processed", "legendFormat": "processed" },
+        { "expr": "nav_calc_consumer_failed", "legendFormat": "failed" },
+        { "expr": "nav_calc_consumer_duplicates", "legendFormat": "duplicates" },
+        { "expr": "rate(nav_estimate_calc_start_total[5m])", "legendFormat": "calc starts/s" }
+      ],
+      "title": "Calc Pipeline Counters",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 36 },
+      "id": 10,
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"nav\"} | json | level=~\"WARN|ERROR\"",
+          "legendFormat": ""
+        }
+      ],
+      "title": "Recent Warnings and Errors",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 46 },
+      "id": 11,
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "expr": "{job=\"nav\"} | json | msg=~\"rabbit calc.*\"",
+          "legendFormat": ""
+        }
+      ],
+      "title": "Calc Worker Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["nav"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "NAV Overview",
+  "uid": "nav-overview",
+  "version": 2
+}
+
+

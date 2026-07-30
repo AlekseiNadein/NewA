@@ -8,6 +8,8 @@
 - PostgreSQL 17 — постоянное состояние приложения и GSN;
 - RabbitMQ 4.1 — очередь расчётов;
 - Redis 8 — кэш GSN;
+- Prometheus, Grafana, Loki, Tempo, OpenTelemetry Collector и Grafana Alloy —
+  метрики, дашборды, логи и распределённые трейсы;
 - Traefik Ingress — единая точка входа `http://nav.local`.
 
 PostgreSQL, RabbitMQ и Redis используют PVC стандартного storage class k3s
@@ -17,10 +19,10 @@ PostgreSQL, RabbitMQ и Redis используют PVC стандартного 
 ## Требования
 
 - k3s и встроенный Traefik;
-- `sudo` без интерактивного запроса для `k3s` либо заранее настроенные
-  переменные `KUBECTL` и `K3S`;
+- чтение kubeconfig k3s текущим пользователем;
 - Docker или Podman внутри того же WSL-дистрибутива, где работает k3s;
-- не менее 4 ГиБ свободной RAM и 30 ГиБ диска.
+- не менее 8 ГиБ свободной RAM и 50 ГиБ диска для полного профиля с
+  observability.
 
 ## Деплой из WSL
 
@@ -38,7 +40,11 @@ chmod +x deploy/k3s/deploy.sh
 2. импортирует образ в containerd k3s без внешнего registry;
 3. генерирует случайные пароли PostgreSQL/RabbitMQ и JWT secret;
 4. применяет манифесты;
-5. ждёт готовности всех компонентов.
+5. ждёт готовности приложения и observability-компонентов.
+
+Если Unix-сокет containerd недоступен текущему пользователю, скрипт монтирует
+локальный бинарник k3s и сокет в одноразовый контейнер собранного приложения.
+Пароль `sudo` и загрузка дополнительного образа для этого не нужны.
 
 Повторный запуск сохраняет данные в PVC и повторно использует существующий
 `nav-secrets`. Для переноса в другой кластер или восстановления после удаления
@@ -58,6 +64,12 @@ export APP_JWT_SECRET='...'
 sudo k3s kubectl -n nav get secret nav-secrets -o yaml
 ```
 
+Ротация пароля PostgreSQL с согласованным обновлением Kubernetes Secret:
+
+```bash
+./deploy/k3s/rotate-postgres-password.sh
+```
+
 ## Доступ
 
 Узнать адрес узла:
@@ -67,7 +79,7 @@ hostname -I
 sudo k3s kubectl get ingress -n nav
 ```
 
-В Windows добавить строку в файл
+Если Windows напрямую видит IP узла WSL, добавить строку в файл
 `C:\Windows\System32\drivers\etc\hosts`:
 
 ```text
@@ -81,6 +93,33 @@ hosts:
 curl -H 'Host: nav.local' http://127.0.0.1/api/healthz
 ```
 
+Если localhost forwarding WSL отключён, запустить прокси через Docker Desktop:
+
+```bash
+./deploy/k3s/start-windows-proxy.sh
+```
+
+После этого приложение доступно в Windows по `http://localhost:8088` без
+изменения `hosts`. После смены IP WSL скрипт нужно запустить повторно.
+
+Через тот же ingress доступны:
+
+- Grafana: `http://localhost:8088/grafana/`;
+- Prometheus: `http://localhost:8088/prometheus/`.
+
+Локальные данные Grafana: `admin` / `admin`. Для общего окружения задайте
+`GRAFANA_ADMIN_PASSWORD` перед первым запуском; значение хранится в Kubernetes
+Secret `observability-secrets`.
+
+Дашборд k6: `http://localhost:8088/grafana/d/nav-k6-load/k6-load-test`.
+Он показывает данные после нагрузочного запуска с Prometheus remote write:
+
+```bat
+set K6_BASE_URL=http://host.docker.internal:8088
+set K6_PROMETHEUS_RW_SERVER_URL=http://host.docker.internal:8088/prometheus/api/v1/write
+scripts\run-k6-load.bat
+```
+
 На пустой базе код создаёт пользователя `admin@example.com` с паролем
 `admin123`. Пароль нужно сменить сразу после первого входа.
 
@@ -91,6 +130,8 @@ sudo k3s kubectl -n nav get pods,svc,ingress,pvc
 sudo k3s kubectl -n nav logs deployment/nav-api --tail=100
 sudo k3s kubectl -n nav logs deployment/nav-auth --tail=100
 sudo k3s kubectl -n nav logs deployment/nav-calc-worker --tail=100
+sudo k3s kubectl -n nav get pods \
+  -l 'app in (prometheus,grafana,loki,tempo,otel-collector,alloy)'
 ```
 
 Проверка маршрутизации auth:
@@ -133,11 +174,72 @@ sudo k3s kubectl -n nav rollout restart \
 нужен registry, а в `deploy/k3s/app.yaml` следует заменить
 `imagePullPolicy: Never` на `IfNotPresent` или `Always`.
 
+## Observability
+
+Полный observability-профиль входит в `deploy/k3s/kustomization.yaml` и
+устанавливается основным `deploy.sh`. Если NAV уже развёрнут и пересобирать его
+образ не требуется:
+
+```bash
+chmod +x deploy/k3s/deploy-observability.sh
+./deploy/k3s/deploy-observability.sh
+```
+
+Состав:
+
+| Компонент | Назначение | PVC / retention |
+|-----------|------------|-----------------|
+| Prometheus | scrape `nav-api`, `nav-auth`, `nav-calc-worker`, alert rules | 5 GiB, 7 дней / 4 GB |
+| Grafana | datasource provisioning, `NAV Overview` и `k6 Load Test` | 1 GiB |
+| Loki | JSON pod logs | 5 GiB, 7 дней |
+| Tempo | OTLP traces | 5 GiB, 7 дней |
+| OTel Collector | OTLP HTTP/gRPC ingress и batch export в Tempo | без PVC |
+| Alloy | чтение NAV pod logs через Kubernetes API и отправка в Loki | без PVC |
+
+Alloy не использует privileged mode и hostPath: один collector читает логи
+только из namespace `nav` через Kubernetes API. RBAC ограничен `pods` и
+`pods/log`. Loki и Tempo не публикуются через ingress; к ним обращается Grafana
+по ClusterIP. Grafana требует login, Prometheus в локальном профиле доступен
+без аутентификации — не публикуйте ingress во внешнюю сеть.
+
+NAV получает `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318`, а ссылки
+раздела «Мониторинг» ведут на `/grafana/` и `/prometheus/`. Логи остаются JSON
+в stdout, поэтому их одновременно видит `kubectl logs` и собирает Alloy.
+
+Prometheus загружает правила:
+
+- недоступность NAV service;
+- потеря RabbitMQ connection;
+- сообщения в calculation DLQ;
+- устаревший heartbeat calc worker;
+- рост outbox backlog.
+
+Alertmanager и внешние уведомления пока не включены: правила видны в
+Prometheus/Grafana, но email/webhook не отправляются.
+
+Проверка:
+
+```bash
+chmod +x deploy/k3s/smoke-observability.sh
+./deploy/k3s/smoke-observability.sh
+```
+
+Smoke-тест проверяет Ready deployments, три Prometheus target, коррелированные
+логи в Loki, traces в Tempo, ingress и provisioning Grafana, health datasource
+и загрузку alert rules. Пароль Grafana читается из Secret внутри скрипта и не
+выводится.
+
+Конфигурация находится в `deploy/k3s/observability/`. Используются закреплённые
+версии из существующего Docker-профиля `deploy/observability/`, чтобы оба
+варианта запуска оставались сопоставимыми.
+
 ## Ограничения текущего профиля
 
 - один экземпляр каждого stateful-сервиса и один worker;
 - нет TLS и внешнего secret manager;
-- observability-стек из `deploy/observability` не перенесён;
+- observability развёрнут в single-binary/local-storage режиме и не является
+  HA; filesystem storage Loki/Tempo подходит только для локального профиля;
+- нет Alertmanager и внешних каналов уведомлений;
 - `/projectStatusDesktop`, `/projectStatusMobile` и
   `/api/project-status/graphql` не включены: соответствующего сервиса нет в
   этом репозитории;

@@ -2,8 +2,9 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: nav
+  annotations:
+    kubernetes.io/ingress.class: traefik
 spec:
-  ingressClassName: traefik
   rules:
     - host: nav.local
       http:
@@ -30,7 +31,7 @@ spec:
                 port:
                   name: http
           - path: /api/me
-            pathType: Exact
+            pathType: Prefix
             backend:
               service:
                 name: nav-auth

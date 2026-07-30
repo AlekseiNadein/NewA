@@ -1,0 +1,9 @@
+test:go-unit:
+  stage: test
+  image: golang:1.25
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - go mod download
+    - go test ./backend/... -count=1

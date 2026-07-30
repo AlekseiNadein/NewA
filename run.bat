@@ -7,6 +7,9 @@ if errorlevel 1 exit /b 1
 call scripts\restart-calc-worker.bat
 if errorlevel 1 exit /b 1
 
+call scripts\restart-project-status.bat
+if errorlevel 1 exit /b 1
+
 call scripts\restart-nginx.bat
 if errorlevel 1 exit /b 1
 

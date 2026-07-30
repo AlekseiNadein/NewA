@@ -80,6 +80,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/api/gsn/regions", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNRegions))))
 	mux.Handle("/api/gsn/fgis-sets", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNFGISSets))))
 	mux.Handle("/api/gsn/fgis-rows", s.withAuth(s.withAuthorized(http.HandlerFunc(s.handleGSNFGISRows))))
+	mux.HandleFunc("/login", s.serveLogin)
+	mux.HandleFunc("/login/", s.serveLogin)
 	mux.HandleFunc("/admin", s.serveAdmin)
 	mux.HandleFunc("/admin/", s.serveAdmin)
 	mux.Handle("/", s.static)
@@ -1110,6 +1112,14 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeFile(w, r, filepath.Join(s.webDir, "admin.html"))
+}
+
+func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	http.ServeFile(w, r, filepath.Join(s.webDir, "login.html"))
 }
 
 func (s *Server) withAdmin(next http.Handler) http.Handler {

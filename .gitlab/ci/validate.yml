@@ -1,0 +1,19 @@
+validate:go-vet:
+  stage: validate
+  image: golang:1.25
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - go mod download
+    - go vet ./backend/...
+
+validate:kustomize:
+  stage: validate
+  image: bitnami/kubectl:1.33
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - kubectl kustomize deploy/k3s > /dev/null
+    - kubectl kustomize deploy/environments/staging > /dev/null

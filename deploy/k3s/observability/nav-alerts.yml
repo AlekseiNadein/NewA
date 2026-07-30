@@ -1,0 +1,42 @@
+groups:
+  - name: nav
+    rules:
+      - alert: NavServiceDown
+        expr: up{job=~"nav-.+"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NAV service {{ $labels.job }} is unavailable"
+
+      - alert: NavRabbitDisconnected
+        expr: nav_rabbit_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ role {{ $labels.role }} is disconnected"
+
+      - alert: NavDeadLetterQueueNotEmpty
+        expr: max(nav_rabbit_queue_depth{queue="estimate.calc.dlq"}) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NAV calculation DLQ contains messages"
+
+      - alert: NavCalcConsumerStale
+        expr: max(nav_calc_consumer_heartbeat_age_seconds) > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NAV calculation consumer heartbeat is stale"
+
+      - alert: NavOutboxBacklog
+        expr: max(nav_outbox_pending) > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NAV outbox backlog is above 50 messages"
