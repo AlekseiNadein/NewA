@@ -109,6 +109,9 @@ jobs:
       - Linux
       - newa-staging
     environment: staging
+    permissions:
+      contents: read
+      packages: read
     env:
       KUBECONFIG: /home/alexey/.kube/newa-staging-ci
     steps:
@@ -118,8 +121,8 @@ jobs:
         run: kubectl config use-context "${{ vars.KUBE_CONTEXT }}"
       - name: Configure GHCR pull credential
         env:
-          GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME }}
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_PULL_USERNAME: ${{ secrets.GHCR_PULL_USERNAME || github.actor }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           test -n "$GHCR_PULL_USERNAME"
           test -n "$GHCR_PULL_TOKEN"
