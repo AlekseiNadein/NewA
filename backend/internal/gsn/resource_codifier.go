@@ -64,7 +64,10 @@ func extractNormCodeFromCodifierField(raw string) string {
 	return ""
 }
 
-func resourceNumberKey(resourceCode string) string {
+// ResourceNumberKey returns the digit-only lookup key for a resource code.
+// Leading type labels (М/С/Т) are stripped when followed by a digit; only digits remain.
+// Example: "М11762" → "11762". Use RecordResource.Number for enriched catalog rows.
+func ResourceNumberKey(resourceCode string) string {
 	resourceCode = strings.TrimSpace(resourceCode)
 	if resourceCode == "" {
 		return ""
@@ -87,6 +90,10 @@ func resourceNumberKey(resourceCode string) string {
 		}
 	}
 	return digits.String()
+}
+
+func resourceNumberKey(resourceCode string) string {
+	return ResourceNumberKey(resourceCode)
 }
 
 func ParseResourceCodifierFile(path string) ([]ResourceCodifierRow, error) {

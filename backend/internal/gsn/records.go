@@ -9,6 +9,7 @@ import (
 
 type RecordResource struct {
 	Code           string `json:"code"`
+	Number         string `json:"number,omitempty"` // digit key from resource_codifier / source popravka
 	OriginalCode   string `json:"originalCode,omitempty"`
 	Name           string `json:"name"`
 	Unit           string `json:"unit"`
@@ -17,6 +18,12 @@ type RecordResource struct {
 	UnitPriceIndex string `json:"unitPriceIndex,omitempty"`
 	Determinant    string `json:"determinant,omitempty"`
 	Mass           string `json:"mass,omitempty"`
+}
+
+// ResourceNumberReplacement replaces a norm resource matched by digit number.
+type ResourceNumberReplacement struct {
+	FromNumber string
+	ToNumber   string
 }
 
 type RecordDetail struct {
@@ -302,10 +309,142 @@ func (s *Service) listRecordResources(ctx context.Context, recordCode, fgisSetID
 		}
 	}
 
+	return s.buildRecordResources(rawItems, codifiers, normInfos, fgisRows, district), nil
+}
+
+// ApplyResourceNumberReplacements replaces resources matched by digit number.
+// QuantityText of the original resource is preserved; the target is re-resolved from GSN.
+func (s *Service) ApplyResourceNumberReplacements(
+	ctx context.Context,
+	resources []RecordResource,
+	replacements []ResourceNumberReplacement,
+	fgisSetID, district string,
+) ([]RecordResource, error) {
+	if len(resources) == 0 || len(replacements) == 0 {
+		return resources, nil
+	}
+
+	replaceTo := make(map[string]string, len(replacements))
+	toNumbers := make([]string, 0, len(replacements))
+	for _, rep := range replacements {
+		from := strings.TrimSpace(rep.FromNumber)
+		to := strings.TrimSpace(rep.ToNumber)
+		if from == "" || to == "" || from == to {
+			continue
+		}
+		replaceTo[from] = to
+		toNumbers = append(toNumbers, to)
+	}
+	if len(replaceTo) == 0 {
+		return resources, nil
+	}
+
+	targets, err := s.resolveResourcesByNumbers(ctx, toNumbers, fgisSetID, district)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]RecordResource, len(resources))
+	copy(out, resources)
+	for i := range out {
+		number := strings.TrimSpace(out[i].Number)
+		if number == "" {
+			number = resourceNumberKey(out[i].Code)
+		}
+		to, ok := replaceTo[number]
+		if !ok {
+			continue
+		}
+		qty := out[i].QuantityText
+		if target, found := targets[to]; found {
+			out[i] = target
+			out[i].QuantityText = qty
+			continue
+		}
+		out[i] = RecordResource{
+			Code:         to,
+			Number:       to,
+			QuantityText: qty,
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) resolveResourcesByNumbers(
+	ctx context.Context,
+	numbers []string,
+	fgisSetID, district string,
+) (map[string]RecordResource, error) {
+	unique := uniqueNonEmptyStrings(numbers)
+	if len(unique) == 0 {
+		return map[string]RecordResource{}, nil
+	}
+	if !s.Configured() {
+		stubs := make(map[string]RecordResource, len(unique))
+		for _, number := range unique {
+			stubs[number] = RecordResource{Code: number, Number: number}
+		}
+		return stubs, nil
+	}
+
+	rawItems := make([]rawRecordResource, 0, len(unique))
+	for _, number := range unique {
+		rawItems = append(rawItems, rawRecordResource{
+			resourceCode: number,
+			quantityText: "",
+			number:       number,
+		})
+	}
+
+	codifiers, err := s.lookupResourceCodifiers(ctx, unique)
+	if err != nil {
+		return nil, fmt.Errorf("lookup resource codifiers: %w", err)
+	}
+
+	codifierCodes := make([]string, 0, len(codifiers))
+	for _, codifier := range codifiers {
+		if codifier.Code != "" {
+			codifierCodes = append(codifierCodes, codifier.Code)
+		}
+	}
+
+	normInfos, err := s.lookupRecordNormInfos(ctx, codifierCodes)
+	if err != nil {
+		return nil, fmt.Errorf("lookup norm infos: %w", err)
+	}
+
+	var fgisRows map[string]fgisSetRow
+	if strings.TrimSpace(fgisSetID) != "" {
+		fgisRows, err = s.lookupFGISSetRows(ctx, fgisSetID, codifierCodes)
+		if err != nil {
+			return nil, fmt.Errorf("lookup fgis set rows: %w", err)
+		}
+	}
+
+	items := s.buildRecordResources(rawItems, codifiers, normInfos, fgisRows, district)
+	byNumber := make(map[string]RecordResource, len(items))
+	for _, item := range items {
+		number := strings.TrimSpace(item.Number)
+		if number == "" {
+			continue
+		}
+		byNumber[number] = item
+	}
+	return byNumber, nil
+}
+
+func (s *Service) buildRecordResources(
+	rawItems []rawRecordResource,
+	codifiers map[string]ResourceCodifierRow,
+	normInfos map[string]recordNormInfo,
+	fgisRows map[string]fgisSetRow,
+	district string,
+) []RecordResource {
 	items := make([]RecordResource, 0, len(rawItems))
 	for _, raw := range rawItems {
 		item := RecordResource{
 			Code:         raw.number,
+			Number:       raw.number,
 			QuantityText: raw.quantityText,
 		}
 		if raw.number == "" {
@@ -343,5 +482,5 @@ func (s *Service) listRecordResources(ctx context.Context, recordCode, fgisSetID
 		}
 		items = append(items, item)
 	}
-	return items, nil
+	return items
 }
