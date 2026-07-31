@@ -1,6 +1,6 @@
 # Контекст: подсистема «Состояние проектов» (ProjectStatus)
 
-Дата фиксации контекста: 2026-07-17 (обновлено 2026-07-18).
+Дата фиксации контекста: 2026-07-17 (обновлено 2026-07-31).
 
 **Реализация:** отдельный репозиторий `C:\Codex\ProjectStatus`  
 **Краткий handoff в NAV:** раздел «Состояние проектов / ProjectStatus» в `HANDOFF.md`  
@@ -50,10 +50,14 @@ APP_GSN_DATABASE_URL (gsn.*, fgis_cs.*)
 - auth service `:8081`;
 - NAV API `:8090`, обычно доступен через nginx;
 - `nav-calc-worker.exe` — без HTTP-порта;
-- **ProjectStatus** `:8100` — отдельно от `run.bat`;
+- **ProjectStatus** `:8100` — отдельный репозиторий/процесс; локальный
+  `run.bat` NewA запускает его через `scripts/restart-project-status.bat`;
 - RabbitMQ — `estimate.calc.main`, retry-очереди и DLQ.
 
 Локальные параметры запуска находятся в `run.bat` и `scripts/run-calc-worker-exec.bat`. Не переносить содержащиеся там dev credentials в новый репозиторий.
+
+Полный контекст Windows runtime, local k3s, CI staging, GHCR, runner и
+cross-repository promotion: `docs/deployment-context.md`.
 
 ## Публичные точки входа нового сервиса
 

@@ -1,0 +1,178 @@
+# Контекст деплоя NewA и ProjectStatus
+
+Состояние зафиксировано 2026-07-31. Документ описывает три разных контура,
+которые нельзя смешивать: Windows runtime, локальный k3s и CI staging.
+
+## Репозитории
+
+- NewA: `C:\NAV\Cursor\NewA`,
+  `https://github.com/AlekseiNadein/NewA`, ветка `main`.
+- ProjectStatus: `C:\Codex\ProjectStatus`,
+  `https://github.com/AlekseiNadein/ProjectStatus`, ветка `master`.
+- ProjectStatus не включается в образ `nav-saas` и имеет самостоятельный
+  Dockerfile, CI и GHCR package.
+
+## 1. Windows runtime
+
+Публичный вход — nginx NewA на `http://localhost:8080`.
+
+- auth: `:8081`;
+- NAV API/UI: `:8090`;
+- ProjectStatus BFF/UI: `:8100`;
+- `run.bat` запускает ProjectStatus через
+  `scripts/restart-project-status.bat`;
+- маршруты ProjectStatus:
+  `/projectStatusDesktop/`, `/projectStatusMobile/`,
+  `/api/project-status/graphql`.
+
+Если процесс `project-status.exe` на `:8100` не работает, nginx возвращает 502.
+
+## 2. Локальный k3s release
+
+- namespace: `nav`;
+- ingress host: `nav.local`;
+- NAV image: `nav-saas:dev`, импортируется в containerd;
+- ProjectStatus image: `project-status:dev`, разворачивается из отдельного
+  репозитория командой:
+
+```powershell
+cd C:\Codex\ProjectStatus
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy\k3s\deploy.ps1
+```
+
+ProjectStatus использует Service `project-status:8100`, общую app PostgreSQL,
+NAV JWT и внутренний URL `http://nav-api:8090`.
+
+### Доступ из Windows
+
+Docker container `nav-k3s-proxy` публикует `127.0.0.1:8088` и подставляет Host
+для Traefik:
+
+```powershell
+cd C:\NAV\Cursor\NewA
+.\deploy\k3s\start-windows-proxy.ps1 -IngressHost nav.local
+```
+
+Проверенные адреса:
+
+- `http://localhost:8088/projectStatusDesktop/`;
+- `http://localhost:8088/projectStatusMobile/`.
+
+На 2026-07-31 оба отвечают HTTP 200. На `:8088` одновременно маршрутизируется
+только один ingress host.
+
+## 3. CI staging
+
+- namespace: `newa-staging`;
+- ingress host внутри WSL: `newa-staging.local`;
+- GitHub Actions + GHCR временно заменяют GitLab;
+- self-hosted runner:
+  `newa-staging-nadein-envyi5`, labels
+  `self-hosted`, `Linux`, `newa-staging`;
+- kubeconfig runner:
+  `/home/alexey/.kube/newa-staging-ci`;
+- runner имеет namespace-scoped RBAC, не cluster-admin;
+- NAV deploy использует immutable `nav-saas@sha256:...`;
+- last-known-good NAV хранится в ConfigMap `newa-release-state`.
+
+Windows proxy для просмотра staging переключается явно:
+
+```powershell
+.\deploy\k3s\start-windows-proxy.ps1 -IngressHost newa-staging.local
+```
+
+После этого `http://localhost:8088/` показывает staging, а не локальный `nav`.
+
+## ProjectStatus CI/CD
+
+ProjectStatus workflow:
+
+1. проверяет форматирование, `go vet`, gqlgen drift и k3s manifests;
+2. запускает `go test ./...`;
+3. выполняет Gitleaks и Trivy;
+4. публикует
+   `ghcr.io/alekseinadein/projectstatus/project-status@sha256:...`;
+5. при наличии `NEWA_PROMOTION_TOKEN` открывает promotion PR в NewA.
+
+Первый зелёный полный run:
+`https://github.com/AlekseiNadein/ProjectStatus/actions/runs/30611794492`,
+commit `4e63476`.
+
+В ProjectStatus настроена variable:
+`NEWA_REPOSITORY=AlekseiNadein/NewA`.
+`NEWA_PROMOTION_TOKEN` пока не настроен, поэтому promotion сообщается как
+notice и пропускается; образ при этом публикуется успешно.
+
+## Подготовленная интеграция ProjectStatus в staging
+
+В рабочем дереве NewA подготовлены:
+
+- `.github/workflows/deploy-project-status-staging.yml`;
+- `.github/workflows/rollback-project-status-staging.yml`;
+- `deploy/environments/staging/project-status.yaml`;
+- `scripts/deploy-project-status-staging.sh`;
+- `scripts/smoke-project-status-staging.sh`;
+- `scripts/record-project-status-release.sh`;
+- `scripts/provision-project-status-staging.sh`;
+- `docs/project-status-ci-cd.md`.
+
+Эти изменения NewA на момент фиксации не закоммичены и не отправлены в GitHub,
+поэтому staging deploy ProjectStatus ещё не активен.
+
+Целевая схема:
+
+```text
+ProjectStatus main
+  -> test/security
+  -> GHCR image@digest
+  -> promotion PR в NewA
+  -> NewA environment workflow
+  -> deployment/project-status в newa-staging
+  -> smoke
+  -> ConfigMap project-status-release-state
+```
+
+NAV и ProjectStatus deploy workflows используют общий concurrency group
+`newa-staging`, чтобы два репозитория не меняли namespace одновременно.
+
+## Secrets и доступ к БД
+
+Не хранить значения секретов в документации или репозитории.
+
+- NewA staging: `nav-secrets`;
+- ProjectStatus staging: отдельный `project-status-secrets`;
+- `scripts/provision-project-status-staging.sh` создаёт роль
+  `project_status_ro` с SELECT только на contract tables;
+- GHCR pull: `PROJECT_STATUS_GHCR_USERNAME`,
+  `PROJECT_STATUS_GHCR_TOKEN`;
+- promotion: отдельный ограниченный `NEWA_PROMOTION_TOKEN`;
+- общий HMAC `APP_JWT_SECRET` пока нужен для verify JWT; browser его не получает.
+
+## Инварианты интеграции
+
+- ProjectStatus читает app PostgreSQL, но не пишет в неё.
+- Расчёт запускается только через NAV API.
+- Нельзя писать в RabbitMQ, `outbox_events`, `estimate_calc_jobs` или
+  `estimate_calc_*` из ProjectStatus.
+- Стоимость сметы берётся из `calc-status?summary=1 -> grandTotal`, не из
+  `app_estimates.total`.
+- Изменения схемы NewA выполняются через expand/migrate/contract.
+- Изменения auth/login/JWT/calc tables требуют проверки ProjectStatus.
+
+## Что остаётся сделать
+
+1. Закоммитить и отправить staging-интеграцию в NewA.
+2. Создать `project_status_ro` и `project-status-secrets` в `newa-staging`.
+3. Настроить GHCR pull credentials в NewA Environment `staging`.
+4. Настроить отдельный `NEWA_PROMOTION_TOKEN` в ProjectStatus.
+5. Выполнить первый promotion/deploy/smoke/rollback exercise.
+6. Отдельно спроектировать JWKS/public-key verify и durable bulk recalculation.
+
+## Канонические документы
+
+- `deploy/k3s/README.md` — локальный k3s NewA и Windows proxy.
+- `docs/github-actions-setup.md` — runner и основной staging.
+- `docs/project-status-ci-cd.md` — staging-интеграция ProjectStatus.
+- `RESOURCE_ANALYTICS_SERVICE_CONTEXT.md` — data/auth/calc contract.
+- `C:\Codex\ProjectStatus\docs\ci-cd.md` — CI отдельного репозитория.
+- `C:\Codex\ProjectStatus\docs\decisions.md` — ADR ProjectStatus.

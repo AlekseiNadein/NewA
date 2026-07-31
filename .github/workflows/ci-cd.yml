@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - deploy/environments/staging/project-status-image.txt
   workflow_dispatch:
 
 permissions:
