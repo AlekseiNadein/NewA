@@ -93,3 +93,45 @@ After successful rollout, health, write-smoke and RBAC checks, the workflow
 writes ConfigMap `newa-release-state` in `newa-staging`. It stores image digest,
 commit, workflow run ID and timestamp. The manual rollback workflow uses this
 record when no explicit image is supplied.
+
+## Windows browser access
+
+From WSL, open `http://newa-staging.local`. From Windows without editing hosts,
+use the existing Docker proxy:
+
+```powershell
+.\deploy\k3s\start-windows-proxy.ps1 -IngressHost newa-staging.local
+```
+
+Then open `http://localhost:8088/`. CI smoke still uses `STAGING_BASE_URL`
+(`http://newa-staging.local`) on the self-hosted runner inside WSL.
+
+## Sync data from local `nav` namespace
+
+Staging boots with an empty PostgreSQL. To copy the full local database
+(auth, app, GSN, FGIS CS, calc/outbox tables):
+
+```bash
+bash scripts/sync-nav-db-to-staging.sh
+```
+
+The script dumps `nav/postgres-0`, recreates `newa-staging` database `nav`,
+restores the dump and restarts app deployments. Redis/RabbitMQ are not copied
+(runtime queues). After scale-up, refresh GHCR pull credentials if pods show
+`ImagePullBackOff` (CI `GITHUB_TOKEN` in `newa-registry-pull` expires).
+
+## ProjectStatus repository
+
+ProjectStatus is connected to
+`https://github.com/AlekseiNadein/ProjectStatus` (default branch `master`).
+Its workflow validates, tests, scans, and publishes a separate GHCR image.
+
+Automatic promotion into NewA additionally requires:
+
+- ProjectStatus secret `NEWA_PROMOTION_TOKEN`;
+- NewA staging secrets `PROJECT_STATUS_GHCR_USERNAME` and
+  `PROJECT_STATUS_GHCR_TOKEN`;
+- committed NewA workflows described in `docs/project-status-ci-cd.md`.
+
+Without the promotion token, ProjectStatus CI and image publishing remain
+successful; deploy can be started manually in NewA with an immutable digest.

@@ -223,6 +223,16 @@ const state = {
 
 let userPositionDialogEditId = "";
 let userPositionDialogSaving = false;
+let userPositionImportSaving = false;
+const userPositionImportState = {
+  all: false,
+  constructions: new Set(),
+  objects: new Set(),
+  estimates: new Set(),
+  rootExpanded: true,
+  expandedConstructions: new Set(),
+  expandedObjects: new Set(),
+};
 const persistEstimateInflight = new Map();
 const estimateCalcPollBlockedByPersist = new Set();
 const ESTIMATE_LOCK_POLL_MS = 5000;
@@ -328,6 +338,9 @@ const els = {
   userPositionDialog: document.querySelector("#userPositionDialog"),
   userPositionDialogForm: document.querySelector("#userPositionDialogForm"),
   userPositionDialogTitle: document.querySelector("#userPositionDialogTitle"),
+  userPositionImportDialog: document.querySelector("#userPositionImportDialog"),
+  userPositionImportDialogForm: document.querySelector("#userPositionImportDialogForm"),
+  userPositionImportTree: document.querySelector("#userPositionImportTree"),
   showHierarchyCodeToggle: document.querySelector("#showHierarchyCodeToggle"),
   appSettingsForm: document.querySelector("#appSettingsForm"),
   calcWorkerCountInput: document.querySelector("#calcWorkerCountInput"),
@@ -923,6 +936,18 @@ els.userPositionsPanel.addEventListener("click", (event) => {
     return;
   }
 
+  const importButton = event.target.closest("[data-user-position-import]");
+  if (importButton) {
+    openUserPositionImportDialog();
+    return;
+  }
+
+  const deleteAllButton = event.target.closest("[data-user-position-delete-all]");
+  if (deleteAllButton) {
+    deleteAllUserPositions();
+    return;
+  }
+
   const editButton = event.target.closest("[data-user-position-edit]");
   if (editButton) {
     openUserPositionDialog(editButton.dataset.userPositionEdit);
@@ -966,6 +991,59 @@ els.userPositionDialogForm.querySelector("[data-dialog-cancel]").addEventListene
   userPositionDialogEditId = "";
   els.userPositionDialog.close();
   els.userPositionDialogForm.reset();
+});
+
+els.userPositionImportDialogForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (userPositionImportSaving) {
+    return;
+  }
+  userPositionImportSaving = true;
+  void importUserPositionsFromSelectedEstimates()
+    .catch((error) => {
+      showMessage(error?.message || "Не удалось добавить позиции из смет", "error");
+    })
+    .finally(() => {
+      userPositionImportSaving = false;
+    });
+});
+
+els.userPositionImportDialogForm.querySelector("[data-dialog-cancel]").addEventListener("click", () => {
+  els.userPositionImportDialog.close();
+});
+
+els.userPositionImportTree.addEventListener("click", (event) => {
+  const toggle = event.target.closest(
+    "[data-import-toggle-root], [data-import-toggle-construction], [data-import-toggle-object]",
+  );
+  if (toggle) {
+    event.preventDefault();
+    if (toggle.hasAttribute("data-import-toggle-root")) {
+      toggleUserPositionImportExpanded("root");
+    } else {
+      const constructionId = toggle.getAttribute("data-import-toggle-construction");
+      const objectId = toggle.getAttribute("data-import-toggle-object");
+      if (constructionId) {
+        toggleUserPositionImportExpanded("construction", constructionId);
+      } else if (objectId) {
+        toggleUserPositionImportExpanded("object", objectId);
+      }
+    }
+    renderUserPositionImportTree();
+    return;
+  }
+});
+
+els.userPositionImportTree.addEventListener("change", (event) => {
+  const checkbox = event.target.closest("[data-import-select]");
+  if (!checkbox) {
+    return;
+  }
+  const kind = checkbox.getAttribute("data-import-select");
+  const id = checkbox.getAttribute("data-import-id") || "";
+  const checked = Boolean(checkbox.checked);
+  applyUserPositionImportSelection(kind, id, checked);
+  renderUserPositionImportTree();
 });
 
 async function bootstrapAppData(existingRequestId) {
@@ -1404,6 +1482,7 @@ function renderSectionContent() {
     els.baseDescription.classList.add("hidden");
     els.gsnTree.classList.add("hidden");
     els.gsnSupplementBar.classList.add("hidden");
+    els.fgisPricesPanel.classList.add("hidden");
     els.userPositionsPanel.classList.remove("hidden");
     renderUserPositionsPanel();
   }
@@ -1633,8 +1712,14 @@ function renderUserPositionsPanel() {
       </table>
     </div>
     <div class="user-positions-footer">
-      <button class="user-positions-add-btn" data-user-position-add type="button">
+      <button class="secondary user-positions-footer-btn" data-user-position-add type="button">
         Добавить позицию пользователя
+      </button>
+      <button class="secondary user-positions-footer-btn" data-user-position-import type="button">
+        Добавить из смет
+      </button>
+      <button class="secondary user-positions-footer-btn" data-user-position-delete-all type="button">
+        Удалить все
       </button>
     </div>
   `;
@@ -1768,6 +1853,513 @@ function deleteUserPosition(id) {
   saveUserPositions();
   renderUserPositionsPanel();
   showMessage("Позиция удалена", "ok");
+}
+
+function deleteAllUserPositions() {
+  const count = state.userPositions.length;
+  if (!count) {
+    showMessage("Позиции пользователя отсутствуют", "ok");
+    return;
+  }
+
+  if (!window.confirm(`Удалить все позиции пользователя (${count})?`)) {
+    return;
+  }
+
+  userPositionDialogEditId = "";
+  if (els.userPositionDialog?.open) {
+    els.userPositionDialog.close();
+    els.userPositionDialogForm.reset();
+  }
+
+  state.userPositions = [];
+  saveUserPositions();
+  renderUserPositionsPanel();
+  showMessage("Все позиции пользователя удалены", "ok");
+}
+
+function resetUserPositionImportState() {
+  userPositionImportState.all = false;
+  userPositionImportState.constructions.clear();
+  userPositionImportState.objects.clear();
+  userPositionImportState.estimates.clear();
+  userPositionImportState.rootExpanded = true;
+  userPositionImportState.expandedConstructions.clear();
+  userPositionImportState.expandedObjects.clear();
+}
+
+function openUserPositionImportDialog() {
+  resetUserPositionImportState();
+  renderUserPositionImportTree();
+  els.userPositionImportDialog.showModal();
+}
+
+function toggleUserPositionImportExpanded(kind, id) {
+  if (kind === "root") {
+    userPositionImportState.rootExpanded = !userPositionImportState.rootExpanded;
+    return;
+  }
+  const set =
+    kind === "construction"
+      ? userPositionImportState.expandedConstructions
+      : userPositionImportState.expandedObjects;
+  if (set.has(id)) {
+    set.delete(id);
+  } else {
+    set.add(id);
+  }
+}
+
+function userPositionImportHasSelection() {
+  return (
+    userPositionImportState.all ||
+    userPositionImportState.constructions.size > 0 ||
+    userPositionImportState.objects.size > 0 ||
+    userPositionImportState.estimates.size > 0
+  );
+}
+
+function isUserPositionImportConstructionSelected(constructionId) {
+  return userPositionImportState.all || userPositionImportState.constructions.has(constructionId);
+}
+
+function isUserPositionImportObjectSelected(object) {
+  return (
+    isUserPositionImportConstructionSelected(object.constructionId) ||
+    userPositionImportState.objects.has(object.id)
+  );
+}
+
+function isUserPositionImportEstimateSelected(estimate, object) {
+  return (
+    isUserPositionImportObjectSelected(object) || userPositionImportState.estimates.has(estimate.id)
+  );
+}
+
+function pruneUserPositionImportSelectionUnderConstruction(constructionId) {
+  const objectIds = state.objects
+    .filter((object) => object.constructionId === constructionId)
+    .map((object) => object.id);
+  objectIds.forEach((objectId) => {
+    userPositionImportState.objects.delete(objectId);
+    state.estimates
+      .filter((estimate) => estimate.objectId === objectId)
+      .forEach((estimate) => {
+        userPositionImportState.estimates.delete(estimate.id);
+      });
+  });
+}
+
+function pruneUserPositionImportSelectionUnderObject(objectId) {
+  state.estimates
+    .filter((estimate) => estimate.objectId === objectId)
+    .forEach((estimate) => {
+      userPositionImportState.estimates.delete(estimate.id);
+    });
+}
+
+function applyUserPositionImportSelection(kind, id, checked) {
+  if (kind === "all") {
+    userPositionImportState.constructions.clear();
+    userPositionImportState.objects.clear();
+    userPositionImportState.estimates.clear();
+    userPositionImportState.all = checked;
+    return;
+  }
+
+  if (kind === "construction") {
+    if (userPositionImportState.all) {
+      expandUserPositionImportAllIntoConstructions();
+      userPositionImportState.all = false;
+    }
+    if (checked) {
+      userPositionImportState.constructions.add(id);
+      pruneUserPositionImportSelectionUnderConstruction(id);
+    } else {
+      userPositionImportState.constructions.delete(id);
+      pruneUserPositionImportSelectionUnderConstruction(id);
+    }
+    return;
+  }
+
+  if (kind === "object") {
+    const object = state.objects.find((item) => item.id === id);
+    if (!object) {
+      return;
+    }
+    if (userPositionImportState.all) {
+      expandUserPositionImportAllIntoConstructions();
+      userPositionImportState.all = false;
+    }
+    if (isUserPositionImportConstructionSelected(object.constructionId)) {
+      userPositionImportState.constructions.delete(object.constructionId);
+      state.objects
+        .filter((item) => item.constructionId === object.constructionId && item.id !== object.id)
+        .forEach((sibling) => {
+          userPositionImportState.objects.add(sibling.id);
+        });
+    }
+    if (checked) {
+      userPositionImportState.objects.add(id);
+      pruneUserPositionImportSelectionUnderObject(id);
+    } else {
+      userPositionImportState.objects.delete(id);
+      pruneUserPositionImportSelectionUnderObject(id);
+    }
+    return;
+  }
+
+  if (kind === "estimate") {
+    const estimate = state.estimates.find((item) => item.id === id);
+    if (!estimate) {
+      return;
+    }
+    const object = state.objects.find((item) => item.id === estimate.objectId);
+    if (!object) {
+      return;
+    }
+    if (userPositionImportState.all) {
+      expandUserPositionImportAllIntoConstructions();
+      userPositionImportState.all = false;
+    }
+    if (isUserPositionImportConstructionSelected(object.constructionId)) {
+      userPositionImportState.constructions.delete(object.constructionId);
+      state.objects
+        .filter((item) => item.constructionId === object.constructionId)
+        .forEach((sibling) => {
+          if (sibling.id === object.id) {
+            return;
+          }
+          userPositionImportState.objects.add(sibling.id);
+        });
+      state.estimates
+        .filter((item) => item.objectId === object.id && item.id !== estimate.id)
+        .forEach((sibling) => {
+          userPositionImportState.estimates.add(sibling.id);
+        });
+    } else if (isUserPositionImportObjectSelected(object)) {
+      userPositionImportState.objects.delete(object.id);
+      state.estimates
+        .filter((item) => item.objectId === object.id && item.id !== estimate.id)
+        .forEach((sibling) => {
+          userPositionImportState.estimates.add(sibling.id);
+        });
+    }
+    if (checked) {
+      userPositionImportState.estimates.add(id);
+    } else {
+      userPositionImportState.estimates.delete(id);
+    }
+  }
+}
+
+function expandUserPositionImportAllIntoConstructions() {
+  userPositionImportConstructions().forEach((construction) => {
+    userPositionImportState.constructions.add(construction.id);
+  });
+  userPositionImportState.objects.clear();
+  userPositionImportState.estimates.clear();
+}
+
+function collectUserPositionImportEstimateIds() {
+  if (userPositionImportState.all) {
+    return state.estimates.map((estimate) => estimate.id).filter(Boolean);
+  }
+
+  const ids = new Set();
+  userPositionImportState.constructions.forEach((constructionId) => {
+    collectEstimateIdsForScope("construction", constructionId).forEach((estimateId) => {
+      ids.add(estimateId);
+    });
+  });
+  userPositionImportState.objects.forEach((objectId) => {
+    collectEstimateIdsForScope("object", objectId).forEach((estimateId) => {
+      ids.add(estimateId);
+    });
+  });
+  userPositionImportState.estimates.forEach((estimateId) => {
+    ids.add(estimateId);
+  });
+  return [...ids];
+}
+
+function renderUserPositionImportTree() {
+  const constructions = userPositionImportConstructions();
+  const okButton = els.userPositionImportDialogForm.querySelector("[data-user-position-import-ok]");
+  if (okButton) {
+    okButton.disabled = !userPositionImportHasSelection();
+  }
+
+  if (!constructions.length) {
+    els.userPositionImportTree.innerHTML = `<p class="user-position-import-empty">Нет строек со сметами</p>`;
+    return;
+  }
+
+  const rows = [
+    renderUserPositionImportNode({
+      kind: "all",
+      id: "",
+      depth: 0,
+      label: "Все стройки",
+      kindLabel: "",
+      checked: userPositionImportState.all,
+      indeterminate: !userPositionImportState.all && userPositionImportHasSelection(),
+      hasChildren: constructions.length > 0,
+      expanded: userPositionImportState.rootExpanded,
+      toggleAttr: `data-import-toggle-root="1"`,
+    }),
+  ];
+
+  if (!userPositionImportState.rootExpanded) {
+    els.userPositionImportTree.innerHTML = rows.join("");
+    els.userPositionImportTree.querySelectorAll("input[data-import-indeterminate='1']").forEach((input) => {
+      input.indeterminate = true;
+    });
+    return;
+  }
+
+  constructions.forEach((construction) => {
+    const objects = userPositionImportObjectsForConstruction(construction.id);
+    const constructionExpanded = userPositionImportState.expandedConstructions.has(construction.id);
+    const constructionChecked = isUserPositionImportConstructionSelected(construction.id);
+    const constructionIndeterminate =
+      !constructionChecked &&
+      objects.some((object) => {
+        if (userPositionImportState.objects.has(object.id)) {
+          return true;
+        }
+        return state.estimates.some(
+          (estimate) =>
+            estimate.objectId === object.id && userPositionImportState.estimates.has(estimate.id),
+        );
+      });
+
+    rows.push(
+      renderUserPositionImportNode({
+        kind: "construction",
+        id: construction.id,
+        depth: 1,
+        label: `${construction.code || ""} ${construction.name || ""}`.trim(),
+        kindLabel: "Стройка",
+        checked: constructionChecked,
+        indeterminate: constructionIndeterminate,
+        hasChildren: objects.length > 0,
+        expanded: constructionExpanded,
+        toggleAttr: `data-import-toggle-construction="${escapeHTML(construction.id)}"`,
+      }),
+    );
+
+    if (!constructionExpanded) {
+      return;
+    }
+
+    objects.forEach((object) => {
+      const estimates = state.estimates
+        .filter((estimate) => estimate.objectId === object.id)
+        .sort(compareByCode);
+      const objectExpanded = userPositionImportState.expandedObjects.has(object.id);
+      const objectChecked = isUserPositionImportObjectSelected(object);
+      const objectIndeterminate =
+        !objectChecked &&
+        estimates.some((estimate) => userPositionImportState.estimates.has(estimate.id));
+
+      rows.push(
+        renderUserPositionImportNode({
+          kind: "object",
+          id: object.id,
+          depth: 2,
+          label: `${object.code || ""} ${object.name || ""}`.trim(),
+          kindLabel: "Объект",
+          checked: objectChecked,
+          indeterminate: objectIndeterminate,
+          hasChildren: estimates.length > 0,
+          expanded: objectExpanded,
+          toggleAttr: `data-import-toggle-object="${escapeHTML(object.id)}"`,
+        }),
+      );
+
+      if (!objectExpanded) {
+        return;
+      }
+
+      estimates.forEach((estimate) => {
+        rows.push(
+          renderUserPositionImportNode({
+            kind: "estimate",
+            id: estimate.id,
+            depth: 3,
+            label: `${estimate.code || ""} ${estimate.title || ""}`.trim(),
+            kindLabel: "Смета",
+            checked: isUserPositionImportEstimateSelected(estimate, object),
+            indeterminate: false,
+            hasChildren: false,
+            expanded: false,
+            toggleAttr: "",
+          }),
+        );
+      });
+    });
+  });
+
+  els.userPositionImportTree.innerHTML = rows.join("");
+  els.userPositionImportTree.querySelectorAll("input[data-import-indeterminate='1']").forEach((input) => {
+    input.indeterminate = true;
+  });
+}
+
+function userPositionImportConstructions() {
+  return [...state.constructions]
+    .filter((construction) => collectEstimateIdsForScope("construction", construction.id).length > 0)
+    .sort(compareByCode);
+}
+
+function userPositionImportObjectsForConstruction(constructionId) {
+  return state.objects
+    .filter((object) => object.constructionId === constructionId)
+    .filter((object) => collectEstimateIdsForScope("object", object.id).length > 0)
+    .sort(compareByCode);
+}
+
+function renderUserPositionImportNode({
+  kind,
+  id,
+  depth,
+  label,
+  kindLabel,
+  checked,
+  indeterminate,
+  hasChildren,
+  expanded,
+  toggleAttr,
+}) {
+  const toggle = hasChildren
+    ? `<button class="secondary user-position-import-toggle" ${toggleAttr} type="button">${
+        expanded ? "−" : "+"
+      }</button>`
+    : `<span class="user-position-import-toggle-placeholder"></span>`;
+  const kindHtml = kindLabel
+    ? `<span class="user-position-import-kind">${escapeHTML(kindLabel)}</span>`
+    : "";
+  const nameHtml = `<span class="user-position-import-name">${escapeHTML(label || "—")}</span>`;
+
+  return `
+    <div class="user-position-import-node" data-depth="${depth}">
+      ${toggle}
+      <label class="user-position-import-label">
+        <input
+          type="checkbox"
+          data-import-select="${escapeHTML(kind)}"
+          data-import-id="${escapeHTML(id)}"
+          ${checked ? "checked" : ""}
+          ${indeterminate ? `data-import-indeterminate="1"` : ""}
+        />
+        <span class="user-position-import-label-text">${kindHtml}${nameHtml}</span>
+      </label>
+    </div>
+  `;
+}
+
+function isEstimateTextUserPositionLine(item) {
+  if (!item || item.type !== "position") {
+    return false;
+  }
+  if (estimateLineIsStructural(item)) {
+    return false;
+  }
+  const code = String(
+    estimateLineNormalizedSourceCode(item) || estimateRecordLookupCode(item) || item.code || "",
+  ).trim();
+  return isUserCatalogCipherCode(code);
+}
+
+function userPositionCandidateFromEstimateLine(item) {
+  const code = String(
+    estimateLineNormalizedSourceCode(item) || estimateRecordLookupCode(item) || item.code || "",
+  ).trim();
+  if (!code || !isUserCatalogCipherCode(code)) {
+    return null;
+  }
+
+  const parsed = parseSourceDataPositionLineFieldsFromRawText(item.rawText);
+  const name = String(item.name || parsed?.name || "").trim();
+  const unit = String(item.unit || parsed?.unit || "").trim();
+  if (!name) {
+    return null;
+  }
+
+  let cost = Number(item.unitPrice || 0);
+  if (!Number.isFinite(cost) || cost < 0) {
+    cost = 0;
+  }
+  if (cost === 0 && parsed?.hasTotal) {
+    const quantity = Number(item.quantity || 0);
+    cost = quantity > 0 ? Number(parsed.total) / quantity : Number(parsed.total || 0);
+  }
+  if (!Number.isFinite(cost) || cost < 0) {
+    cost = 0;
+  }
+
+  return { code, name, unit, cost };
+}
+
+async function importUserPositionsFromSelectedEstimates() {
+  const estimateIds = collectUserPositionImportEstimateIds();
+  if (!estimateIds.length) {
+    showMessage("Выберите стройки, объекты или сметы", "error");
+    return;
+  }
+
+  const okButton = els.userPositionImportDialogForm.querySelector("[data-user-position-import-ok]");
+  if (okButton) {
+    okButton.disabled = true;
+  }
+
+  const estimates = await Promise.all(
+    estimateIds.map((estimateId) =>
+      api(`/api/estimates/${encodeURIComponent(estimateId)}`).catch(() => null),
+    ),
+  );
+
+  const existingCodes = new Set(
+    state.userPositions.map((item) => String(item.code || "").trim()).filter(Boolean),
+  );
+  const seenCodes = new Set(existingCodes);
+  const added = [];
+
+  estimates.forEach((estimate) => {
+    const items = Array.isArray(estimate?.items) ? estimate.items : [];
+    items.forEach((item) => {
+      if (!isEstimateTextUserPositionLine(item)) {
+        return;
+      }
+      const candidate = userPositionCandidateFromEstimateLine(item);
+      if (!candidate || seenCodes.has(candidate.code)) {
+        return;
+      }
+      seenCodes.add(candidate.code);
+      added.push({
+        id: newUserPositionId(),
+        code: candidate.code,
+        name: candidate.name,
+        unit: candidate.unit,
+        cost: candidate.cost,
+      });
+    });
+  });
+
+  if (added.length) {
+    state.userPositions.push(...added);
+    saveUserPositions();
+    renderUserPositionsPanel();
+  }
+
+  els.userPositionImportDialog.close();
+  showMessage(
+    added.length
+      ? `Добавлено позиций пользователя: ${added.length}`
+      : "Новых текстовых позиций не найдено",
+    "ok",
+  );
 }
 
 function iconPencil() {

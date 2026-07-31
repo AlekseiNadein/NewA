@@ -99,11 +99,29 @@ curl -H 'Host: nav.local' http://127.0.0.1/api/healthz
 Если localhost forwarding WSL отключён, запустить прокси через Docker Desktop:
 
 ```bash
+# Локальный релизный контур (namespace nav, Host: nav.local)
 ./deploy/k3s/start-windows-proxy.sh
+
+# CI staging (namespace newa-staging, Host: newa-staging.local)
+./deploy/k3s/start-windows-proxy.sh newa-staging.local
+```
+
+Из Windows PowerShell (Docker Desktop):
+
+```powershell
+.\deploy\k3s\start-windows-proxy.ps1 -IngressHost newa-staging.local
 ```
 
 После этого приложение доступно в Windows по `http://localhost:8088` без
 изменения `hosts`. После смены IP WSL скрипт нужно запустить повторно.
+Одновременно на `:8088` доступен только один Host (локальный или staging).
+
+ProjectStatus разворачивается отдельно из `C:\Codex\ProjectStatus`, но
+использует тот же local ingress host `nav.local`. После его `deploy\k3s\deploy.ps1`
+и запуска proxy с `-IngressHost nav.local` доступны:
+
+- `http://localhost:8088/projectStatusDesktop/`;
+- `http://localhost:8088/projectStatusMobile/`.
 
 Через тот же ingress доступны:
 

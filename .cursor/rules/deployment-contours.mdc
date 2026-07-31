@@ -1,0 +1,49 @@
+---
+description: Контуры деплоя NewA и отдельно разрабатываемого ProjectStatus
+globs:
+alwaysApply: true
+---
+
+# Deployment contours
+
+Полный актуальный контекст: `docs/deployment-context.md`.
+## Не смешивать контуры
+
+- Windows runtime: nginx `:8080`, NAV `:8090`, ProjectStatus `:8100`.
+- Локальный k3s: namespace `nav`, Host `nav.local`, локальные `*:dev` images.
+- CI staging: namespace `newa-staging`, Host `newa-staging.local`,
+  immutable GHCR digests.
+## Windows proxy
+
+`nav-k3s-proxy` публикует `127.0.0.1:8088` и одновременно обслуживает один Host:
+
+```powershell
+.\deploy\k3s\start-windows-proxy.ps1 -IngressHost nav.local
+.\deploy\k3s\start-windows-proxy.ps1 -IngressHost newa-staging.local
+```
+
+ProjectStatus local URLs:
+`/projectStatusDesktop/`, `/projectStatusMobile/`.
+## Ownership
+
+- NewA: `C:\NAV\Cursor\NewA`, GitHub `AlekseiNadein/NewA`.
+- ProjectStatus: `C:\Codex\ProjectStatus`, GitHub
+  `AlekseiNadein/ProjectStatus`.
+- ProjectStatus сам тестирует и публикует образ; NewA владеет shared staging.
+- Не включать ProjectStatus в `nav-saas`.
+
+## CI/CD
+
+- NewA runner: `newa-staging-nadein-envyi5`.
+- Все staging deploy используют concurrency group `newa-staging`.
+- ProjectStatus promotion требует отдельный `NEWA_PROMOTION_TOKEN`.
+- Не использовать широкий пользовательский `gh` token как repository secret.
+- Last-known-good хранить раздельно:
+  `newa-release-state` и `project-status-release-state`.
+
+## Перед изменениями
+
+- Проверять `docs/deployment-context.md`: там отмечено, что уже push, а что
+  остаётся только в локальном working tree.
+- Не перезаписывать незакоммиченные пользовательские изменения.
+- Меняя DB/JWT/nginx/calc contract, проверять оба репозитория.

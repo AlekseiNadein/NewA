@@ -10,16 +10,25 @@ alwaysApply: true
 
 | | |
 |--|--|
-| Репозиторий | `C:\Codex\ProjectStatus` |
+| Репозиторий | `C:\Codex\ProjectStatus`, GitHub `AlekseiNadein/ProjectStatus` |
 | Процесс | `project-status.exe` / `go run .\cmd\project-status` |
 | Внутренний порт | `:8100` |
 | Публичный вход | nginx `:8080` |
+
+Полный runtime/deploy-контекст: `docs/deployment-context.md`.
 
 ## Публичные маршруты (NewA `deploy/nginx.conf`)
 
 - `/projectStatusDesktop/`, `/projectStatusMobile/`
 - `/api/project-status/graphql` → upstream `:8100` `/api/graphql`
 - `/login?next=...` — единый вход NAV (cookie `nav_session`)
+
+Локальный k3s (`nav.local`) через Windows proxy:
+
+- `http://localhost:8088/projectStatusDesktop/`
+- `http://localhost:8088/projectStatusMobile/`
+- proxy должен быть запущен с `-IngressHost nav.local`; один `:8088` не может
+  одновременно показывать local и `newa-staging.local`.
 
 ## Интеграция
 
@@ -32,3 +41,5 @@ alwaysApply: true
 
 - Меняя nginx/auth/login/JWT/calc tables — проверяй совместимость с ProjectStatus.
 - `run.bat` поднимает ProjectStatus через `scripts/restart-project-status.bat` (репозиторий `C:\Codex\ProjectStatus`, `:8100`); без него UI даёт `502`.
+- ProjectStatus CI публикует отдельный GHCR image; shared staging деплоит NewA,
+  а не workflow ProjectStatus напрямую.

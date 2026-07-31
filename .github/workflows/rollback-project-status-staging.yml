@@ -1,0 +1,71 @@
+name: Rollback ProjectStatus staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Optional image@digest; defaults to ProjectStatus last-known-good
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: newa-staging
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on:
+      - self-hosted
+      - Linux
+      - newa-staging
+    environment: staging
+    env:
+      KUBECONFIG: /home/alexey/.kube/newa-staging-ci
+      STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+      SMOKE_COMPANY_NAME: ${{ secrets.SMOKE_COMPANY_NAME }}
+      SMOKE_USER_NAME: ${{ secrets.SMOKE_USER_NAME }}
+      SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Kubernetes context
+        if: vars.KUBE_CONTEXT != ''
+        run: kubectl config use-context "${{ vars.KUBE_CONTEXT }}"
+      - id: target
+        env:
+          REQUESTED_IMAGE: ${{ inputs.image }}
+        shell: bash
+        run: |
+          image="$REQUESTED_IMAGE"
+          if [ -z "$image" ]; then
+            image="$(
+              kubectl -n newa-staging get configmap project-status-release-state \
+                -o jsonpath='{.data.image}'
+            )"
+          fi
+          if [[ ! "$image" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Rollback target must be an immutable GHCR digest" >&2
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Configure ProjectStatus registry credential
+        env:
+          REGISTRY_USERNAME: ${{ secrets.PROJECT_STATUS_GHCR_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.PROJECT_STATUS_GHCR_TOKEN }}
+        run: |
+          test -n "$REGISTRY_USERNAME"
+          test -n "$REGISTRY_TOKEN"
+          kubectl -n newa-staging create secret docker-registry project-status-registry-pull \
+            --docker-server=ghcr.io \
+            --docker-username="$REGISTRY_USERNAME" \
+            --docker-password="$REGISTRY_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+      - name: Restore selected ProjectStatus release
+        env:
+          PROJECT_STATUS_IMAGE: ${{ steps.target.outputs.image }}
+        run: |
+          bash scripts/deploy-project-status-staging.sh
+          bash scripts/smoke-project-status-staging.sh
