@@ -102,6 +102,24 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		return fmt.Errorf("resolve line quantity: %w", err)
 	}
 
+	if replacements := store.SourceDataResourceReplacementsFromRawText(rawText); len(replacements) > 0 {
+		gsnReplacements := make([]gsn.ResourceNumberReplacement, 0, len(replacements))
+		for _, rep := range replacements {
+			gsnReplacements = append(gsnReplacements, gsn.ResourceNumberReplacement{
+				FromNumber: rep.FromNumber,
+				ToNumber:   rep.ToNumber,
+			})
+		}
+		replaced, replaceErr := w.gsn.ApplyResourceNumberReplacements(
+			jobCtx, record.Resources, gsnReplacements, job.FgisSetID, job.District,
+		)
+		if replaceErr != nil {
+			observability.RecordCalcError("resource_replace")
+			return fmt.Errorf("apply resource replacements for %q: %w", code, replaceErr)
+		}
+		record.Resources = replaced
+	}
+
 	pricingStarted := time.Now()
 	snap, err := estimatecalc.BuildLineCalcSnapshot(record, quantity)
 	observability.ObserveCalcPricingDuration(time.Since(pricingStarted).Seconds())

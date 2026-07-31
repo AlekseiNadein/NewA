@@ -65,6 +65,64 @@ func TestExtractSourceDataDeterminantAssignment(t *testing.T) {
 	}
 }
 
+func TestExtractSourceDataResourceReplacements(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []SourceDataResourceReplacement
+	}{
+		{
+			"Е0801-002-02 (РМ11762РМ6141)",
+			[]SourceDataResourceReplacement{{FromNumber: "11762", ToNumber: "6141"}},
+		},
+		{
+			"Е0624-002-05 (РМ24214РМ58316=0,1)",
+			[]SourceDataResourceReplacement{{FromNumber: "24214", ToNumber: "58316"}},
+		},
+		{
+			"Е0619-005-02 (РМ24214РМ58316=1)(РМ11767РМ60208)(РМ34239РМ8391)",
+			[]SourceDataResourceReplacement{
+				{FromNumber: "24214", ToNumber: "58316"},
+				{FromNumber: "11767", ToNumber: "60208"},
+				{FromNumber: "34239", ToNumber: "8391"},
+			},
+		},
+		{
+			"Е0802-017-01 (РС22461РС22451)(РМ33840РС22787)",
+			[]SourceDataResourceReplacement{
+				{FromNumber: "22461", ToNumber: "22451"},
+				{FromNumber: "33840", ToNumber: "22787"},
+			},
+		},
+		{
+			"Е0000 (РМ31434Р45731=0,0130)",
+			[]SourceDataResourceReplacement{{FromNumber: "31434", ToNumber: "45731"}},
+		},
+		{"Е0624-003-02 (РМ34239)", nil},
+		{"С1084-0303-0032 (KLink=Е0624-003-02)", nil},
+		{"ТПрайс-лист(=14)", nil},
+		{"Е0624-004-06 (РМ1)(=9)", nil},
+	}
+	for _, tc := range cases {
+		got := ExtractSourceDataResourceReplacements(tc.in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("ExtractSourceDataResourceReplacements(%q) len=%d want %d (%v)", tc.in, len(got), len(tc.want), got)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Fatalf("ExtractSourceDataResourceReplacements(%q)[%d] = %#v, want %#v", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
+func TestSourceDataResourceReplacementsFromRawText(t *testing.T) {
+	raw := "Е0801-002-02 (РМ11762РМ6141)'(61,475)[4]''Устройство основания'м3"
+	got := SourceDataResourceReplacementsFromRawText(raw)
+	if len(got) != 1 || got[0].FromNumber != "11762" || got[0].ToNumber != "6141" {
+		t.Fatalf("unexpected replacements: %#v", got)
+	}
+}
+
 func TestUserCatalogPositionNeedsLookup(t *testing.T) {
 	complete, err := ParseSourceDataPositionFields("ТПрайс-лист'(1)'359'Диффузор'шт")
 	if err != nil {
