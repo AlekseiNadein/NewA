@@ -56,10 +56,13 @@ These contours are complementary and should not override each other.
 
 ## Decision note: temporary GitHub platform
 
-Until GitLab access is available, GitHub Actions is the active CI/CD executor
-and GHCR is the image registry. A self-hosted Linux runner inside the k3s
-network replaces the GitLab Agent transport for staging jobs. GitLab files are
-retained but are not the active execution path.
+Until cutover, GitHub Actions is the **active** CI/CD executor and GHCR is the
+image registry. A self-hosted Linux runner inside the k3s network replaces the
+GitLab Agent transport for staging jobs.
+
+GitLab CI is being restored on `feature/gitlab-cicd-migration` with
+`GITLAB_CD_ENABLED=false`, so GitLab may shadow-build/publish but must not
+auto-deploy while GitHub still deploys. See `docs/gitlab-cicd-setup.md`.
 
 The temporary runner must use namespace-scoped Kubernetes credentials and must
 never execute untrusted pull-request code.

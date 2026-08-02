@@ -1,0 +1,106 @@
+# Template for the separate ProjectStatus GitLab project.
+# Copy into that repository as `.gitlab-ci.yml` (adjust image name/path).
+# NewA remains the only deployer into newa-staging via promotion MR / file.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+stages:
+  - validate
+  - test
+  - scan
+  - publish
+  - promote
+
+variables:
+  GO_VERSION: "1.25.0"
+  # NewA GitLab project path that receives promotion MRs.
+  NEWA_PROJECT_PATH: "path/to/newa"
+  NEWA_PROMOTION_FILE: "deploy/environments/staging/project-status-image.txt"
+
+validate:
+  stage: validate
+  image: golang:1.25
+  script:
+    - go mod download
+    - go vet ./...
+
+test:
+  stage: test
+  image: golang:1.25
+  script:
+    - go test ./... -count=1
+
+scan:gitleaks:
+  stage: scan
+  image: zricethezav/gitleaks:v8.24.2
+  script:
+    - gitleaks detect --no-git --source . --redact --exit-code 1
+
+publish:image:
+  stage: publish
+  image:
+    name: moby/buildkit:rootless
+    entrypoint: [""]
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+  before_script:
+    - mkdir -p ~/.docker out
+    - |
+      cat > ~/.docker/config.json <<EOF
+      {"auths":{"${CI_REGISTRY}":{"username":"${CI_REGISTRY_USER}","password":"${CI_REGISTRY_PASSWORD}"}}}
+      EOF
+  script:
+    - IMAGE_NAME="${CI_REGISTRY_IMAGE}/project-status"
+    - IMAGE_TAG="${IMAGE_NAME}:${CI_COMMIT_SHA}"
+    - |
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=Dockerfile \
+        --output "type=image,name=${IMAGE_TAG},push=true" \
+        --metadata-file out/buildkit-metadata.json
+    - |
+      DIGEST="$(sed -n 's/.*"containerimage\.digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' out/buildkit-metadata.json | head -n1)"
+      test -n "${DIGEST}"
+      RELEASE="${IMAGE_NAME}@${DIGEST}"
+      printf '%s\n' "${RELEASE}" > out/project-status-image.txt
+      {
+        echo "PROJECT_STATUS_IMAGE=${RELEASE}"
+        echo "IMAGE_DIGEST=${DIGEST}"
+      } > out/publish.env
+      echo "Published ${RELEASE}"
+  artifacts:
+    reports:
+      dotenv: out/publish.env
+    paths:
+      - out/project-status-image.txt
+      - out/publish.env
+
+# Opens/updates promotion MR in NewA. Requires NEWA_PROMOTION_TOKEN
+# (api scope limited to the NewA project) and glab or curl+API.
+promote:newa:
+  stage: promote
+  image: alpine:3.20
+  needs:
+    - job: publish:image
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - apk add --no-cache curl jq git
+    - test -n "${PROJECT_STATUS_IMAGE}"
+    - |
+      if [ -z "${NEWA_PROMOTION_TOKEN:-}" ]; then
+        echo "NEWA_PROMOTION_TOKEN unset; publish succeeded, promote manually."
+        exit 0
+      fi
+    - echo "Promotion into ${NEWA_PROJECT_PATH}:${NEWA_PROMOTION_FILE} = ${PROJECT_STATUS_IMAGE}"
+    - echo "Wire glab/API MR creation here after GitLab NewA project exists."

@@ -1,0 +1,51 @@
+.project_status_cd_rules: &project_status_cd_rules
+  - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $GITLAB_CD_ENABLED == "true"'
+    changes:
+      - deploy/environments/staging/project-status-image.txt
+  - if: '$CI_PIPELINE_SOURCE == "web" && $GITLAB_CD_ENABLED == "true"'
+
+deploy:project-status:staging:
+  stage: deploy
+  image: alpine/k8s:1.33.1
+  interruptible: false
+  resource_group: newa-staging
+  environment:
+    name: staging
+    deployment_tier: staging
+  rules: *project_status_cd_rules
+  before_script:
+    - apk add --no-cache bash curl jq
+    - test -n "${KUBE_CONTEXT}"
+    - kubectl config use-context "${KUBE_CONTEXT}"
+  script:
+    - mkdir -p out
+    - |
+      IMAGE="${PROJECT_STATUS_IMAGE:-}"
+      if [ -z "${IMAGE}" ]; then
+        IMAGE="$(tr -d '\r\n' < deploy/environments/staging/project-status-image.txt)"
+      fi
+      if ! printf '%s' "${IMAGE}" | grep -Eq '.+@sha256:[0-9a-f]{64}$'; then
+        echo "ProjectStatus release must be an immutable image@sha256:digest" >&2
+        exit 1
+      fi
+      echo "PROJECT_STATUS_IMAGE=${IMAGE}" > out/project-status-release.env
+      export PROJECT_STATUS_IMAGE="${IMAGE}"
+    - |
+      REGISTRY_HOST="$(printf '%s' "${PROJECT_STATUS_IMAGE}" | sed -n 's|^\([^/]*\)/.*|\1|p')"
+      test -n "${PROJECT_STATUS_REGISTRY_USER:-}"
+      test -n "${PROJECT_STATUS_REGISTRY_PASSWORD:-}"
+      test -n "${REGISTRY_HOST}"
+      kubectl -n "${STAGING_NAMESPACE}" create secret docker-registry project-status-registry-pull \
+        --docker-server="${REGISTRY_HOST}" \
+        --docker-username="${PROJECT_STATUS_REGISTRY_USER}" \
+        --docker-password="${PROJECT_STATUS_REGISTRY_PASSWORD}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    - bash scripts/deploy-project-status-staging.sh
+    - bash scripts/smoke-project-status-staging.sh
+    - bash scripts/assert-staging-rbac.sh
+    - bash scripts/record-project-status-release.sh
+  artifacts:
+    when: always
+    paths:
+      - out/project-status-release.env
+      - out/project-status-last-known-good.env

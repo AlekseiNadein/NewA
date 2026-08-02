@@ -37,7 +37,7 @@ ${KUBECTL} create --dry-run=client -o yaml -n "${NAMESPACE}" -f "${ROOT_DIR}/dep
   sed "s|host: nav.local|host: newa-staging.local|g" |
   ${KUBECTL} apply -f -
 
-# Ensure imagePullSecrets on app pods for GHCR.
+# Ensure imagePullSecrets on app pods for the staging registry.
 for deploy in nav-api nav-auth nav-calc-worker; do
   ${KUBECTL} -n "${NAMESPACE}" patch deployment "${deploy}" --type strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":0,"maxSurge":1}},"revisionHistoryLimit":10,"template":{"spec":{"imagePullSecrets":[{"name":"newa-registry-pull"}]}}}}' >/dev/null
 done

@@ -1,0 +1,16 @@
+# GitLab Agent for Kubernetes — staging contour (newa-staging).
+#
+# Register this agent in the GitLab project UI, then set CI/CD variable:
+#   KUBE_CONTEXT = <agent-project-path>:newa-staging
+#
+# Example: my-group/newa:newa-staging
+#
+# Until GITLAB_CD_ENABLED=true, deploy jobs stay disabled even if the agent
+# is connected. Prefer Agent over a long-lived kubeconfig on a shell runner.
+ci_access:
+  projects:
+    # Replace with the real GitLab path of this repository after import.
+    - id: path/to/newa
+  # Optionally grant a group:
+  # groups:
+  #   - id: path/to/group

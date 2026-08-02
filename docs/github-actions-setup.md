@@ -1,8 +1,9 @@
 # Temporary GitHub Actions CI/CD
 
-GitHub Actions and GHCR temporarily replace GitLab CI and GitLab Container
-Registry. Existing `.gitlab-ci.yml` files remain in the repository for a later
-return to GitLab.
+GitHub Actions and GHCR are the **active** staging deployer until GitLab
+cutover. Updated GitLab configs live in-repo with `GITLAB_CD_ENABLED=false`;
+see `docs/gitlab-cicd-setup.md`. Do not enable GitLab CD while this path still
+auto-deploys.
 
 ## GitHub interface
 

@@ -6,8 +6,8 @@ NAMESPACE="${STAGING_NAMESPACE:-newa-staging}"
 KUBECTL="${KUBECTL:-kubectl}"
 IMAGE="${PROJECT_STATUS_IMAGE:?PROJECT_STATUS_IMAGE must be image@sha256:digest}"
 
-if [[ ! "${IMAGE}" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]]; then
-  echo "PROJECT_STATUS_IMAGE must be an immutable GHCR image digest" >&2
+if [[ ! "${IMAGE}" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+  echo "PROJECT_STATUS_IMAGE must be an immutable registry image@sha256:digest" >&2
   exit 1
 fi
 
