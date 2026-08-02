@@ -1,12 +1,38 @@
 # Контекст деплоя NewA и ProjectStatus
 
-Состояние зафиксировано 2026-07-31. Документ описывает три разных контура,
+Состояние зафиксировано **2026-08-02**. Документ описывает три разных контура,
 которые нельзя смешивать: Windows runtime, локальный k3s и CI staging.
+
+## Текущее состояние `origin/main`
+
+| | |
+|--|--|
+| Репозиторий | `C:\NAV\Cursor\NewA` → `https://github.com/AlekseiNadein/NewA` |
+| Default branch | `main` |
+| Актуальный `origin/main` | `ddc35ba` — merge PR #2 `feature/gsn-resource-replacements` |
+| Локальный `main` | может отставать; ориентироваться на `origin/main` |
+
+### Уже в `origin/main`
+
+- GitHub Actions CI/CD для NAV staging (`newa-staging`).
+- Staging-интеграция ProjectStatus (workflows, manifests, scripts, docs).
+- Windows proxy helpers, dual-contour rules.
+- UI import пользовательских позиций из смет (PR #1).
+- Замены ресурсов РМ/РС из source-data при расчёте (PR #2).
+
+### Staging runtime (проверено)
+
+- NAV LKG ConfigMap `newa-release-state` обновляется после зелёного verify.
+- ProjectStatus развёрнут в `newa-staging` с immutable GHCR digest;
+  LKG в ConfigMap `project-status-release-state`.
+- Smoke NAV: Environment secrets `SMOKE_*`.
+- ProjectStatus secrets: `project-status-secrets`,
+  `project-status-registry-pull`, Environment `PROJECT_STATUS_GHCR_*`.
 
 ## Репозитории
 
 - NewA: `C:\NAV\Cursor\NewA`,
-  `https://github.com/AlekseiNadein/NewA`, ветка `main`.
+  `https://github.com/AlekseiNadein/NewA`, default branch `main`.
 - ProjectStatus: `C:\Codex\ProjectStatus`,
   `https://github.com/AlekseiNadein/ProjectStatus`, ветка `master`.
 - ProjectStatus не включается в образ `nav-saas` и имеет самостоятельный
@@ -58,8 +84,7 @@ cd C:\NAV\Cursor\NewA
 - `http://localhost:8088/projectStatusDesktop/`;
 - `http://localhost:8088/projectStatusMobile/`.
 
-На 2026-07-31 оба отвечают HTTP 200. На `:8088` одновременно маршрутизируется
-только один ingress host.
+На `:8088` одновременно маршрутизируется только один ingress host.
 
 ## 3. CI staging
 
@@ -75,6 +100,12 @@ cd C:\NAV\Cursor\NewA
 - NAV deploy использует immutable `nav-saas@sha256:...`;
 - last-known-good NAV хранится в ConfigMap `newa-release-state`.
 
+Первый зелёный полный NAV staging run (исторически):
+`https://github.com/AlekseiNadein/NewA/actions/runs/30540393140`.
+
+Зелёный run после PR #2:
+`https://github.com/AlekseiNadein/NewA/actions/runs/30628927056`.
+
 Windows proxy для просмотра staging переключается явно:
 
 ```powershell
@@ -82,6 +113,12 @@ Windows proxy для просмотра staging переключается яв�
 ```
 
 После этого `http://localhost:8088/` показывает staging, а не локальный `nav`.
+
+WSL/runner keepalive:
+
+```powershell
+.\deploy\k3s\start-wsl-k3s.ps1
+```
 
 ## ProjectStatus CI/CD
 
@@ -103,9 +140,9 @@ commit `4e63476`.
 `NEWA_PROMOTION_TOKEN` пока не настроен, поэтому promotion сообщается как
 notice и пропускается; образ при этом публикуется успешно.
 
-## Подготовленная интеграция ProjectStatus в staging
+## Staging-интеграция ProjectStatus в NewA
 
-В рабочем дереве NewA подготовлены:
+Уже в `origin/main` и применено в кластере:
 
 - `.github/workflows/deploy-project-status-staging.yml`;
 - `.github/workflows/rollback-project-status-staging.yml`;
@@ -115,9 +152,6 @@ notice и пропускается; образ при этом публикуе�
 - `scripts/record-project-status-release.sh`;
 - `scripts/provision-project-status-staging.sh`;
 - `docs/project-status-ci-cd.md`.
-
-Эти изменения NewA на момент фиксации не закоммичены и не отправлены в GitHub,
-поэтому staging deploy ProjectStatus ещё не активен.
 
 Целевая схема:
 
@@ -147,6 +181,7 @@ NAV и ProjectStatus deploy workflows используют общий concurrenc
   `PROJECT_STATUS_GHCR_TOKEN`;
 - promotion: отдельный ограниченный `NEWA_PROMOTION_TOKEN`;
 - общий HMAC `APP_JWT_SECRET` пока нужен для verify JWT; browser его не получает.
+- NAV staging smoke: `SMOKE_*`, pull через `GITHUB_TOKEN` / optional username.
 
 ## Инварианты интеграции
 
@@ -161,15 +196,17 @@ NAV и ProjectStatus deploy workflows используют общий concurrenc
 
 ## Что остаётся сделать
 
-1. Закоммитить и отправить staging-интеграцию в NewA.
-2. Создать `project_status_ro` и `project-status-secrets` в `newa-staging`.
-3. Настроить GHCR pull credentials в NewA Environment `staging`.
-4. Настроить отдельный `NEWA_PROMOTION_TOKEN` в ProjectStatus.
-5. Выполнить первый promotion/deploy/smoke/rollback exercise.
-6. Отдельно спроектировать JWKS/public-key verify и durable bulk recalculation.
+1. Настроить отдельный `NEWA_PROMOTION_TOKEN` в ProjectStatus для
+   автоматических promotion PR.
+2. Выполнить rollback exercise (`Rollback staging` с `exercise=true` и/или
+   `Rollback ProjectStatus staging` после появления второго digest).
+3. Отдельно спроектировать JWKS/public-key verify и durable bulk recalculation.
+4. Hardening k3s `securityContext` (Trivy HIGH пока report-only).
 
 ## Канонические документы
 
+- `docs/deployment-context.md` — этот файл, актуальный снимок состояния.
+- `.cursor/rules/deployment-contours.mdc` — краткие инварианты для агента.
 - `deploy/k3s/README.md` — локальный k3s NewA и Windows proxy.
 - `docs/github-actions-setup.md` — runner и основной staging.
 - `docs/project-status-ci-cd.md` — staging-интеграция ProjectStatus.
