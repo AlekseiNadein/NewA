@@ -21,7 +21,7 @@ apply_namespaced() {
 
 echo "Deploying lean staging stack to ${NAMESPACE} with image ${IMAGE_REF}"
 
-${KUBECTL} apply -f "${ROOT_DIR}/deploy/environments/staging/rbac.yaml"
+# RBAC for newa-ci-deploy is applied only by bootstrap-staging.sh (admin).
 apply_namespaced "${ROOT_DIR}/deploy/k3s/storage.yaml"
 apply_namespaced "${ROOT_DIR}/deploy/k3s/postgres.yaml"
 apply_namespaced "${ROOT_DIR}/deploy/k3s/rabbitmq.yaml"
