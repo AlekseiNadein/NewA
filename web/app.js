@@ -1715,6 +1715,9 @@ function renderUserPositionsPanel() {
       <button class="secondary user-positions-footer-btn" data-user-position-add type="button">
         Добавить позицию пользователя
       </button>
+      <button class="secondary user-positions-footer-btn" data-user-position-import type="button">
+        Добавить из смет
+      </button>
       <button class="secondary user-positions-footer-btn" data-user-position-delete-all type="button">
         Удалить все
       </button>
