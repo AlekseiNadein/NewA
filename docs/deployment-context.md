@@ -11,6 +11,11 @@
 | Default branch | `main` |
 | Активный CD | GitHub Actions + GHCR (до cutover на GitLab) |
 | Миграция на GitLab | ветка `feature/gitlab-cicd-migration`; CD gated `GITLAB_CD_ENABLED=false` |
+| GitLab NewA | `https://gitlab.com/abc-group4363531/NewA` |
+| GitLab ProjectStatus | `https://gitlab.com/abc-group4363531/ProjectStatus` (создаём) |
+| `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
+| `STAGING_BASE_URL` | тот же: `http://newa-staging.local` |
+| Цель | полный cutover на GitLab |
 | Бэкап pre-migration | `backups/2026-08-02_19-09/` (sources + `cicd-snapshot`) |
 
 ### Уже в `origin/main`

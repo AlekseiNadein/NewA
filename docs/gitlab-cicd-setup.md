@@ -11,41 +11,47 @@ Backup of the pre-migration GitHub solution:
 
 | Piece | Status |
 |---|---|
+| GitLab NewA | `https://gitlab.com/abc-group4363531/NewA` |
+| GitLab ProjectStatus | `https://gitlab.com/abc-group4363531/ProjectStatus` (to create) |
+| Agent `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
 | `.gitlab-ci.yml` + `.gitlab/ci/*` | Updated to match GitHub behavior |
 | BuildKit rootless → GitLab Registry | Ready (shadow publish OK) |
 | Lean deploy via `scripts/deploy-staging.sh` | Ready |
 | Single `resource_group: newa-staging` job | Ready (apply→smoke→LKG) |
-| GitLab Agent config stub | `.gitlab/agents/newa-staging/config.yaml` |
-| `GITLAB_CD_ENABLED` | **`false`** — CD gated |
-| GitHub Actions | Still active; do not disable yet |
-| ProjectStatus GitLab project | Not wired yet |
+| GitLab Agent config | `.gitlab/agents/newa-staging/config.yaml` |
+| `GITLAB_CD_ENABLED` | **`false`** until GitHub CD disabled |
+| `STAGING_BASE_URL` | Same as GitHub: `http://newa-staging.local` |
+| GitHub Actions | Still active; disable only at cutover |
+| Target | Full cutover to GitLab (not dual forever) |
 
 ## Required GitLab project settings
 
-1. Import or mirror the repository to GitLab (or add GitLab remote).
-2. Protect `main`; allow merge only via MR.
-3. CI/CD → General pipelines:
+1. Project already exists: `abc-group4363531/NewA`.
+2. Create sibling project `abc-group4363531/ProjectStatus`.
+3. Protect `main`; allow merge only via MR.
+4. CI/CD → General pipelines:
    - process mode **newest ready first**;
    - enable **prevent outdated deployment jobs**.
-4. Create Environment `staging`.
-5. Register GitLab Agent for Kubernetes from
+5. Create Environment `staging`.
+6. Register GitLab Agent for Kubernetes from
    `.gitlab/agents/newa-staging/config.yaml`, then set:
 
 | Type | Key | Notes |
 |---|---|---|
-| Variable | `KUBE_CONTEXT` | `<project-path>:newa-staging` |
-| Variable | `STAGING_BASE_URL` | Reachable staging URL |
+| Variable | `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
+| Variable | `STAGING_BASE_URL` | `http://newa-staging.local` (same as GitHub) |
 | Variable | `GITLAB_CD_ENABLED` | Keep `false` until cutover |
 | Variable | `STAGING_NAMESPACE` | `newa-staging` (default in workflow) |
 | Masked | `STAGING_REGISTRY_USER` | Pull identity for GitLab Registry |
 | Masked | `STAGING_REGISTRY_PASSWORD` | Deploy-token / project token read |
-| Masked | `SMOKE_COMPANY_NAME` | NAV write-smoke |
+| Masked | `SMOKE_COMPANY_NAME` | NAV write-smoke (copy from GitHub) |
 | Masked | `SMOKE_USER_NAME` | NAV write-smoke |
 | Masked | `SMOKE_PASSWORD` | NAV write-smoke |
 | Masked | `PROJECT_STATUS_REGISTRY_USER` | ProjectStatus image pull |
 | Masked | `PROJECT_STATUS_REGISTRY_PASSWORD` | ProjectStatus image pull |
 
-Replace `path/to/newa` in the Agent config with the real GitLab project path.
+Note: GitLab group path is `abc-group4363531` (from the project URL). The shorter
+`abc-group/newa` form is not the live path unless the group/project is renamed.
 
 ## Pipeline shape
 

@@ -19,7 +19,7 @@ stages:
 variables:
   GO_VERSION: "1.25.0"
   # NewA GitLab project path that receives promotion MRs.
-  NEWA_PROJECT_PATH: "path/to/newa"
+  NEWA_PROJECT_PATH: "abc-group4363531/NewA"
   NEWA_PROMOTION_FILE: "deploy/environments/staging/project-status-image.txt"
 
 validate:
