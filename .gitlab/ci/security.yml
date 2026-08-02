@@ -1,6 +1,8 @@
 scan:gitleaks:
   stage: scan
-  image: zricethezav/gitleaks:v8.24.2
+  image:
+    name: zricethezav/gitleaks:v8.24.2
+    entrypoint: [""]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -11,7 +13,9 @@ scan:gitleaks:
 # until local k3s StatefulSet securityContext hardening lands.
 scan:trivy-config-critical:
   stage: scan
-  image: aquasec/trivy:0.65.0
+  image:
+    name: aquasec/trivy:0.65.0
+    entrypoint: [""]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
@@ -20,7 +24,9 @@ scan:trivy-config-critical:
 
 scan:trivy-config-high:
   stage: scan
-  image: aquasec/trivy:0.65.0
+  image:
+    name: aquasec/trivy:0.65.0
+    entrypoint: [""]
   allow_failure: true
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
