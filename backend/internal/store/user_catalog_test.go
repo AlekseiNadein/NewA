@@ -76,12 +76,12 @@ func TestExtractSourceDataResourceReplacements(t *testing.T) {
 		},
 		{
 			"Е0624-002-05 (РМ24214РМ58316=0,1)",
-			[]SourceDataResourceReplacement{{FromNumber: "24214", ToNumber: "58316"}},
+			[]SourceDataResourceReplacement{{FromNumber: "24214", ToNumber: "58316", AbsoluteQuantity: "0,1"}},
 		},
 		{
 			"Е0619-005-02 (РМ24214РМ58316=1)(РМ11767РМ60208)(РМ34239РМ8391)",
 			[]SourceDataResourceReplacement{
-				{FromNumber: "24214", ToNumber: "58316"},
+				{FromNumber: "24214", ToNumber: "58316", AbsoluteQuantity: "1"},
 				{FromNumber: "11767", ToNumber: "60208"},
 				{FromNumber: "34239", ToNumber: "8391"},
 			},
@@ -95,7 +95,15 @@ func TestExtractSourceDataResourceReplacements(t *testing.T) {
 		},
 		{
 			"Е0000 (РМ31434Р45731=0,0130)",
-			[]SourceDataResourceReplacement{{FromNumber: "31434", ToNumber: "45731"}},
+			[]SourceDataResourceReplacement{{FromNumber: "31434", ToNumber: "45731", AbsoluteQuantity: "0,0130"}},
+		},
+		{
+			"Е0000 (РМ11762РМ6141.0,5)",
+			[]SourceDataResourceReplacement{{FromNumber: "11762", ToNumber: "6141", Coefficient: 0.5, HasCoefficient: true}},
+		},
+		{
+			"Е0000 (РМ11762РМ6141.2)",
+			[]SourceDataResourceReplacement{{FromNumber: "11762", ToNumber: "6141", Coefficient: 2, HasCoefficient: true}},
 		},
 		{"Е0624-003-02 (РМ34239)", nil},
 		{"С1084-0303-0032 (KLink=Е0624-003-02)", nil},

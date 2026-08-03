@@ -106,8 +106,11 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		gsnReplacements := make([]gsn.ResourceNumberReplacement, 0, len(replacements))
 		for _, rep := range replacements {
 			gsnReplacements = append(gsnReplacements, gsn.ResourceNumberReplacement{
-				FromNumber: rep.FromNumber,
-				ToNumber:   rep.ToNumber,
+				FromNumber:       rep.FromNumber,
+				ToNumber:         rep.ToNumber,
+				AbsoluteQuantity: rep.AbsoluteQuantity,
+				Coefficient:      rep.Coefficient,
+				HasCoefficient:   rep.HasCoefficient,
 			})
 		}
 		replaced, replaceErr := w.gsn.ApplyResourceNumberReplacements(

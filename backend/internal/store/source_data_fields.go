@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -9,9 +10,16 @@ const sourceDataFieldDelimiter = "'"
 
 // SourceDataResourceReplacement is a (Р<code1>Р<code2>) correction: replace resource 1 with resource 2.
 // FromNumber/ToNumber are digit-only keys (labels like М/С are stripped).
+//
+// Optional suffix after the second code:
+//   =N  — AbsoluteQuantity: расход ресурса после замены
+//   .N  — Coefficient: множитель к расходу исходного ресурса
 type SourceDataResourceReplacement struct {
-	FromNumber string
-	ToNumber   string
+	FromNumber       string
+	ToNumber         string
+	AbsoluteQuantity string  // set when suffix is =N
+	Coefficient      float64 // set when suffix is .N
+	HasCoefficient   bool
 }
 
 // SourceDataResourceDeletion is a (Р<code>) correction: remove that resource from the norm.
@@ -73,8 +81,9 @@ func SourceDataDeterminantFromRawText(rawText string) string {
 
 // ExtractSourceDataResourceReplacements returns (РfromРto) replacements from the cipher field.
 // Example: "Е0801-002-02 (РМ11762РМ6141)" → [{From:11762, To:6141}].
+// Quantity suffixes: "=0,1" → AbsoluteQuantity; ".0,5" → Coefficient.
 // Single-token groups like "(РМ34239)" are deletions (see ExtractSourceDataResourceDeletions).
-// "(KLink=...)" and "(=N)" are ignored. An optional "=factor" after the second code is ignored.
+// "(KLink=...)" and "(=N)" are ignored.
 func ExtractSourceDataResourceReplacements(firstField string) []SourceDataResourceReplacement {
 	raw := strings.TrimSpace(firstField)
 	if raw == "" {
@@ -82,14 +91,11 @@ func ExtractSourceDataResourceReplacements(firstField string) []SourceDataResour
 	}
 	out := make([]SourceDataResourceReplacement, 0)
 	for _, group := range extractSourceDataParentheticalGroups(raw) {
-		from, to, ok := parseResourceReplacementGroup(group)
+		rep, ok := parseResourceReplacementGroup(group)
 		if !ok {
 			continue
 		}
-		out = append(out, SourceDataResourceReplacement{
-			FromNumber: from,
-			ToNumber:   to,
-		})
+		out = append(out, rep)
 	}
 	return out
 }
@@ -151,31 +157,103 @@ func extractSourceDataParentheticalGroups(raw string) []string {
 	}
 }
 
-func parseResourceReplacementGroup(inner string) (fromNumber, toNumber string, ok bool) {
+func parseResourceReplacementGroup(inner string) (SourceDataResourceReplacement, bool) {
 	inner = strings.TrimSpace(inner)
 	if inner == "" {
-		return "", "", false
+		return SourceDataResourceReplacement{}, false
 	}
 	if strings.HasPrefix(inner, "=") || strings.HasPrefix(strings.ToLower(inner), "klink=") {
-		return "", "", false
+		return SourceDataResourceReplacement{}, false
 	}
 
 	fromNumber, rest, ok := readResourceReplacementToken(inner)
 	if !ok {
-		return "", "", false
+		return SourceDataResourceReplacement{}, false
 	}
-	toNumber, rest, ok = readResourceReplacementToken(rest)
+	toNumber, rest, ok := readResourceReplacementToken(rest)
 	if !ok {
-		return "", "", false
-	}
-	rest = strings.TrimSpace(rest)
-	if rest != "" && !strings.HasPrefix(rest, "=") {
-		return "", "", false
+		return SourceDataResourceReplacement{}, false
 	}
 	if fromNumber == "" || toNumber == "" {
-		return "", "", false
+		return SourceDataResourceReplacement{}, false
 	}
-	return fromNumber, toNumber, true
+
+	rep := SourceDataResourceReplacement{
+		FromNumber: fromNumber,
+		ToNumber:   toNumber,
+	}
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return rep, true
+	}
+	if !strings.HasPrefix(rest, "=") && !strings.HasPrefix(rest, ".") {
+		return SourceDataResourceReplacement{}, false
+	}
+
+	kind := rest[0]
+	valueText, valueOK := readReplacementQuantityValue(rest[1:])
+	if !valueOK {
+		// Keep the replacement even if the quantity suffix is malformed.
+		return rep, true
+	}
+	switch kind {
+	case '=':
+		rep.AbsoluteQuantity = valueText
+	case '.':
+		coef, err := parseSourceDataLocalizedFloat(valueText)
+		if err != nil {
+			return rep, true
+		}
+		rep.Coefficient = coef
+		rep.HasCoefficient = true
+	}
+	return rep, true
+}
+
+// readReplacementQuantityValue reads a localized number after "=" or ".".
+// Trailing "#..." (and anything after) is ignored.
+func readReplacementQuantityValue(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if i := strings.IndexByte(raw, '#'); i >= 0 {
+		raw = strings.TrimSpace(raw[:i])
+	}
+	if raw == "" {
+		return "", false
+	}
+
+	runes := []rune(raw)
+	i := 0
+	for i < len(runes) && unicode.IsDigit(runes[i]) {
+		i++
+	}
+	if i < len(runes) && (runes[i] == ',' || runes[i] == '.') {
+		i++
+		startFrac := i
+		for i < len(runes) && unicode.IsDigit(runes[i]) {
+			i++
+		}
+		if i == startFrac {
+			return "", false
+		}
+	}
+	if i == 0 {
+		return "", false
+	}
+	// Reject leftover junk that is not a clean end of number (e.g. "5.1,02").
+	if i < len(runes) {
+		return "", false
+	}
+	text := string(runes[:i])
+	text = strings.ReplaceAll(text, ".", ",")
+	return text, true
+}
+
+func parseSourceDataLocalizedFloat(raw string) (float64, error) {
+	normalized := strings.ReplaceAll(strings.ReplaceAll(strings.TrimSpace(raw), " ", ""), ",", ".")
+	if normalized == "" {
+		return 0, strconv.ErrSyntax
+	}
+	return strconv.ParseFloat(normalized, 64)
 }
 
 // parseResourceDeletionGroup accepts exactly one Р+digits token (optional "=factor" suffix).

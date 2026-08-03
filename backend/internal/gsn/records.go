@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -21,9 +22,14 @@ type RecordResource struct {
 }
 
 // ResourceNumberReplacement replaces a norm resource matched by digit number.
+// AbsoluteQuantity, when set, becomes the replacement's QuantityText.
+// HasCoefficient multiplies the original QuantityText by Coefficient.
 type ResourceNumberReplacement struct {
-	FromNumber string
-	ToNumber   string
+	FromNumber       string
+	ToNumber         string
+	AbsoluteQuantity string
+	Coefficient      float64
+	HasCoefficient   bool
 }
 
 type RecordDetail struct {
@@ -313,7 +319,10 @@ func (s *Service) listRecordResources(ctx context.Context, recordCode, fgisSetID
 }
 
 // ApplyResourceNumberReplacements replaces resources matched by digit number.
-// QuantityText of the original resource is preserved; the target is re-resolved from GSN.
+// The target is re-resolved from GSN. Quantity rules:
+//   - AbsoluteQuantity set → use that as QuantityText
+//   - HasCoefficient → multiply original QuantityText by Coefficient
+//   - otherwise keep the original QuantityText
 func (s *Service) ApplyResourceNumberReplacements(
 	ctx context.Context,
 	resources []RecordResource,
@@ -324,7 +333,13 @@ func (s *Service) ApplyResourceNumberReplacements(
 		return resources, nil
 	}
 
-	replaceTo := make(map[string]string, len(replacements))
+	type replaceSpec struct {
+		to               string
+		absoluteQuantity string
+		coefficient      float64
+		hasCoefficient   bool
+	}
+	replaceTo := make(map[string]replaceSpec, len(replacements))
 	toNumbers := make([]string, 0, len(replacements))
 	for _, rep := range replacements {
 		from := strings.TrimSpace(rep.FromNumber)
@@ -332,7 +347,12 @@ func (s *Service) ApplyResourceNumberReplacements(
 		if from == "" || to == "" || from == to {
 			continue
 		}
-		replaceTo[from] = to
+		replaceTo[from] = replaceSpec{
+			to:               to,
+			absoluteQuantity: strings.TrimSpace(rep.AbsoluteQuantity),
+			coefficient:      rep.Coefficient,
+			hasCoefficient:   rep.HasCoefficient,
+		}
 		toNumbers = append(toNumbers, to)
 	}
 	if len(replaceTo) == 0 {
@@ -351,23 +371,59 @@ func (s *Service) ApplyResourceNumberReplacements(
 		if number == "" {
 			number = resourceNumberKey(out[i].Code)
 		}
-		to, ok := replaceTo[number]
+		spec, ok := replaceTo[number]
 		if !ok {
 			continue
 		}
-		qty := out[i].QuantityText
-		if target, found := targets[to]; found {
+		qty := resolveReplacementQuantityText(out[i].QuantityText, spec.absoluteQuantity, spec.coefficient, spec.hasCoefficient)
+		if target, found := targets[spec.to]; found {
 			out[i] = target
 			out[i].QuantityText = qty
 			continue
 		}
 		out[i] = RecordResource{
-			Code:         to,
-			Number:       to,
+			Code:         spec.to,
+			Number:       spec.to,
 			QuantityText: qty,
 		}
 	}
 	return out, nil
+}
+
+func resolveReplacementQuantityText(original, absolute string, coefficient float64, hasCoefficient bool) string {
+	if absolute != "" {
+		return absolute
+	}
+	if !hasCoefficient {
+		return original
+	}
+	base, err := parseResourceQuantityText(original)
+	if err != nil {
+		return original
+	}
+	return formatResourceQuantityText(base * coefficient)
+}
+
+func parseResourceQuantityText(text string) (float64, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(text), " ", "")
+	if normalized == "" {
+		return 0, nil
+	}
+	if strings.EqualFold(normalized, "П") {
+		return 0, nil
+	}
+	normalized = strings.ReplaceAll(normalized, ",", ".")
+	return strconv.ParseFloat(normalized, 64)
+}
+
+func formatResourceQuantityText(value float64) string {
+	if value == 0 {
+		return "0"
+	}
+	text := strconv.FormatFloat(value, 'f', 6, 64)
+	text = strings.TrimRight(text, "0")
+	text = strings.TrimRight(text, ".")
+	return strings.ReplaceAll(text, ".", ",")
 }
 
 // ApplyResourceNumberDeletions removes resources whose digit number is in deleteNumbers.
