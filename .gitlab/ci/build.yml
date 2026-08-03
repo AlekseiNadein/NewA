@@ -51,7 +51,7 @@ publish:image:
         --opt "label:org.opencontainers.image.revision=${CI_COMMIT_SHA}" \
         --opt "label:org.opencontainers.image.version=${CI_PIPELINE_ID}"
     - |
-      DIGEST="$(sed -n 's/.*"containerimage\.digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' out/buildkit-metadata.json | head -n1)"
+      DIGEST="$(sed -n 's/.*"containerimage\.digest"[[:space:]]*:[[:space:]]*"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' out/buildkit-metadata.json | head -n1)"
       case "${DIGEST}" in
         sha256:*) ;;
         *)
