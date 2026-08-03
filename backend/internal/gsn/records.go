@@ -370,6 +370,37 @@ func (s *Service) ApplyResourceNumberReplacements(
 	return out, nil
 }
 
+// ApplyResourceNumberDeletions removes resources whose digit number is in deleteNumbers.
+func ApplyResourceNumberDeletions(resources []RecordResource, deleteNumbers []string) []RecordResource {
+	if len(resources) == 0 || len(deleteNumbers) == 0 {
+		return resources
+	}
+	remove := make(map[string]struct{}, len(deleteNumbers))
+	for _, n := range deleteNumbers {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		remove[n] = struct{}{}
+	}
+	if len(remove) == 0 {
+		return resources
+	}
+
+	out := make([]RecordResource, 0, len(resources))
+	for _, res := range resources {
+		number := strings.TrimSpace(res.Number)
+		if number == "" {
+			number = resourceNumberKey(res.Code)
+		}
+		if _, drop := remove[number]; drop {
+			continue
+		}
+		out = append(out, res)
+	}
+	return out
+}
+
 func (s *Service) resolveResourcesByNumbers(
 	ctx context.Context,
 	numbers []string,

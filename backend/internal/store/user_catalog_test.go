@@ -115,11 +115,57 @@ func TestExtractSourceDataResourceReplacements(t *testing.T) {
 	}
 }
 
+func TestExtractSourceDataResourceDeletions(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []SourceDataResourceDeletion
+	}{
+		{
+			"Е0624-003-02 (РМ34239)",
+			[]SourceDataResourceDeletion{{Number: "34239"}},
+		},
+		{
+			"Е0624-004-06 (РМ1)(=9)",
+			[]SourceDataResourceDeletion{{Number: "1"}},
+		},
+		{
+			"Е0619-005-02 (РМ24214РМ58316=1)(РМ11767РМ60208)(РМ34239)",
+			[]SourceDataResourceDeletion{{Number: "34239"}},
+		},
+		{
+			"Е0000 (РМ31434=0,0130)",
+			[]SourceDataResourceDeletion{{Number: "31434"}},
+		},
+		{"Е0801-002-02 (РМ11762РМ6141)", nil},
+		{"С1084-0303-0032 (KLink=Е0624-003-02)", nil},
+		{"ТПрайс-лист(=14)", nil},
+	}
+	for _, tc := range cases {
+		got := ExtractSourceDataResourceDeletions(tc.in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("ExtractSourceDataResourceDeletions(%q) len=%d want %d (%v)", tc.in, len(got), len(tc.want), got)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Fatalf("ExtractSourceDataResourceDeletions(%q)[%d] = %#v, want %#v", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 func TestSourceDataResourceReplacementsFromRawText(t *testing.T) {
 	raw := "Е0801-002-02 (РМ11762РМ6141)'(61,475)[4]''Устройство основания'м3"
 	got := SourceDataResourceReplacementsFromRawText(raw)
 	if len(got) != 1 || got[0].FromNumber != "11762" || got[0].ToNumber != "6141" {
 		t.Fatalf("unexpected replacements: %#v", got)
+	}
+}
+
+func TestSourceDataResourceDeletionsFromRawText(t *testing.T) {
+	raw := "Е0624-003-02 (РМ34239)'(1)''Удаление ресурса'м3"
+	got := SourceDataResourceDeletionsFromRawText(raw)
+	if len(got) != 1 || got[0].Number != "34239" {
+		t.Fatalf("unexpected deletions: %#v", got)
 	}
 }
 

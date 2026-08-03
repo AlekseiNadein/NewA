@@ -14,6 +14,12 @@ type SourceDataResourceReplacement struct {
 	ToNumber   string
 }
 
+// SourceDataResourceDeletion is a (Р<code>) correction: remove that resource from the norm.
+// Number is the digit-only key (labels like М/С are stripped).
+type SourceDataResourceDeletion struct {
+	Number string
+}
+
 // SplitSourceDataFields splits a source-data record line into fields.
 // Apostrophes are field delimiters only; there is no escaping.
 func SplitSourceDataFields(line string) []string {
@@ -67,8 +73,8 @@ func SourceDataDeterminantFromRawText(rawText string) string {
 
 // ExtractSourceDataResourceReplacements returns (РfromРto) replacements from the cipher field.
 // Example: "Е0801-002-02 (РМ11762РМ6141)" → [{From:11762, To:6141}].
-// Single-token groups like "(РМ34239)", "(KLink=...)", and "(=N)" are ignored.
-// An optional "=factor" suffix after the second code is ignored for matching.
+// Single-token groups like "(РМ34239)" are deletions (see ExtractSourceDataResourceDeletions).
+// "(KLink=...)" and "(=N)" are ignored. An optional "=factor" after the second code is ignored.
 func ExtractSourceDataResourceReplacements(firstField string) []SourceDataResourceReplacement {
 	raw := strings.TrimSpace(firstField)
 	if raw == "" {
@@ -95,6 +101,35 @@ func SourceDataResourceReplacementsFromRawText(rawText string) []SourceDataResou
 		return nil
 	}
 	return ExtractSourceDataResourceReplacements(fields[0])
+}
+
+// ExtractSourceDataResourceDeletions returns (Р<code>) deletions from the cipher field.
+// Example: "Е0624-003-02 (РМ34239)" → [{Number:34239}].
+// Two-token replacement groups, "(KLink=...)", and "(=N)" are ignored.
+// An optional "=factor" suffix after the code is ignored for matching.
+func ExtractSourceDataResourceDeletions(firstField string) []SourceDataResourceDeletion {
+	raw := strings.TrimSpace(firstField)
+	if raw == "" {
+		return nil
+	}
+	out := make([]SourceDataResourceDeletion, 0)
+	for _, group := range extractSourceDataParentheticalGroups(raw) {
+		number, ok := parseResourceDeletionGroup(group)
+		if !ok {
+			continue
+		}
+		out = append(out, SourceDataResourceDeletion{Number: number})
+	}
+	return out
+}
+
+// SourceDataResourceDeletionsFromRawText reads (Р…) deletions from the first field of a source-data line.
+func SourceDataResourceDeletionsFromRawText(rawText string) []SourceDataResourceDeletion {
+	fields := sourceDataLineFields(rawText)
+	if fields == nil {
+		return nil
+	}
+	return ExtractSourceDataResourceDeletions(fields[0])
 }
 
 func extractSourceDataParentheticalGroups(raw string) []string {
@@ -141,6 +176,31 @@ func parseResourceReplacementGroup(inner string) (fromNumber, toNumber string, o
 		return "", "", false
 	}
 	return fromNumber, toNumber, true
+}
+
+// parseResourceDeletionGroup accepts exactly one Р+digits token (optional "=factor" suffix).
+func parseResourceDeletionGroup(inner string) (number string, ok bool) {
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return "", false
+	}
+	if strings.HasPrefix(inner, "=") || strings.HasPrefix(strings.ToLower(inner), "klink=") {
+		return "", false
+	}
+
+	number, rest, ok := readResourceReplacementToken(inner)
+	if !ok || number == "" {
+		return "", false
+	}
+	// Two tokens ⇒ replacement, not deletion.
+	if _, _, secondOK := readResourceReplacementToken(rest); secondOK {
+		return "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if rest != "" && !strings.HasPrefix(rest, "=") {
+		return "", false
+	}
+	return number, true
 }
 
 // readResourceReplacementToken parses "Р" + optional type letter + digits.
