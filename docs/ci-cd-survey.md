@@ -54,15 +54,8 @@ The project intentionally keeps two deployment contours with different goals:
 
 These contours are complementary and should not override each other.
 
-## Decision note: temporary GitHub platform
+## Decision note: platform (superseded by cutover)
 
-Until cutover, GitHub Actions is the **active** CI/CD executor and GHCR is the
-image registry. A self-hosted Linux runner inside the k3s network replaces the
-GitLab Agent transport for staging jobs.
-
-GitLab CI is being restored on `feature/gitlab-cicd-migration` with
-`GITLAB_CD_ENABLED=false`, so GitLab may shadow-build/publish but must not
-auto-deploy while GitHub still deploys. See `docs/gitlab-cicd-setup.md`.
-
-The temporary runner must use namespace-scoped Kubernetes credentials and must
-never execute untrusted pull-request code.
+Cutover completed **2026-08-03**. Active CD is GitLab CI + GitLab Registry;
+deploy/rollback run on self-hosted tag `newa-staging`. GitHub Actions is
+mirror-only (no staging deploy). See `docs/ci-cd-decision.md`.

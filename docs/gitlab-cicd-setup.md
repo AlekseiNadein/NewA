@@ -1,93 +1,74 @@
 # GitLab CI/CD setup (active platform)
 
-GitLab.com is the **active** CI/CD platform for NewA staging after cutover.
-GitHub Actions must not auto-deploy to `newa-staging` while
-`GITLAB_CD_ENABLED=true`.
+Нормативное решение: `docs/ci-cd-decision.md`.  
+GitLab.com — **активный** CD для `newa-staging`. GitHub не auto-деплоит.
 
-Backup of the pre-migration GitHub solution:
-`backups/2026-08-02_19-09/cicd-snapshot/`.
-Cutover sources backup: `backups/2026-08-03_11-52/`.
-
-## Current state
+## Итоговое состояние
 
 | Piece | Status |
 |---|---|
 | GitLab NewA | `https://gitlab.com/abc-group4363531/NewA` |
 | GitLab ProjectStatus | `https://gitlab.com/abc-group4363531/ProjectStatus` |
-| Agent `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
-| Agent in cluster | Helm `newa-staging` / ns `gitlab-agent-newa-staging` |
-| `.gitlab-ci.yml` + `.gitlab/ci/*` | Active |
-| BuildKit → GitLab Registry | Active on `main` |
-| Lean deploy via `scripts/deploy-staging.sh` | Active |
 | `GITLAB_CD_ENABLED` | **`true`** |
+| Publish | BuildKit rootless → GitLab Registry |
+| Deploy/rollback | Self-hosted runner tag **`newa-staging`** |
+| Kubeconfig on runner | `/home/alexey/.kube/newa-staging-ci` |
+| Agent | Installed (`newa-staging`); smoke/DNS via host runner |
+| Lean deploy | `scripts/deploy-staging.sh` |
+| Lock | `resource_group: newa-staging` |
+| LKG | ConfigMap `newa-release-state` |
 | `STAGING_BASE_URL` | `http://newa-staging.local` |
-| GitHub Actions deploy/verify | Disabled (`if: false`) |
+| GitHub deploy/verify | Disabled (`if: false`) |
 
-## Required GitLab project settings
+Backups: `backups/2026-08-02_19-09/`, `backups/2026-08-03_11-52/`.
 
-1. Project already exists: `abc-group4363531/NewA`.
-2. Create sibling project `abc-group4363531/ProjectStatus`.
-3. Protect `main`; allow merge only via MR.
-4. CI/CD → General pipelines:
-   - process mode **newest ready first**;
-   - enable **prevent outdated deployment jobs**.
-5. Create Environment `staging`.
-6. Register GitLab Agent for Kubernetes from
-   `.gitlab/agents/newa-staging/config.yaml`, then set:
+## CI/CD variables
 
 | Type | Key | Notes |
 |---|---|---|
-| Variable | `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
-| Variable | `STAGING_BASE_URL` | `http://newa-staging.local` (same as GitHub) |
-| Variable | `GITLAB_CD_ENABLED` | Keep `false` until cutover |
-| Variable | `STAGING_NAMESPACE` | `newa-staging` (default in workflow) |
-| Masked | `STAGING_REGISTRY_USER` | Pull identity for GitLab Registry |
-| Masked | `STAGING_REGISTRY_PASSWORD` | Deploy-token / project token read |
-| Masked | `SMOKE_COMPANY_NAME` | NAV write-smoke (copy from GitHub) |
-| Masked | `SMOKE_USER_NAME` | NAV write-smoke |
-| Masked | `SMOKE_PASSWORD` | NAV write-smoke |
-| Masked | `PROJECT_STATUS_REGISTRY_USER` | ProjectStatus image pull |
-| Masked | `PROJECT_STATUS_REGISTRY_PASSWORD` | ProjectStatus image pull |
+| Variable | `GITLAB_CD_ENABLED` | `true` |
+| Variable | `STAGING_BASE_URL` | `http://newa-staging.local` |
+| Variable | `STAGING_NAMESPACE` | `newa-staging` |
+| Variable | `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` (Agent; optional for host path) |
+| Masked | `STAGING_REGISTRY_USER` / `STAGING_REGISTRY_PASSWORD` | GitLab Registry pull |
+| Masked | `SMOKE_COMPANY_NAME` / `SMOKE_USER_NAME` / `SMOKE_PASSWORD` | write-smoke |
+| Masked | `PROJECT_STATUS_REGISTRY_USER` / `PROJECT_STATUS_REGISTRY_PASSWORD` | ProjectStatus pull |
 
-Note: GitLab group path is `abc-group4363531` (from the project URL). The shorter
-`abc-group/newa` form is not the live path unless the group/project is renamed.
+Project settings: protect `main`, MR-only merge, newest-ready-first,
+prevent outdated deployment jobs, Environment `staging`.
 
 ## Pipeline shape
 
 ```text
 MR / branch  → validate, test, scan
-main         → + build:affected, publish:image (GitLab Registry digest)
-main + GITLAB_CD_ENABLED=true
-             → deploy:staging (lean stack, smoke, LKG ConfigMap)
-             → deploy:project-status:staging (promotion file / manual)
-manual       → rollback:staging / rollback:exercise / rollback:project-status
+main         → build:affected, publish:image
+main + CD    → deploy:staging (tag newa-staging): apply→smoke→LKG
+manual       → rollback:*
 ```
 
-Deploy uses namespace-scoped Agent access. Jobs must **not** create the
-namespace. Bootstrap remains `scripts/bootstrap-staging.sh` with an admin
-kubeconfig.
+Deploy **не** создаёт namespace. Bootstrap RBAC/ns:
+`scripts/bootstrap-staging.sh` с admin kubeconfig.
 
-## Cutover checklist
+## Self-hosted runner
 
-1. Shadow: GitLab validate/test/scan/publish green on `main`; CD still off.
-2. Install/connect Agent; confirm `kubectl` context from a manual job.
-3. **Disable GitHub staging CD first** (workflow `if: false` or pause Environment).
-4. Set `GITLAB_CD_ENABLED=true`.
-5. Run one NAV deploy + smoke; confirm `newa-release-state`.
-6. Migrate ProjectStatus publish/promotion to GitLab Registry + MR.
-7. Archive or disable GitHub Actions workflows after a stable soak.
+- Tag: `newa-staging`
+- Host: WSL рядом с k3s (резолв `newa-staging.local`, доступ к API)
+- Keepalive: `deploy/k3s/start-wsl-k3s.ps1`
+- Тот же контур, что ранее использовался GitHub Actions runner’ом
 
-## Local contours unchanged
+## Cutover (выполнен)
 
-- Windows runtime (`run.bat`, nginx `:8080`) — untouched.
-- Local k3s `nav` / `nav.local` — still `deploy/k3s/deploy.sh`.
-- CI staging `newa-staging` / `newa-staging.local` — digest deploys only.
+1. Shadow CI зелёный, CD off.
+2. Agent зарегистрирован; RBAC сужен (KSV-0050).
+3. GitHub deploy/verify выключены.
+4. `GITLAB_CD_ENABLED=true`.
+5. Deploy переведён на self-hosted tag `newa-staging` (smoke DNS).
 
-Windows proxy still serves one Host at a time on `:8088`.
+Осталось: ProjectStatus publish на GitLab Registry + promotion; rollback exercise.
 
 ## Related docs
 
-- `docs/deployment-context.md` — live contour snapshot
-- `docs/github-actions-setup.md` — temporary GitHub path (active until cutover)
-- `docs/project-status-ci-cd.md` — ProjectStatus promotion contract
-- `docs/ci-cd-implementation-guide.md` — original GitLab target design
+- `docs/ci-cd-decision.md` — ADR
+- `docs/deployment-context.md` — живой снимок
+- `docs/github-actions-setup.md` — mirror path
+- `docs/project-status-ci-cd.md`
