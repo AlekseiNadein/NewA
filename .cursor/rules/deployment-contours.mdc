@@ -6,13 +6,16 @@ alwaysApply: true
 
 # Deployment contours
 
-Полный актуальный контекст: `docs/deployment-context.md`.
+Полный контекст: `docs/deployment-context.md`.  
+Итоговое CI/CD решение: `docs/ci-cd-decision.md`.
+
 ## Не смешивать контуры
 
 - Windows runtime: nginx `:8080`, NAV `:8090`, ProjectStatus `:8100`.
 - Локальный k3s: namespace `nav`, Host `nav.local`, локальные `*:dev` images.
 - CI staging: namespace `newa-staging`, Host `newa-staging.local`,
-  immutable GHCR digests.
+  immutable digest из **GitLab Registry**.
+
 ## Windows proxy
 
 `nav-k3s-proxy` публикует `127.0.0.1:8088` и одновременно обслуживает один Host:
@@ -24,31 +27,31 @@ alwaysApply: true
 
 ProjectStatus local URLs:
 `/projectStatusDesktop/`, `/projectStatusMobile/`.
+
 ## Ownership
 
-- NewA: `C:\NAV\Cursor\NewA`, GitHub `AlekseiNadein/NewA`.
+- NewA: `C:\NAV\Cursor\NewA`, GitHub `AlekseiNadein/NewA`,
+  GitLab `abc-group4363531/NewA`.
 - ProjectStatus: `C:\Codex\ProjectStatus`, GitHub
-  `AlekseiNadein/ProjectStatus`.
+  `AlekseiNadein/ProjectStatus`, GitLab `abc-group4363531/ProjectStatus`.
 - ProjectStatus сам тестирует и публикует образ; NewA владеет shared staging.
 - Не включать ProjectStatus в `nav-saas`.
 
 ## CI/CD
 
-- Active CD until cutover: GitHub Actions on runner
-  `newa-staging-nadein-envyi5` (namespace `newa-staging`).
-- Target CD: GitLab Agent + GitLab Registry; gated by
-  `GITLAB_CD_ENABLED` (must stay false while GitHub auto-deploys).
-- NewA runner / Agent identity: namespace-scoped, not cluster-admin.
-- All staging deploy use concurrency / `resource_group` `newa-staging`.
-- ProjectStatus promotion requires separate `NEWA_PROMOTION_TOKEN`.
-- Do not use a broad personal `gh`/`glab` token as repository secret.
-- Last-known-good хранить раздельно:
-  `newa-release-state` and `project-status-release-state`.
-- Details: `docs/gitlab-cicd-setup.md`, `docs/deployment-context.md`.
+- **Активный CD:** GitLab CI (`GITLAB_CD_ENABLED=true`).
+- Publish: BuildKit → GitLab Registry.
+- Deploy/rollback: self-hosted GitLab runner tag `newa-staging`,
+  kubeconfig `/home/alexey/.kube/newa-staging-ci`.
+- GitHub Actions: mirror only; deploy/verify disabled (`if: false`).
+- Dual auto-deploy GitHub+GitLab запрещён.
+- Lock: `resource_group` / concurrency `newa-staging`.
+- Identity: namespace-scoped `newa-ci-deploy`, не cluster-admin.
+- LKG: `newa-release-state` и `project-status-release-state`.
+- Details: `docs/gitlab-cicd-setup.md`.
 
 ## Перед изменениями
 
-- Проверять `docs/deployment-context.md`: там отмечено, что уже push, а что
-  остаётся только в локальном working tree.
+- Проверять `docs/deployment-context.md` и `docs/ci-cd-decision.md`.
 - Не перезаписывать незакоммиченные пользовательские изменения.
 - Меняя DB/JWT/nginx/calc contract, проверять оба репозитория.
