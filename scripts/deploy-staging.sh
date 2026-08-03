@@ -21,7 +21,7 @@ apply_namespaced() {
 
 echo "Deploying lean staging stack to ${NAMESPACE} with image ${IMAGE_REF}"
 
-${KUBECTL} apply -f "${ROOT_DIR}/deploy/environments/staging/rbac.yaml"
+# RBAC for newa-ci-deploy is applied only by bootstrap-staging.sh (admin).
 apply_namespaced "${ROOT_DIR}/deploy/k3s/storage.yaml"
 apply_namespaced "${ROOT_DIR}/deploy/k3s/postgres.yaml"
 apply_namespaced "${ROOT_DIR}/deploy/k3s/rabbitmq.yaml"
@@ -37,7 +37,7 @@ ${KUBECTL} create --dry-run=client -o yaml -n "${NAMESPACE}" -f "${ROOT_DIR}/dep
   sed "s|host: nav.local|host: newa-staging.local|g" |
   ${KUBECTL} apply -f -
 
-# Ensure imagePullSecrets on app pods for GHCR.
+# Ensure imagePullSecrets on app pods for the staging registry.
 for deploy in nav-api nav-auth nav-calc-worker; do
   ${KUBECTL} -n "${NAMESPACE}" patch deployment "${deploy}" --type strategic -p '{"spec":{"strategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":0,"maxSurge":1}},"revisionHistoryLimit":10,"template":{"spec":{"imagePullSecrets":[{"name":"newa-registry-pull"}]}}}}' >/dev/null
 done

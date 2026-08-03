@@ -1,11 +1,7 @@
 name: Deploy ProjectStatus staging
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - deploy/environments/staging/project-status-image.txt
+  # cutover: auto-deploy disabled; use workflow_dispatch or GitLab CD
   workflow_dispatch:
     inputs:
       image:
@@ -49,8 +45,8 @@ jobs:
           if [ -z "$image" ]; then
             image="$(tr -d '\r\n' < deploy/environments/staging/project-status-image.txt)"
           fi
-          if [[ ! "$image" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "ProjectStatus release must be an immutable GHCR digest" >&2
+          if [[ ! "$image" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "ProjectStatus release must be an immutable image@sha256:digest" >&2
             exit 1
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"

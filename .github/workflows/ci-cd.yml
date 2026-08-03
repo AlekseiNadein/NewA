@@ -1,5 +1,8 @@
 name: CI/CD
 
+# GitLab is the active staging CD after cutover (GITLAB_CD_ENABLED=true).
+# Keep validate/test/security/publish on GitHub as optional mirror; do not deploy.
+
 on:
   pull_request:
   push:
@@ -104,6 +107,7 @@ jobs:
             org.opencontainers.image.version=${{ github.run_id }}
 
   deploy:
+    if: false # cutover: staging deploy moved to GitLab CI
     needs:
       - publish
     runs-on:
@@ -144,6 +148,7 @@ jobs:
           kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
 
   verify:
+    if: false # cutover: staging verify moved to GitLab CI
     needs:
       - publish
       - deploy

@@ -1,52 +1,49 @@
+# Single job holds resource_group through apply → rollout → smoke → LKG.
+# Do not create the namespace here: deploy SA is namespace-scoped.
+.deploy_staging_rules: &deploy_staging_rules
+  - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $GITLAB_CD_ENABLED == "true"'
+  - if: '$CI_PIPELINE_SOURCE == "web" && $GITLAB_CD_ENABLED == "true"'
+
 deploy:staging:
   stage: deploy
-  image: bitnami/kubectl:1.33
+  image: alpine/k8s:1.33.1
+  interruptible: false
   needs:
-    - publish:image
+    - job: publish:image
+      artifacts: true
   resource_group: newa-staging
   environment:
     name: staging
     deployment_tier: staging
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  rules: *deploy_staging_rules
+  variables:
+    # Set in GitLab CI/CD variables after Agent registration, e.g.
+    # group/newa:newa-staging
+    KUBE_CONTEXT: "${KUBE_CONTEXT}"
+  before_script:
+    - apk add --no-cache bash curl jq
+    - test -n "${KUBE_CONTEXT}"
+    - test -n "${IMAGE_REPOSITORY}"
+    - test -n "${IMAGE_DIGEST}"
+    - kubectl config get-contexts
+    - kubectl config use-context "${KUBE_CONTEXT}"
   script:
-    - test -n "$KUBE_CONTEXT"
-    - test -n "$IMAGE_REPOSITORY"
-    - test -n "$IMAGE_DIGEST"
-    - kubectl config use-context "$KUBE_CONTEXT"
-    - kubectl create namespace newa-staging --dry-run=client -o yaml | kubectl apply -f -
     - |
-      if [ -n "$STAGING_REGISTRY_USER" ] && [ -n "$STAGING_REGISTRY_PASSWORD" ]; then
-        kubectl -n newa-staging create secret docker-registry newa-registry-pull \
-          --docker-server="$CI_REGISTRY" \
-          --docker-username="$STAGING_REGISTRY_USER" \
-          --docker-password="$STAGING_REGISTRY_PASSWORD" \
+      if [ -n "${STAGING_REGISTRY_USER:-}" ] && [ -n "${STAGING_REGISTRY_PASSWORD:-}" ]; then
+        kubectl -n "${STAGING_NAMESPACE}" create secret docker-registry newa-registry-pull \
+          --docker-server="${CI_REGISTRY}" \
+          --docker-username="${STAGING_REGISTRY_USER}" \
+          --docker-password="${STAGING_REGISTRY_PASSWORD}" \
           --dry-run=client -o yaml | kubectl apply -f -
       fi
-    - kubectl kustomize deploy/environments/staging | sed "s|image: nav-saas:dev|image: ${IMAGE_REPOSITORY}@${IMAGE_DIGEST}|g" | kubectl apply -f -
-    - kubectl -n newa-staging rollout status deployment/nav-auth --timeout=300s
-    - kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
-    - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
-    - kubectl -n newa-staging get deploy -o wide
-
-verify:staging:
-  stage: verify
-  image: bitnami/kubectl:1.33
-  needs:
-    - deploy:staging
-    - publish:image
-  resource_group: newa-staging
-  environment:
-    name: staging
-    deployment_tier: staging
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-  script:
-    - test -n "$KUBE_CONTEXT"
-    - kubectl config use-context "$KUBE_CONTEXT"
-    - sh scripts/verify-staging.sh
-    - sh scripts/assert-staging-rbac.sh
-    - sh scripts/resolve-last-known-good.sh
+    - bash scripts/deploy-staging.sh
+    - kubectl -n "${STAGING_NAMESPACE}" rollout status deployment/nav-auth --timeout=300s
+    - kubectl -n "${STAGING_NAMESPACE}" rollout status deployment/nav-calc-worker --timeout=300s
+    - kubectl -n "${STAGING_NAMESPACE}" rollout status deployment/nav-api --timeout=300s
+    - bash scripts/verify-staging.sh
+    - bash scripts/smoke-staging-write.sh
+    - bash scripts/assert-staging-rbac.sh
+    - bash scripts/resolve-last-known-good.sh
   artifacts:
     when: always
     paths:

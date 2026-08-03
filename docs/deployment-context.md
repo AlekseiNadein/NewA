@@ -1,38 +1,39 @@
 # Контекст деплоя NewA и ProjectStatus
 
-Состояние зафиксировано **2026-08-02**. Документ описывает три разных контура,
+Состояние зафиксировано **2026-08-03**. Документ описывает три разных контура,
 которые нельзя смешивать: Windows runtime, локальный k3s и CI staging.
 
-## Текущее состояние `origin/main`
+## Текущее состояние
 
 | | |
 |--|--|
-| Репозиторий | `C:\NAV\Cursor\NewA` → `https://github.com/AlekseiNadein/NewA` |
-| Default branch | `main` |
-| Актуальный `origin/main` | `ddc35ba` — merge PR #2 `feature/gsn-resource-replacements` |
-| Локальный `main` | может отставать; ориентироваться на `origin/main` |
+| Репозиторий GitHub | `C:\NAV\Cursor\NewA` → `https://github.com/AlekseiNadein/NewA` |
+| Репозиторий GitLab | `https://gitlab.com/abc-group4363531/NewA` |
+| Default branch | `main` (оба remote) |
+| Активный CD | **GitLab CI** (`GITLAB_CD_ENABLED=true`) + GitLab Registry + Agent `newa-staging` |
+| GitHub Actions | validate/test/security/publish mirror; **deploy/verify отключены** |
+| `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
+| `STAGING_BASE_URL` | `http://newa-staging.local` |
+| Бэкап pre-cutover | `backups/2026-08-03_11-52/` |
 
-### Уже в `origin/main`
+### Staging runtime
 
-- GitHub Actions CI/CD для NAV staging (`newa-staging`).
-- Staging-интеграция ProjectStatus (workflows, manifests, scripts, docs).
-- Windows proxy helpers, dual-contour rules.
-- UI import пользовательских позиций из смет (PR #1).
-- Замены ресурсов РМ/РС из source-data при расчёте (PR #2).
+- NAV LKG ConfigMap `newa-release-state` обновляется после зелёного GitLab verify.
+- ProjectStatus в `newa-staging` (GHCR digest до миграции publish на GitLab Registry).
+- Smoke NAV: GitLab CI variables `SMOKE_*`.
+- Agent: Helm release `newa-staging` в ns `gitlab-agent-newa-staging`.
 
-### Staging runtime (проверено)
+## Cutover GitLab (выполнен)
 
-- NAV LKG ConfigMap `newa-release-state` обновляется после зелёного verify.
-- ProjectStatus развёрнут в `newa-staging` с immutable GHCR digest;
-  LKG в ConfigMap `project-status-release-state`.
-- Smoke NAV: Environment secrets `SMOKE_*`.
-- ProjectStatus secrets: `project-status-secrets`,
-  `project-status-registry-pull`, Environment `PROJECT_STATUS_GHCR_*`.
+Целевая платформа — GitLab.com + GitLab Container Registry + GitLab Agent.
+GitHub auto-deploy в `newa-staging` выключен (`if: false` / без push trigger).
+
+Подробности: `docs/gitlab-cicd-setup.md`.
 
 ## Репозитории
 
 - NewA: `C:\NAV\Cursor\NewA`,
-  `https://github.com/AlekseiNadein/NewA`, default branch `main`.
+  `https://github.com/AlekseiNadein/NewA` / `https://gitlab.com/abc-group4363531/NewA`, default branch `main`.
 - ProjectStatus: `C:\Codex\ProjectStatus`,
   `https://github.com/AlekseiNadein/ProjectStatus`, ветка `master`.
 - ProjectStatus не включается в образ `nav-saas` и имеет самостоятельный
@@ -90,23 +91,15 @@ cd C:\NAV\Cursor\NewA
 
 - namespace: `newa-staging`;
 - ingress host внутри WSL: `newa-staging.local`;
-- GitHub Actions + GHCR временно заменяют GitLab;
-- self-hosted runner:
-  `newa-staging-nadein-envyi5`, labels
-  `self-hosted`, `Linux`, `newa-staging`;
-- kubeconfig runner:
-  `/home/alexey/.kube/newa-staging-ci`;
-- runner имеет namespace-scoped RBAC, не cluster-admin;
-- NAV deploy использует immutable `nav-saas@sha256:...`;
-- last-known-good NAV хранится в ConfigMap `newa-release-state`.
+- **активный CD** — GitLab CI + GitLab Registry + Agent `newa-staging`;
+- GitHub Actions: validate/test/security/publish mirror; deploy/verify отключены;
+- self-hosted GitHub runner остаётся для mirror jobs:
+  `newa-staging-nadein-envyi5`;
+- kubeconfig (legacy / bootstrap): `/home/alexey/.kube/newa-staging-ci`;
+- NAV deploy использует immutable `…/nav-saas@sha256:...` из GitLab Registry;
+- last-known-good NAV — ConfigMap `newa-release-state`.
 
-Первый зелёный полный NAV staging run (исторически):
-`https://github.com/AlekseiNadein/NewA/actions/runs/30540393140`.
-
-Зелёный run после PR #2:
-`https://github.com/AlekseiNadein/NewA/actions/runs/30628927056`.
-
-Windows proxy для просмотра staging переключается явно:
+Windows proxy для просмотра staging:
 
 ```powershell
 .\deploy\k3s\start-windows-proxy.ps1 -IngressHost newa-staging.local
@@ -206,9 +199,10 @@ NAV и ProjectStatus deploy workflows используют общий concurrenc
 ## Канонические документы
 
 - `docs/deployment-context.md` — этот файл, актуальный снимок состояния.
+- `docs/gitlab-cicd-setup.md` — целевой GitLab CI/CD и cutover.
 - `.cursor/rules/deployment-contours.mdc` — краткие инварианты для агента.
 - `deploy/k3s/README.md` — локальный k3s NewA и Windows proxy.
-- `docs/github-actions-setup.md` — runner и основной staging.
+- `docs/github-actions-setup.md` — временный GitHub path (active until cutover).
 - `docs/project-status-ci-cd.md` — staging-интеграция ProjectStatus.
 - `RESOURCE_ANALYTICS_SERVICE_CONTEXT.md` — data/auth/calc contract.
 - `C:\Codex\ProjectStatus\docs\ci-cd.md` — CI отдельного репозитория.
