@@ -120,6 +120,14 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		record.Resources = replaced
 	}
 
+	if deletions := store.SourceDataResourceDeletionsFromRawText(rawText); len(deletions) > 0 {
+		numbers := make([]string, 0, len(deletions))
+		for _, del := range deletions {
+			numbers = append(numbers, del.Number)
+		}
+		record.Resources = gsn.ApplyResourceNumberDeletions(record.Resources, numbers)
+	}
+
 	pricingStarted := time.Now()
 	snap, err := estimatecalc.BuildLineCalcSnapshot(record, quantity)
 	observability.ObserveCalcPricingDuration(time.Since(pricingStarted).Seconds())
