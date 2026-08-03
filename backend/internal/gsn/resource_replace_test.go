@@ -8,7 +8,6 @@ func TestApplyResourceNumberReplacementsInMemory(t *testing.T) {
 		{Code: "С1000-0001-0002", Number: "99999", Name: "keep", QuantityText: "2", UnitPriceText: "20"},
 	}
 
-	// Without DB: unresolved target keeps number code and original quantity.
 	svc := &Service{}
 	out, err := svc.ApplyResourceNumberReplacements(nil, resources, []ResourceNumberReplacement{
 		{FromNumber: "11762", ToNumber: "6141"},
@@ -24,5 +23,53 @@ func TestApplyResourceNumberReplacementsInMemory(t *testing.T) {
 	}
 	if out[1].Number != "99999" || out[1].Name != "keep" {
 		t.Fatalf("untouched resource = %#v", out[1])
+	}
+}
+
+func TestApplyResourceNumberReplacementsAbsoluteQuantity(t *testing.T) {
+	resources := []RecordResource{
+		{Code: "С1", Number: "24214", QuantityText: "10"},
+	}
+	svc := &Service{}
+	out, err := svc.ApplyResourceNumberReplacements(nil, resources, []ResourceNumberReplacement{
+		{FromNumber: "24214", ToNumber: "58316", AbsoluteQuantity: "0,1"},
+	}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[0].Number != "58316" || out[0].QuantityText != "0,1" {
+		t.Fatalf("got %#v", out[0])
+	}
+}
+
+func TestApplyResourceNumberReplacementsCoefficient(t *testing.T) {
+	resources := []RecordResource{
+		{Code: "С1", Number: "11762", QuantityText: "1,5"},
+	}
+	svc := &Service{}
+	out, err := svc.ApplyResourceNumberReplacements(nil, resources, []ResourceNumberReplacement{
+		{FromNumber: "11762", ToNumber: "6141", Coefficient: 0.5, HasCoefficient: true},
+	}, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out[0].Number != "6141" || out[0].QuantityText != "0,75" {
+		t.Fatalf("got %#v", out[0])
+	}
+}
+
+func TestApplyResourceNumberDeletions(t *testing.T) {
+	resources := []RecordResource{
+		{Code: "С1000-0001-0001", Number: "34239", Name: "drop", QuantityText: "1"},
+		{Code: "С1000-0001-0002", Number: "99999", Name: "keep", QuantityText: "2"},
+		{Code: "М11762", Name: "also-drop", QuantityText: "3"}, // Number from code key
+	}
+
+	out := ApplyResourceNumberDeletions(resources, []string{"34239", "11762"})
+	if len(out) != 1 {
+		t.Fatalf("len=%d, out=%#v", len(out), out)
+	}
+	if out[0].Number != "99999" || out[0].Name != "keep" {
+		t.Fatalf("remaining = %#v", out[0])
 	}
 }

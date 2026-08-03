@@ -76,12 +76,12 @@ func TestExtractSourceDataResourceReplacements(t *testing.T) {
 		},
 		{
 			"Е0624-002-05 (РМ24214РМ58316=0,1)",
-			[]SourceDataResourceReplacement{{FromNumber: "24214", ToNumber: "58316"}},
+			[]SourceDataResourceReplacement{{FromNumber: "24214", ToNumber: "58316", AbsoluteQuantity: "0,1"}},
 		},
 		{
 			"Е0619-005-02 (РМ24214РМ58316=1)(РМ11767РМ60208)(РМ34239РМ8391)",
 			[]SourceDataResourceReplacement{
-				{FromNumber: "24214", ToNumber: "58316"},
+				{FromNumber: "24214", ToNumber: "58316", AbsoluteQuantity: "1"},
 				{FromNumber: "11767", ToNumber: "60208"},
 				{FromNumber: "34239", ToNumber: "8391"},
 			},
@@ -95,7 +95,15 @@ func TestExtractSourceDataResourceReplacements(t *testing.T) {
 		},
 		{
 			"Е0000 (РМ31434Р45731=0,0130)",
-			[]SourceDataResourceReplacement{{FromNumber: "31434", ToNumber: "45731"}},
+			[]SourceDataResourceReplacement{{FromNumber: "31434", ToNumber: "45731", AbsoluteQuantity: "0,0130"}},
+		},
+		{
+			"Е0000 (РМ11762РМ6141.0,5)",
+			[]SourceDataResourceReplacement{{FromNumber: "11762", ToNumber: "6141", Coefficient: 0.5, HasCoefficient: true}},
+		},
+		{
+			"Е0000 (РМ11762РМ6141.2)",
+			[]SourceDataResourceReplacement{{FromNumber: "11762", ToNumber: "6141", Coefficient: 2, HasCoefficient: true}},
 		},
 		{"Е0624-003-02 (РМ34239)", nil},
 		{"С1084-0303-0032 (KLink=Е0624-003-02)", nil},
@@ -115,11 +123,57 @@ func TestExtractSourceDataResourceReplacements(t *testing.T) {
 	}
 }
 
+func TestExtractSourceDataResourceDeletions(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []SourceDataResourceDeletion
+	}{
+		{
+			"Е0624-003-02 (РМ34239)",
+			[]SourceDataResourceDeletion{{Number: "34239"}},
+		},
+		{
+			"Е0624-004-06 (РМ1)(=9)",
+			[]SourceDataResourceDeletion{{Number: "1"}},
+		},
+		{
+			"Е0619-005-02 (РМ24214РМ58316=1)(РМ11767РМ60208)(РМ34239)",
+			[]SourceDataResourceDeletion{{Number: "34239"}},
+		},
+		{
+			"Е0000 (РМ31434=0,0130)",
+			[]SourceDataResourceDeletion{{Number: "31434"}},
+		},
+		{"Е0801-002-02 (РМ11762РМ6141)", nil},
+		{"С1084-0303-0032 (KLink=Е0624-003-02)", nil},
+		{"ТПрайс-лист(=14)", nil},
+	}
+	for _, tc := range cases {
+		got := ExtractSourceDataResourceDeletions(tc.in)
+		if len(got) != len(tc.want) {
+			t.Fatalf("ExtractSourceDataResourceDeletions(%q) len=%d want %d (%v)", tc.in, len(got), len(tc.want), got)
+		}
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Fatalf("ExtractSourceDataResourceDeletions(%q)[%d] = %#v, want %#v", tc.in, i, got[i], tc.want[i])
+			}
+		}
+	}
+}
+
 func TestSourceDataResourceReplacementsFromRawText(t *testing.T) {
 	raw := "Е0801-002-02 (РМ11762РМ6141)'(61,475)[4]''Устройство основания'м3"
 	got := SourceDataResourceReplacementsFromRawText(raw)
 	if len(got) != 1 || got[0].FromNumber != "11762" || got[0].ToNumber != "6141" {
 		t.Fatalf("unexpected replacements: %#v", got)
+	}
+}
+
+func TestSourceDataResourceDeletionsFromRawText(t *testing.T) {
+	raw := "Е0624-003-02 (РМ34239)'(1)''Удаление ресурса'м3"
+	got := SourceDataResourceDeletionsFromRawText(raw)
+	if len(got) != 1 || got[0].Number != "34239" {
+		t.Fatalf("unexpected deletions: %#v", got)
 	}
 }
 

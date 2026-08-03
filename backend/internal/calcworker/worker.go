@@ -106,8 +106,11 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 		gsnReplacements := make([]gsn.ResourceNumberReplacement, 0, len(replacements))
 		for _, rep := range replacements {
 			gsnReplacements = append(gsnReplacements, gsn.ResourceNumberReplacement{
-				FromNumber: rep.FromNumber,
-				ToNumber:   rep.ToNumber,
+				FromNumber:       rep.FromNumber,
+				ToNumber:         rep.ToNumber,
+				AbsoluteQuantity: rep.AbsoluteQuantity,
+				Coefficient:      rep.Coefficient,
+				HasCoefficient:   rep.HasCoefficient,
 			})
 		}
 		replaced, replaceErr := w.gsn.ApplyResourceNumberReplacements(
@@ -118,6 +121,14 @@ func (w *Worker) processJob(ctx context.Context, job store.EstimateCalcJob) erro
 			return fmt.Errorf("apply resource replacements for %q: %w", code, replaceErr)
 		}
 		record.Resources = replaced
+	}
+
+	if deletions := store.SourceDataResourceDeletionsFromRawText(rawText); len(deletions) > 0 {
+		numbers := make([]string, 0, len(deletions))
+		for _, del := range deletions {
+			numbers = append(numbers, del.Number)
+		}
+		record.Resources = gsn.ApplyResourceNumberDeletions(record.Resources, numbers)
 	}
 
 	pricingStarted := time.Now()
