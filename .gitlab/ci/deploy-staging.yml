@@ -8,6 +8,8 @@ deploy:staging:
   stage: deploy
   image: alpine/k8s:1.33.1
   interruptible: false
+  tags:
+    - newa-staging
   needs:
     - job: publish:image
       artifacts: true
@@ -17,16 +19,17 @@ deploy:staging:
     deployment_tier: staging
   rules: *deploy_staging_rules
   variables:
-    # Set in GitLab CI/CD variables after Agent registration, e.g.
-    # group/newa:newa-staging
-    KUBE_CONTEXT: "${KUBE_CONTEXT}"
+    # Self-hosted runner reaches cluster DNS (newa-staging.local) and kube API.
+    KUBECONFIG: "/home/alexey/.kube/newa-staging-ci"
   before_script:
-    - apk add --no-cache bash curl jq
-    - test -n "${KUBE_CONTEXT}"
+    - command -v bash
+    - command -v curl
+    - command -v jq
+    - command -v kubectl
     - test -n "${IMAGE_REPOSITORY}"
     - test -n "${IMAGE_DIGEST}"
-    - kubectl config get-contexts
-    - kubectl config use-context "${KUBE_CONTEXT}"
+    - test -f "${KUBECONFIG}"
+    - kubectl -n "${STAGING_NAMESPACE}" get deploy nav-api >/dev/null
   script:
     - |
       if [ -n "${STAGING_REGISTRY_USER:-}" ] && [ -n "${STAGING_REGISTRY_PASSWORD:-}" ]; then
