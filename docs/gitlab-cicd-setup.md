@@ -1,28 +1,27 @@
-# GitLab CI/CD setup (target platform)
+# GitLab CI/CD setup (active platform)
 
-GitLab.com is the target CI/CD platform for NewA. GitHub Actions + GHCR remain
-the **active** staging deployer until cutover. Dual auto-deploy must never be
-enabled.
+GitLab.com is the **active** CI/CD platform for NewA staging after cutover.
+GitHub Actions must not auto-deploy to `newa-staging` while
+`GITLAB_CD_ENABLED=true`.
 
 Backup of the pre-migration GitHub solution:
 `backups/2026-08-02_19-09/cicd-snapshot/`.
+Cutover sources backup: `backups/2026-08-03_11-52/`.
 
-## Current migration state
+## Current state
 
 | Piece | Status |
 |---|---|
 | GitLab NewA | `https://gitlab.com/abc-group4363531/NewA` |
-| GitLab ProjectStatus | `https://gitlab.com/abc-group4363531/ProjectStatus` (to create) |
+| GitLab ProjectStatus | `https://gitlab.com/abc-group4363531/ProjectStatus` |
 | Agent `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
-| `.gitlab-ci.yml` + `.gitlab/ci/*` | Updated to match GitHub behavior |
-| BuildKit rootless → GitLab Registry | Ready (shadow publish OK) |
-| Lean deploy via `scripts/deploy-staging.sh` | Ready |
-| Single `resource_group: newa-staging` job | Ready (apply→smoke→LKG) |
-| GitLab Agent config | `.gitlab/agents/newa-staging/config.yaml` |
-| `GITLAB_CD_ENABLED` | **`false`** until GitHub CD disabled |
-| `STAGING_BASE_URL` | Same as GitHub: `http://newa-staging.local` |
-| GitHub Actions | Still active; disable only at cutover |
-| Target | Full cutover to GitLab (not dual forever) |
+| Agent in cluster | Helm `newa-staging` / ns `gitlab-agent-newa-staging` |
+| `.gitlab-ci.yml` + `.gitlab/ci/*` | Active |
+| BuildKit → GitLab Registry | Active on `main` |
+| Lean deploy via `scripts/deploy-staging.sh` | Active |
+| `GITLAB_CD_ENABLED` | **`true`** |
+| `STAGING_BASE_URL` | `http://newa-staging.local` |
+| GitHub Actions deploy/verify | Disabled (`if: false`) |
 
 ## Required GitLab project settings
 

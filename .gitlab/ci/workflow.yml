@@ -1,5 +1,5 @@
-# GitLab is the target CI/CD platform. Until cutover, keep GITLAB_CD_ENABLED
-# unset/false so GitHub Actions remains the only active staging deployer.
+# GitLab is the active CI/CD platform for staging after cutover.
+# Project CI variable GITLAB_CD_ENABLED must stay "true" (overrides default).
 workflow:
   auto_cancel:
     on_new_commit: conservative
@@ -28,6 +28,6 @@ default:
 variables:
   GO_VERSION: "1.25.0"
   STAGING_NAMESPACE: "newa-staging"
-  # Flip to "true" only after GitHub staging CD is disabled.
-  GITLAB_CD_ENABLED: "false"
+  # Default on; keep project variable GITLAB_CD_ENABLED=true as source of truth.
+  GITLAB_CD_ENABLED: "true"
   FF_TIMESTAMPS: "true"

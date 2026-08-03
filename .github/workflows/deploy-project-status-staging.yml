@@ -1,11 +1,7 @@
 name: Deploy ProjectStatus staging
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - deploy/environments/staging/project-status-image.txt
+  # cutover: auto-deploy disabled; use workflow_dispatch or GitLab CD
   workflow_dispatch:
     inputs:
       image:
