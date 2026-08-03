@@ -26,3 +26,19 @@ func TestApplyResourceNumberReplacementsInMemory(t *testing.T) {
 		t.Fatalf("untouched resource = %#v", out[1])
 	}
 }
+
+func TestApplyResourceNumberDeletions(t *testing.T) {
+	resources := []RecordResource{
+		{Code: "С1000-0001-0001", Number: "34239", Name: "drop", QuantityText: "1"},
+		{Code: "С1000-0001-0002", Number: "99999", Name: "keep", QuantityText: "2"},
+		{Code: "М11762", Name: "also-drop", QuantityText: "3"}, // Number from code key
+	}
+
+	out := ApplyResourceNumberDeletions(resources, []string{"34239", "11762"})
+	if len(out) != 1 {
+		t.Fatalf("len=%d, out=%#v", len(out), out)
+	}
+	if out[0].Number != "99999" || out[0].Name != "keep" {
+		t.Fatalf("remaining = %#v", out[0])
+	}
+}
