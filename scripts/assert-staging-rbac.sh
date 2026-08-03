@@ -18,6 +18,16 @@ if kubectl auth can-i create configmaps -n kube-system | grep -Eq '^yes$'; then
   exit 1
 fi
 
+if kubectl auth can-i create roles -n "${NAMESPACE}" | grep -Eq '^yes$'; then
+  echo "RBAC is too broad: deploy identity can create roles in ${NAMESPACE}" >&2
+  exit 1
+fi
+
+if kubectl auth can-i create rolebindings -n "${NAMESPACE}" | grep -Eq '^yes$'; then
+  echo "RBAC is too broad: deploy identity can create rolebindings in ${NAMESPACE}" >&2
+  exit 1
+fi
+
 if ! kubectl auth can-i get pods -n "${NAMESPACE}" | grep -Eq '^yes$'; then
   echo "RBAC is too narrow: deploy identity cannot read pods in ${NAMESPACE}" >&2
   exit 1

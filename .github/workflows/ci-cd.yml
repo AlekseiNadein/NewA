@@ -1,5 +1,8 @@
 name: CI/CD
 
+# Active staging deployer until GitLab cutover.
+# Do not enable GitLab GITLAB_CD_ENABLED while this workflow still deploys.
+
 on:
   pull_request:
   push:

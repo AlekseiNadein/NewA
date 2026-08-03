@@ -46,8 +46,8 @@ jobs:
                 -o jsonpath='{.data.image}'
             )"
           fi
-          if [[ ! "$image" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "Rollback target must be an immutable GHCR digest" >&2
+          if [[ ! "$image" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Rollback target must be an immutable image@sha256:digest" >&2
             exit 1
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"

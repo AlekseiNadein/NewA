@@ -4,6 +4,10 @@ ProjectStatus is developed and built in a separate repository. NewA owns the
 shared `newa-staging` environment and is the only repository that deploys into
 that environment.
 
+Immutable releases are `registry/image@sha256:<digest>` (GHCR today; GitLab
+Container Registry after cutover). Deploy scripts accept any registry host as
+long as the digest form is immutable.
+
 ## Release flow
 
 1. ProjectStatus CI tests the service and publishes an immutable GHCR image.

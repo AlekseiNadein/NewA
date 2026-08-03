@@ -5,37 +5,74 @@ build:affected:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
     - apk add --no-cache git bash
-    - sh scripts/detect-affected-components.sh
+    - bash scripts/detect-affected-components.sh
   artifacts:
     when: always
     paths:
       - out/affected-components.json
       - out/affected-components.env
 
+# Rootless BuildKit publish to GitLab Container Registry.
+# Deploy remains gated by GITLAB_CD_ENABLED so GHCR/GitHub can stay active.
 publish:image:
   stage: publish
   image:
-    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    name: moby/buildkit:rootless
     entrypoint: [""]
   needs:
-    - build:affected
+    - job: validate:go-vet
+    - job: validate:kustomize
+    - job: test:go-unit
+    - job: scan:gitleaks
+    - job: scan:trivy-config-critical
+    - job: build:affected
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-  script:
-    - mkdir -p out
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+  before_script:
+    - mkdir -p ~/.docker out
     - |
-      cat > /kaniko/.docker/config.json <<EOF
-      {"auths":{"$CI_REGISTRY":{"username":"$CI_REGISTRY_USER","password":"$CI_REGISTRY_PASSWORD"}}}
+      cat > ~/.docker/config.json <<EOF
+      {"auths":{"${CI_REGISTRY}":{"username":"${CI_REGISTRY_USER}","password":"${CI_REGISTRY_PASSWORD}"}}}
       EOF
-    - /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/Dockerfile" --destination "$CI_REGISTRY_IMAGE/nav-saas:$CI_COMMIT_SHA" --digest-file out/image-digest.txt
-    - DIGEST="$(cat out/image-digest.txt)"
-    - echo "IMAGE_REPOSITORY=$CI_REGISTRY_IMAGE/nav-saas" > out/publish.env
-    - echo "IMAGE_TAG=$CI_COMMIT_SHA" >> out/publish.env
-    - echo "IMAGE_DIGEST=$DIGEST" >> out/publish.env
+  script:
+    - IMAGE_NAME="${CI_REGISTRY_IMAGE}/nav-saas"
+    - IMAGE_TAG="${IMAGE_NAME}:${CI_COMMIT_SHA}"
+    - |
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=Dockerfile \
+        --output "type=image,name=${IMAGE_TAG},push=true" \
+        --metadata-file out/buildkit-metadata.json \
+        --opt "label:org.opencontainers.image.source=${CI_PROJECT_URL}" \
+        --opt "label:org.opencontainers.image.revision=${CI_COMMIT_SHA}" \
+        --opt "label:org.opencontainers.image.version=${CI_PIPELINE_ID}"
+    - |
+      DIGEST="$(sed -n 's/.*"containerimage\.digest":"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' out/buildkit-metadata.json | head -n1)"
+      case "${DIGEST}" in
+        sha256:*) ;;
+        *)
+          echo "invalid digest from BuildKit metadata: ${DIGEST}" >&2
+          cat out/buildkit-metadata.json >&2
+          exit 1
+          ;;
+      esac
+      IMAGE_NAME="${CI_REGISTRY_IMAGE}/nav-saas"
+      printf '%s\n' "${DIGEST}" > out/image-digest.txt
+      {
+        echo "IMAGE_REPOSITORY=${IMAGE_NAME}"
+        echo "IMAGE_TAG=${CI_COMMIT_SHA}"
+        echo "IMAGE_DIGEST=${DIGEST}"
+      } > out/publish.env
+      echo "Published ${IMAGE_NAME}@${DIGEST}"
   artifacts:
     when: always
     paths:
       - out/image-digest.txt
       - out/publish.env
+      - out/buildkit-metadata.json
     reports:
       dotenv: out/publish.env

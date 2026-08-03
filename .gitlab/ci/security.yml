@@ -1,17 +1,35 @@
 scan:gitleaks:
   stage: scan
-  image: zricethezav/gitleaks:v8.24.2
+  image:
+    name: zricethezav/gitleaks:v8.24.2
+    entrypoint: [""]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
     - gitleaks detect --no-git --source . --redact --exit-code 1
 
-scan:trivy-config:
+# Match the temporary GitHub gate: Critical blocks, High is report-only
+# until local k3s StatefulSet securityContext hardening lands.
+scan:trivy-config-critical:
   stage: scan
-  image: aquasec/trivy:0.65.0
+  image:
+    name: aquasec/trivy:0.65.0
+    entrypoint: [""]
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
-    - trivy config --severity HIGH,CRITICAL --exit-code 1 deploy/k3s deploy/environments/staging Dockerfile
+    - trivy config --severity CRITICAL --exit-code 1 .
+
+scan:trivy-config-high:
+  stage: scan
+  image:
+    name: aquasec/trivy:0.65.0
+    entrypoint: [""]
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - trivy config --severity HIGH,CRITICAL --exit-code 0 deploy

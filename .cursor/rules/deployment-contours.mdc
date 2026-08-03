@@ -34,12 +34,17 @@ ProjectStatus local URLs:
 
 ## CI/CD
 
-- NewA runner: `newa-staging-nadein-envyi5`.
-- Все staging deploy используют concurrency group `newa-staging`.
-- ProjectStatus promotion требует отдельный `NEWA_PROMOTION_TOKEN`.
-- Не использовать широкий пользовательский `gh` token как repository secret.
+- Active CD until cutover: GitHub Actions on runner
+  `newa-staging-nadein-envyi5` (namespace `newa-staging`).
+- Target CD: GitLab Agent + GitLab Registry; gated by
+  `GITLAB_CD_ENABLED` (must stay false while GitHub auto-deploys).
+- NewA runner / Agent identity: namespace-scoped, not cluster-admin.
+- All staging deploy use concurrency / `resource_group` `newa-staging`.
+- ProjectStatus promotion requires separate `NEWA_PROMOTION_TOKEN`.
+- Do not use a broad personal `gh`/`glab` token as repository secret.
 - Last-known-good хранить раздельно:
-  `newa-release-state` и `project-status-release-state`.
+  `newa-release-state` and `project-status-release-state`.
+- Details: `docs/gitlab-cicd-setup.md`, `docs/deployment-context.md`.
 
 ## Перед изменениями
 

@@ -1,47 +1,95 @@
-rollback:staging:
+.rollback_cd_rules: &rollback_cd_rules
+  - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $GITLAB_CD_ENABLED == "true"'
+    when: manual
+    allow_failure: false
+  - if: '$CI_PIPELINE_SOURCE == "web" && $GITLAB_CD_ENABLED == "true"'
+    when: manual
+    allow_failure: false
+
+.rollback_common: &rollback_common
   stage: rollback
-  image: bitnami/kubectl:1.33
+  image: alpine/k8s:1.33.1
+  interruptible: false
   resource_group: newa-staging
   environment:
     name: staging
     action: stop
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      when: manual
-      allow_failure: false
+  before_script:
+    - apk add --no-cache bash curl jq
+    - test -n "${KUBE_CONTEXT}"
+    - kubectl config use-context "${KUBE_CONTEXT}"
+
+rollback:staging:
+  <<: *rollback_common
+  rules: *rollback_cd_rules
   script:
-    - test -n "$KUBE_CONTEXT"
-    - test -n "$LAST_KNOWN_GOOD_IMAGE"
-    - kubectl config use-context "$KUBE_CONTEXT"
-    - kubectl -n newa-staging set image deployment/nav-api nav-api="$LAST_KNOWN_GOOD_IMAGE"
-    - kubectl -n newa-staging set image deployment/nav-auth nav-auth="$LAST_KNOWN_GOOD_IMAGE"
-    - kubectl -n newa-staging set image deployment/nav-calc-worker nav-calc-worker="$LAST_KNOWN_GOOD_IMAGE"
-    - kubectl -n newa-staging rollout status deployment/nav-auth --timeout=300s
-    - kubectl -n newa-staging rollout status deployment/nav-calc-worker --timeout=300s
-    - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
-    - sh scripts/verify-staging.sh
+    - |
+      TARGET_IMAGE="${LAST_KNOWN_GOOD_IMAGE:-}"
+      if [ -z "${TARGET_IMAGE}" ]; then
+        TARGET_IMAGE="$(
+          kubectl -n "${STAGING_NAMESPACE}" get configmap newa-release-state \
+            -o jsonpath='{.data.image}'
+        )"
+      fi
+      test -n "${TARGET_IMAGE}"
+      echo "Rolling back NAV to ${TARGET_IMAGE}"
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-api nav-api="${TARGET_IMAGE}"
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-auth nav-auth="${TARGET_IMAGE}"
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-calc-worker nav-calc-worker="${TARGET_IMAGE}"
+    - bash scripts/verify-staging.sh
+    - bash scripts/smoke-staging-write.sh
 
 rollback:exercise:
-  stage: rollback
-  image: bitnami/kubectl:1.33
-  resource_group: newa-staging
-  environment:
-    name: staging
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      when: manual
-      allow_failure: false
+  <<: *rollback_common
+  rules: *rollback_cd_rules
   script:
-    - test -n "$KUBE_CONTEXT"
-    - test -n "$LAST_KNOWN_GOOD_IMAGE"
-    - kubectl config use-context "$KUBE_CONTEXT"
-    - BAD_IMAGE="${EXERCISE_BAD_IMAGE:-registry.invalid/newa/nav-saas:does-not-exist}"
-    - kubectl -n newa-staging set image deployment/nav-api nav-api="$BAD_IMAGE"
     - |
-      if kubectl -n newa-staging rollout status deployment/nav-api --timeout=120s; then
+      TARGET_IMAGE="${LAST_KNOWN_GOOD_IMAGE:-}"
+      if [ -z "${TARGET_IMAGE}" ]; then
+        TARGET_IMAGE="$(
+          kubectl -n "${STAGING_NAMESPACE}" get configmap newa-release-state \
+            -o jsonpath='{.data.image}'
+        )"
+      fi
+      test -n "${TARGET_IMAGE}"
+      BAD_IMAGE="${EXERCISE_BAD_IMAGE:-registry.invalid/newa/nav-saas:does-not-exist}"
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-api nav-api="${BAD_IMAGE}"
+      if kubectl -n "${STAGING_NAMESPACE}" rollout status deployment/nav-api --timeout=120s; then
         echo "Rollback exercise failed: bad image unexpectedly rolled out" >&2
         exit 1
       fi
-    - kubectl -n newa-staging set image deployment/nav-api nav-api="$LAST_KNOWN_GOOD_IMAGE"
-    - kubectl -n newa-staging rollout status deployment/nav-api --timeout=300s
-    - sh scripts/verify-staging.sh
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-api nav-api="${TARGET_IMAGE}"
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-auth nav-auth="${TARGET_IMAGE}"
+      kubectl -n "${STAGING_NAMESPACE}" set image deployment/nav-calc-worker nav-calc-worker="${TARGET_IMAGE}"
+    - bash scripts/verify-staging.sh
+    - bash scripts/smoke-staging-write.sh
+
+rollback:project-status:staging:
+  <<: *rollback_common
+  rules: *rollback_cd_rules
+  script:
+    - |
+      IMAGE="${PROJECT_STATUS_IMAGE:-}"
+      if [ -z "${IMAGE}" ]; then
+        IMAGE="$(
+          kubectl -n "${STAGING_NAMESPACE}" get configmap project-status-release-state \
+            -o jsonpath='{.data.image}'
+        )"
+      fi
+      if ! printf '%s' "${IMAGE}" | grep -Eq '.+@sha256:[0-9a-f]{64}$'; then
+        echo "Rollback target must be an immutable image@sha256:digest" >&2
+        exit 1
+      fi
+      export PROJECT_STATUS_IMAGE="${IMAGE}"
+      echo "Rolling back ProjectStatus to ${PROJECT_STATUS_IMAGE}"
+    - |
+      REGISTRY_HOST="$(printf '%s' "${PROJECT_STATUS_IMAGE}" | sed -n 's|^\([^/]*\)/.*|\1|p')"
+      test -n "${PROJECT_STATUS_REGISTRY_USER:-}"
+      test -n "${PROJECT_STATUS_REGISTRY_PASSWORD:-}"
+      kubectl -n "${STAGING_NAMESPACE}" create secret docker-registry project-status-registry-pull \
+        --docker-server="${REGISTRY_HOST}" \
+        --docker-username="${PROJECT_STATUS_REGISTRY_USER}" \
+        --docker-password="${PROJECT_STATUS_REGISTRY_PASSWORD}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+    - bash scripts/deploy-project-status-staging.sh
+    - bash scripts/smoke-project-status-staging.sh

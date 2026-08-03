@@ -9,16 +9,22 @@
 |--|--|
 | Репозиторий | `C:\NAV\Cursor\NewA` → `https://github.com/AlekseiNadein/NewA` |
 | Default branch | `main` |
-| Актуальный `origin/main` | `ddc35ba` — merge PR #2 `feature/gsn-resource-replacements` |
-| Локальный `main` | может отставать; ориентироваться на `origin/main` |
+| Активный CD | GitHub Actions + GHCR (до cutover на GitLab) |
+| Миграция на GitLab | ветка `feature/gitlab-cicd-migration`; CD gated `GITLAB_CD_ENABLED=false` |
+| GitLab NewA | `https://gitlab.com/abc-group4363531/NewA` |
+| GitLab ProjectStatus | `https://gitlab.com/abc-group4363531/ProjectStatus` (создаём) |
+| `KUBE_CONTEXT` | `abc-group4363531/NewA:newa-staging` |
+| `STAGING_BASE_URL` | тот же: `http://newa-staging.local` |
+| Цель | полный cutover на GitLab |
+| Бэкап pre-migration | `backups/2026-08-02_19-09/` (sources + `cicd-snapshot`) |
 
 ### Уже в `origin/main`
 
 - GitHub Actions CI/CD для NAV staging (`newa-staging`).
 - Staging-интеграция ProjectStatus (workflows, manifests, scripts, docs).
 - Windows proxy helpers, dual-contour rules.
-- UI import пользовательских позиций из смет (PR #1).
-- Замены ресурсов РМ/РС из source-data при расчёте (PR #2).
+- UI import пользовательских позиций из смет.
+- Замены ресурсов РМ/РС из source-data при расчёте.
 
 ### Staging runtime (проверено)
 
@@ -28,6 +34,14 @@
 - Smoke NAV: Environment secrets `SMOKE_*`.
 - ProjectStatus secrets: `project-status-secrets`,
   `project-status-registry-pull`, Environment `PROJECT_STATUS_GHCR_*`.
+
+## Миграция GitLab (в работе)
+
+Целевая платформа — GitLab.com + GitLab Container Registry + GitLab Agent.
+Пока `GITLAB_CD_ENABLED` не `true`, GitLab **не** деплоит в staging.
+Нельзя одновременно держать auto-deploy на GitHub и GitLab.
+
+Подробности: `docs/gitlab-cicd-setup.md`.
 
 ## Репозитории
 
@@ -90,8 +104,10 @@ cd C:\NAV\Cursor\NewA
 
 - namespace: `newa-staging`;
 - ingress host внутри WSL: `newa-staging.local`;
-- GitHub Actions + GHCR временно заменяют GitLab;
-- self-hosted runner:
+- GitHub Actions + GHCR — **активный** CD до cutover;
+- GitLab CI обновляется в `feature/gitlab-cicd-migration`, но deploy
+  выключен (`GITLAB_CD_ENABLED=false`);
+- self-hosted GitHub runner:
   `newa-staging-nadein-envyi5`, labels
   `self-hosted`, `Linux`, `newa-staging`;
 - kubeconfig runner:
@@ -99,6 +115,7 @@ cd C:\NAV\Cursor\NewA
 - runner имеет namespace-scoped RBAC, не cluster-admin;
 - NAV deploy использует immutable `nav-saas@sha256:...`;
 - last-known-good NAV хранится в ConfigMap `newa-release-state`.
+- целевой транспорт GitLab: Agent `.gitlab/agents/newa-staging`.
 
 Первый зелёный полный NAV staging run (исторически):
 `https://github.com/AlekseiNadein/NewA/actions/runs/30540393140`.
@@ -206,9 +223,10 @@ NAV и ProjectStatus deploy workflows используют общий concurrenc
 ## Канонические документы
 
 - `docs/deployment-context.md` — этот файл, актуальный снимок состояния.
+- `docs/gitlab-cicd-setup.md` — целевой GitLab CI/CD и cutover.
 - `.cursor/rules/deployment-contours.mdc` — краткие инварианты для агента.
 - `deploy/k3s/README.md` — локальный k3s NewA и Windows proxy.
-- `docs/github-actions-setup.md` — runner и основной staging.
+- `docs/github-actions-setup.md` — временный GitHub path (active until cutover).
 - `docs/project-status-ci-cd.md` — staging-интеграция ProjectStatus.
 - `RESOURCE_ANALYTICS_SERVICE_CONTEXT.md` — data/auth/calc contract.
 - `C:\Codex\ProjectStatus\docs\ci-cd.md` — CI отдельного репозитория.
